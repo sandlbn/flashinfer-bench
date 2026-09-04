@@ -27,6 +27,8 @@ class SupportedLanguages(str, Enum):
     """CUDA C++ programming language."""
     TILELANG = "tilelang"
     """TileLang GPU programming language."""
+    SYCL = "sycl"
+    """SYCL C++ for Intel GPUs, compiled with oneAPI DPC++."""
 
 
 class SupportedBindings(str, Enum):

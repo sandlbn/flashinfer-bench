@@ -185,17 +185,32 @@ parts ramp clocks from idle, and the first couple of hundred iterations run meas
 slower than the steady state. This is a default, so any config layer or `--warmup-runs`
 still overrides it.
 
-Warmup does not address every source of variance. On integrated parts, measured latency is
-flat from the very first iteration — there is no ramp — but the package shifts power
-between CPU and GPU, producing sporadic excursions to roughly 2.5x that last for hundreds
-of iterations and then recover. Because those excursions can span more than half a
-measurement, they move the reported median, and a solution identical to the reference can
-report anywhere from 0.9x to 1.6x.
+## Host power settings dominate everything else
 
-<Warning>
-Treat single measurements from an integrated Intel GPU as indicative, not authoritative.
-Raise `--num-trials` and compare distributions rather than one number.
-</Warning>
+Before trusting any measurement, put the host in a performance power profile. This matters
+more than any benchmark parameter.
+
+```bash
+powerprofilesctl set performance    # or: echo performance > /sys/firmware/acpi/platform_profile
+```
+
+Measured on a laptop with an integrated Intel GPU, same kernel, same everything else —
+run-to-run variation of the reported median:
+
+| Platform profile | Variation (CV) | Behavior |
+| --- | --- | --- |
+| `performance` | ~1% | Stable; settles after ~40–80 iterations |
+| `low-power` | ~40–50% | Sporadic ~2.8x excursions lasting hundreds of iterations |
+
+The excursions are not GPU throttling — the GPU sits pinned at its maximum clock
+throughout. It is the memory path being limited, which an integrated GPU depends on
+entirely. Nothing in a trace records that the host was throttling, so a run under a
+power-saving profile produces numbers that look ordinary and mean nothing. Benchmark
+runners emit a warning at startup when they detect a throttling profile or battery power.
+
+Once the host is in a performance profile, the warmup ramp becomes visible and behaves as
+expected: latency settles within 2% of steady state after roughly 40–80 iterations, well
+inside the 200-iteration default.
 
 ### Tensors reach workers through host memory
 
@@ -205,6 +220,21 @@ pickling one raises `_share_fd_: only available on CPU`. The XPU capability reco
 declares this, and baselines are copied through host memory for the crossing. The cost is
 one round trip per workload, not per iteration, and devices that support IPC are
 unaffected.
+
+### Benchmarking against vLLM and SGLang kernels
+
+The kernels vLLM and SGLang ship for Intel are the bar that matters — beating PyTorch eager
+says little. Add them to a dataset as baselines and they are measured like any other
+solution:
+
+```bash
+flashinfer-bench add-baselines --local ./dataset
+flashinfer-bench run --local ./dataset --devices xpu:0
+```
+
+Baselines match strictly on op_type and exact input/output names, so a signature near-miss
+yields no baseline rather than a wrong comparison. Neither library is a dependency; when
+absent, no baselines are offered.
 
 ### Adding a new Intel part
 

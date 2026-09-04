@@ -18,6 +18,7 @@ from .accelerator import (
 from .capabilities import DEFAULT_DTYPES, FP4_DTYPES, FP8_DTYPES, Capabilities
 from .cpu import CpuAccelerator
 from .cuda import CudaAccelerator
+from .power import measurement_warnings, on_battery, platform_profile
 from .timer import CuptiTimer, EventTimer, Timer, WallClockTimer
 from .xpu import XpuAccelerator
 
@@ -41,6 +42,9 @@ __all__ = [
     "get_accelerator",
     "hardware_id",
     "list_devices",
+    "measurement_warnings",
+    "on_battery",
+    "platform_profile",
     "parse_device",
     "register_accelerator",
     "registered_types",

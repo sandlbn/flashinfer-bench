@@ -255,3 +255,22 @@ Post the bench_serving.py log to the HF PR2 discussion under `## SGLang Collecti
 - The existing `collect_workloads.py` dump-processing pipeline (sanitize_dumps.py) is unchanged
 - `bench_serving.py` passes `**os.environ` to the server process, so all `FLASHINFER_*` vars
   set in the outer shell are inherited by the SGLang server automatically
+
+
+## Intel GPUs
+
+**Workloads are hardware-independent; do not re-collect them for Intel.** A workload is a
+set of axis values plus input specs — shapes and dtypes that a real inference run
+exercised. A workload captured from an SGLang run on an H100 is a valid replay input on an
+Intel GPU, and re-collecting it there would produce the same file.
+
+Collection stays on NVIDIA because it depends on SGLang with the FlashInfer backend. Run
+collection there, then benchmark the resulting workloads on whatever hardware you have:
+
+```bash
+flashinfer-bench run --local tmp/flashinfer-trace --devices xpu:0
+```
+
+Definitions whose dtypes the target device cannot execute (FP8 on Xe2, for instance) are
+skipped with an explanation rather than benchmarked — the run reports them, so a skipped
+definition is never mistaken for a broken kernel.

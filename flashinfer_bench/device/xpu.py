@@ -49,32 +49,47 @@ _PART_PROFILES: Dict[str, Dict[str, object]] = {
     # Battlemage (Xe2-HPG), validated hardware.
     "INTEL_ARC_B580": {
         "l2_bytes": 18 * _MIB,
-        "sycl_target": "intel_gpu_bmg_g21",
-        "extra": {"architecture": "Xe2-HPG", "codename": "Battlemage"},
+        "sycl_target": "bmg",
+        "extra": {"architecture": "Xe2-HPG", "codename": "Battlemage", "device_ip_version": 20},
     },
     "INTEL_ARC_B570": {
         "l2_bytes": 18 * _MIB,
-        "sycl_target": "intel_gpu_bmg_g21",
-        "extra": {"architecture": "Xe2-HPG", "codename": "Battlemage"},
+        "sycl_target": "bmg",
+        "extra": {"architecture": "Xe2-HPG", "codename": "Battlemage", "device_ip_version": 20},
     },
     "INTEL_ARC_PRO_B50": {
         "l2_bytes": 18 * _MIB,
-        "sycl_target": "intel_gpu_bmg_g21",
-        "extra": {"architecture": "Xe2-HPG", "codename": "Battlemage"},
+        "sycl_target": "bmg",
+        "extra": {"architecture": "Xe2-HPG", "codename": "Battlemage", "device_ip_version": 20},
     },
     "INTEL_ARC_PRO_B60": {
         "l2_bytes": 18 * _MIB,
-        "sycl_target": "intel_gpu_bmg_g21",
-        "extra": {"architecture": "Xe2-HPG", "codename": "Battlemage"},
+        "sycl_target": "bmg",
+        "extra": {"architecture": "Xe2-HPG", "codename": "Battlemage", "device_ip_version": 20},
     },
-    # Xe3P "Crescent Island". Reserved so traces from early silicon carry a stable id.
-    # Cache size, dtype support and the AOT target triple are all still unpublished --
-    # the defaults keep it correct-but-conservative until the ISA details land.
+    # Xe3P "Crescent Island", device IP version 35. Pre-silicon: sgl-kernel-xpu builds
+    # for it behind a SGL_PRE_SILICON flag. Cache size and dtype support are still
+    # unpublished, so the defaults stay conservative; only the target name is known.
     "INTEL_XE3P_CRESCENT_ISLAND": {
-        "extra": {"architecture": "Xe3P", "codename": "Crescent Island", "status": "preliminary"}
+        "sycl_target": "cri",
+        "extra": {
+            "architecture": "Xe3P",
+            "codename": "Crescent Island",
+            "device_ip_version": 35,
+            "status": "pre-silicon",
+        },
     },
 }
-"""Per-part capability overrides, keyed by canonical device id."""
+"""Per-part capability overrides, keyed by canonical device id.
+
+``sycl_target`` holds the device name oneAPI's offline compiler accepts
+(``-fsycl-targets=spir64_gen`` together with ``-device <name>``), matching the targets
+sgl-kernel-xpu builds for.
+
+Intel identifies GPU generations by a device IP version, readable from
+``torch.xpu.get_device_properties(i).version``: 20 is Xe2 (Battlemage), 30 is Xe3.0
+(Panther Lake / Wildcat Lake integrated graphics), 35 is Xe3.5 (Crescent Island).
+"""
 
 
 @register_accelerator

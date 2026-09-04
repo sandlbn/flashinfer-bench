@@ -1,4 +1,4 @@
-from flashinfer_bench.agents import FFI_PROMPT, FFI_PROMPT_SIMPLE
+from flashinfer_bench.agents import FFI_PROMPT, FFI_PROMPT_SIMPLE, SYCL_PROMPT, SYCL_PROMPT_SIMPLE
 from flashinfer_bench.apply import (
     ApplyConfig,
     ApplyConfigRegistry,
@@ -77,7 +77,9 @@ __all__ = [
     "Environment",
     "Evaluation",
     "EvaluationStatus",
-    # FFI Prompts
+    # Kernel-authoring prompts
     "FFI_PROMPT_SIMPLE",
     "FFI_PROMPT",
+    "SYCL_PROMPT_SIMPLE",
+    "SYCL_PROMPT",
 ]

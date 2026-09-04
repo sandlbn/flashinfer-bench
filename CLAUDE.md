@@ -140,6 +140,24 @@ Start with `flashinfer_bench/data/`. This package defines `Definition`, `Solutio
 Start with `flashinfer_bench/bench/` for the benchmarking engine, and
 `flashinfer_bench/compile/` for the build system that compiles solutions.
 
+### Writing kernels for Intel GPUs
+
+SYCL is a first-class solution language (`spec.language: "sycl"`), built by `SyclBuilder`
+with oneAPI DPC++. Kernels run on PyTorch's own `sycl::queue`, obtained the same way CUDA
+kernels obtain their stream:
+
+```cpp
+sycl::queue* q = static_cast<sycl::queue*>(
+    TVMFFIEnvGetStream(dev.device_type, dev.device_id));
+```
+
+A worked example with a Definition, Solution and workloads lives in `examples/sycl/`.
+`flashinfer_bench.SYCL_PROMPT` is the agent-facing guidance, mirroring `FFI_PROMPT` for
+CUDA.
+
+Definitions and workloads are hardware-agnostic and are never re-collected per backend;
+only solutions and traces carry hardware identity.
+
 ### Device backends and timing
 
 Start with `flashinfer_bench/device/`. Devices are addressed by string (`cuda:0`,
@@ -187,9 +205,12 @@ Start with `.claude/skills/`. Each subdirectory contains a `SKILL.md` with full 
 - **collect-workloads-bench**: Collect workloads using `bench_serving.py` with model-specific
   server configs from `model_configs.json`
 - **add-reference-tests**: Add pytest tests to validate reference implementations against
-  FlashInfer or SGLang ground truth
+  FlashInfer or SGLang ground truth (see its Intel GPUs section for cross-validation)
 - **track-models**: Track open-source LLMs and update `docs/model_coverage.mdx` with kernel
   support status
+- **optimize-intel-kernels**: Write, validate and benchmark SYCL kernels for Intel GPUs
+  against existing definitions; includes the Intel kernel backlog from `sgl-kernel-xpu`
+  and `vllm-xpu-kernels`
 - **clone-repos**: Clone SGLang, FlashInfer, sgl-cookbook, and flashinfer-trace to `tmp/`
 
 ## Common Misunderstandings

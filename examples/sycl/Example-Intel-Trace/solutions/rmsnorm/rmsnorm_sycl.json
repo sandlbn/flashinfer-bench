@@ -1,0 +1,20 @@
+{
+  "name": "rmsnorm_sycl_example",
+  "definition": "rmsnorm_example_h4096",
+  "author": "flashinfer-bench-examples",
+  "spec": {
+    "language": "sycl",
+    "target_hardware": [
+      "xpu"
+    ],
+    "entry_point": "rmsnorm_sycl.cpp::rmsnorm_sycl",
+    "destination_passing_style": true
+  },
+  "sources": [
+    {
+      "path": "rmsnorm_sycl.cpp",
+      "content": "// RMSNorm in SYCL for Intel GPUs.\n//\n// One work-group per row. Each work-group reduces the row's sum of squares with a\n// group collective, then rescales. Demonstrates the parts of SYCL that matter for real\n// kernels: nd_range, group reductions, and running on the framework's own queue.\n//\n// Build: selected automatically by FlashInfer-Bench for solutions tagged\n// \"language\": \"sycl\". Compiled with `icpx -fsycl`.\n\n#include <sycl/sycl.hpp>\n#include <tvm/ffi/container/tensor.h>\n#include <tvm/ffi/error.h>\n#include <tvm/ffi/extra/c_env_api.h>\n#include <tvm/ffi/function.h>\n\nnamespace fib_examples {\n\nnamespace {\nconstexpr size_t kWorkGroupSize = 256;\n}  // namespace\n\n// Argument order follows the Definition: inputs in declaration order, then outputs.\nvoid RMSNormSycl(tvm::ffi::TensorView x, tvm::ffi::TensorView weight, double eps,\n                 tvm::ffi::TensorView out) {\n  TVM_FFI_ICHECK_EQ(x.ndim(), 2) << \"x must be [batch, hidden]\";\n  TVM_FFI_ICHECK_EQ(weight.ndim(), 1) << \"weight must be [hidden]\";\n  TVM_FFI_ICHECK_EQ(weight.size(0), x.size(1)) << \"weight/hidden mismatch\";\n  TVM_FFI_ICHECK_EQ(out.size(0), x.size(0)) << \"out/batch mismatch\";\n  TVM_FFI_ICHECK_EQ(out.size(1), x.size(1)) << \"out/hidden mismatch\";\n\n  const int64_t batch = x.size(0);\n  const int64_t hidden = x.size(1);\n  if (batch == 0 || hidden == 0) return;\n\n  // PyTorch's own queue: already on the right device, and in the context that owns\n  // these pointers. Creating a queue here instead would be undefined behaviour.\n  DLDevice dev = x.device();\n  sycl::queue* q = static_cast<sycl::queue*>(\n      TVMFFIEnvGetStream(dev.device_type, dev.device_id));\n  TVM_FFI_ICHECK(q != nullptr) << \"no SYCL queue for device\";\n\n  const float* x_data = static_cast<const float*>(x.data_ptr());\n  const float* w_data = static_cast<const float*>(weight.data_ptr());\n  float* out_data = static_cast<float*>(out.data_ptr());\n  const float eps_f = static_cast<float>(eps);\n  const float inv_hidden = 1.0f / static_cast<float>(hidden);\n\n  q->parallel_for(\n      sycl::nd_range<1>(static_cast<size_t>(batch) * kWorkGroupSize, kWorkGroupSize),\n      [=](sycl::nd_item<1> item) {\n        const int64_t row = static_cast<int64_t>(item.get_group(0));\n        const size_t lid = item.get_local_id(0);\n        const size_t lsize = item.get_local_range(0);\n\n        const float* row_in = x_data + row * hidden;\n        float* row_out = out_data + row * hidden;\n\n        // Accumulate in float even for lower-precision inputs.\n        float partial = 0.0f;\n        for (int64_t i = static_cast<int64_t>(lid); i < hidden;\n             i += static_cast<int64_t>(lsize)) {\n          const float v = row_in[i];\n          partial += v * v;\n        }\n\n        // Group collective: faster and less error-prone than a manual SLM tree.\n        const float sum_sq =\n            sycl::reduce_over_group(item.get_group(), partial, sycl::plus<float>());\n        const float scale = sycl::rsqrt(sum_sq * inv_hidden + eps_f);\n\n        for (int64_t i = static_cast<int64_t>(lid); i < hidden;\n             i += static_cast<int64_t>(lsize)) {\n          row_out[i] = row_in[i] * scale * w_data[i];\n        }\n      });\n}\n\nTVM_FFI_DLL_EXPORT_TYPED_FUNC(rmsnorm_sycl, RMSNormSycl);\n\n}  // namespace fib_examples\n"
+    }
+  ],
+  "description": "One work-group per row, group reduction for the sum of squares, fused rescale. Runs on PyTorch's own SYCL queue via TVMFFIEnvGetStream."
+}

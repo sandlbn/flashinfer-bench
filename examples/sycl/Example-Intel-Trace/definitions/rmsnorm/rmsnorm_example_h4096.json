@@ -1,0 +1,47 @@
+{
+  "name": "rmsnorm_example_h4096",
+  "description": "RMSNorm over the last dimension, hidden size 4096. Example definition for the SYCL walkthrough.",
+  "op_type": "rmsnorm",
+  "tags": [
+    "stage:example",
+    "status:example"
+  ],
+  "axes": {
+    "batch": {
+      "type": "var"
+    },
+    "hidden": {
+      "type": "const",
+      "value": 4096
+    }
+  },
+  "inputs": {
+    "x": {
+      "shape": [
+        "batch",
+        "hidden"
+      ],
+      "dtype": "float32"
+    },
+    "weight": {
+      "shape": [
+        "hidden"
+      ],
+      "dtype": "float32"
+    },
+    "eps": {
+      "shape": null,
+      "dtype": "float32"
+    }
+  },
+  "outputs": {
+    "out": {
+      "shape": [
+        "batch",
+        "hidden"
+      ],
+      "dtype": "float32"
+    }
+  },
+  "reference": "import torch\n\n\ndef run(x, weight, eps):\n    return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + eps) * weight\n"
+}

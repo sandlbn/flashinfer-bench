@@ -1,0 +1,62 @@
+{
+  "name": "fused_add_rmsnorm_h896",
+  "description": "Residual add fused with RMSNorm, hidden 896 (Qwen2.5-0.5B). Ships in both sgl-kernel-xpu and vllm-xpu-kernels.",
+  "op_type": "rmsnorm",
+  "tags": [
+    "stage:example",
+    "status:example",
+    "model:qwen2.5-0.5b"
+  ],
+  "axes": {
+    "tokens": {
+      "type": "var"
+    },
+    "hidden": {
+      "type": "const",
+      "value": 896
+    }
+  },
+  "inputs": {
+    "x": {
+      "shape": [
+        "tokens",
+        "hidden"
+      ],
+      "dtype": "float32"
+    },
+    "residual": {
+      "shape": [
+        "tokens",
+        "hidden"
+      ],
+      "dtype": "float32"
+    },
+    "weight": {
+      "shape": [
+        "hidden"
+      ],
+      "dtype": "float32"
+    },
+    "eps": {
+      "shape": null,
+      "dtype": "float32"
+    }
+  },
+  "outputs": {
+    "out": {
+      "shape": [
+        "tokens",
+        "hidden"
+      ],
+      "dtype": "float32"
+    },
+    "residual_out": {
+      "shape": [
+        "tokens",
+        "hidden"
+      ],
+      "dtype": "float32"
+    }
+  },
+  "reference": "import torch\n\n\ndef run(x, residual, weight, eps):\n    r = x + residual\n    out = r * torch.rsqrt(r.pow(2).mean(-1, keepdim=True) + eps) * weight\n    return out, r\n"
+}

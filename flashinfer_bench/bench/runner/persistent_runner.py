@@ -19,7 +19,7 @@ from flashinfer_bench.bench.evaluators import resolve_evaluator
 from flashinfer_bench.bench.utils import make_eval
 from flashinfer_bench.compile import BuilderRegistry, BuildError
 from flashinfer_bench.data import Definition, Evaluation, EvaluationStatus, Solution, Workload
-from flashinfer_bench.device import get_accelerator, hardware_id
+from flashinfer_bench.device import get_accelerator, hardware_id, measurement_warnings
 from flashinfer_bench.utils import redirect_stdio_to_tempfile
 
 from .runner import (
@@ -423,6 +423,11 @@ class PersistentRunner(Runner):
             f"Initialized benchmark persistent runner on {len(self._available_devices)} "
             f"{backend} devices and {len(self._workers)} workers"
         )
+
+        # Host throttling is invisible in the results but can dominate them, so say so
+        # up front rather than leaving it to be discovered in the numbers.
+        for warning in measurement_warnings():
+            logger.warning(warning)
 
     def _pick_workers(self, K: int) -> list[PersistentSubprocessWorker]:
         """Pick K workers in round-robin fashion."""

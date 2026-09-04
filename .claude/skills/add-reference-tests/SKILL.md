@@ -165,7 +165,7 @@ def run(...):
     ...
 
 
-def generate_random_inputs(..., device="cuda"):
+def generate_random_inputs(..., device="cuda"):  # pass the actual device; see fixture below
     """Generate random inputs for testing."""
     ...
     return {...}
@@ -208,9 +208,14 @@ if __name__ == "__main__":
        print(f"Testing {description}: {params}")
        print(f"{'='*60}")
 
-       device = "cuda" if torch.cuda.is_available() else "cpu"
+       # Pick whatever accelerator this machine has (CUDA, Intel XPU, ...).
+       # Do not hard-code "cuda": reference tests must run wherever the dataset does.
+       from flashinfer_bench.device import list_devices
+
+       devices = list_devices()
+       device = devices[0] if devices else "cpu"
        if device == "cpu":
-           print("WARNING: CUDA not available, skipping test")
+           print("WARNING: no accelerator available, skipping test")
            return
 
        # Generate inputs
@@ -673,8 +678,11 @@ WORKLOADS_DIR = Path(__file__).parent.parent / "workloads"
 
 @pytest.fixture
 def device():
-    """Get test device (CUDA if available)."""
-    return "cuda" if torch.cuda.is_available() else "cpu"
+    """Get the test device: whichever accelerator this machine has."""
+    from flashinfer_bench.device import list_devices
+
+    devices = list_devices()
+    return devices[0] if devices else "cpu"
 
 
 def load_definition(name: str) -> dict:
@@ -850,3 +858,26 @@ Update this file when changing ground truth sources, test patterns, tolerance va
 
 - [clone-repos](../clone-repos/SKILL.md)
 - [extract-kernel-definitions](../extract-kernel-definitions/SKILL.md)
+
+
+## Intel GPUs
+
+Reference tests validate a Definition's `reference` field against ground truth, and
+neither is hardware-specific. The same tests run on Intel GPUs (`xpu:0`) — select the
+device with `flashinfer_bench.device.list_devices()` rather than hard-coding `"cuda"`, as
+the templates above do.
+
+Two Intel-specific points:
+
+- **Ground truth from FlashInfer or SGLang is CUDA-only.** Where a test compares against
+  those, it can only run on NVIDIA. Mark it `@pytest.mark.requires_torch_cuda`. Tests that
+  compare against plain PyTorch run anywhere.
+- **Cross-validating the reference itself on Intel is a separate step**, and it is
+  mandatory before benchmarking there:
+
+  ```bash
+  flashinfer-bench validate-references --local tmp/flashinfer-trace --device xpu:0
+  ```
+
+  This runs each reference on the device and on the host with identical inputs and
+  quarantines any that disagree. See `docs/start/hardware-support.mdx`.

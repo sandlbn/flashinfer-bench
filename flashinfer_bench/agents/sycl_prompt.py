@@ -1,0 +1,199 @@
+"""Prompt for agents writing SYCL kernels for Intel GPUs.
+
+Mirrors :mod:`flashinfer_bench.agents.ffi_prompt`, which covers CUDA. The two share a
+binding layer (TVM-FFI over DLPack) and differ only in the kernel language and how the
+framework's stream is obtained, so an agent that knows one needs little to write the
+other.
+"""
+
+SYCL_PROMPT_SIMPLE = """
+# Writing SYCL kernels for Intel GPUs with TVM-FFI
+
+You are writing a SYCL kernel that FlashInfer-Bench will compile with oneAPI DPC++
+(`icpx -fsycl`) and load through TVM-FFI. The kernel runs on Intel GPUs.
+
+## The one thing to get right: use the framework's queue
+
+Do NOT create your own `sycl::queue`. SYCL pointers are bound to a `sycl::context`, and
+the tensors you receive belong to PyTorch's context. A queue you create yourself will
+generally have a different context, and using framework pointers with it is undefined
+behaviour.
+
+Ask the environment for the queue instead. This is the exact counterpart of the CUDA path
+(`cudaStream_t stream = TVMFFIEnvGetStream(...)`):
+
+```cpp
+DLDevice dev = x.device();
+sycl::queue* q = static_cast<sycl::queue*>(
+    TVMFFIEnvGetStream(dev.device_type, dev.device_id));
+```
+
+That pointer is PyTorch's own `sycl::queue`, already on the right device and context.
+
+## Do not synchronize
+
+Submit work and return. Do not call `q->wait()`, and do not use
+`sycl::buffer`/`sycl::accessor` (which synchronize on destruction). The benchmark harness
+synchronizes around measurements; a wait inside the kernel serializes execution and makes
+the measurement worse than it should be.
+
+## Complete example
+
+```cpp
+// File: add_one.cpp   (SYCL is C++; use a .cpp extension)
+#include <sycl/sycl.hpp>
+#include <tvm/ffi/container/tensor.h>
+#include <tvm/ffi/error.h>
+#include <tvm/ffi/extra/c_env_api.h>
+#include <tvm/ffi/function.h>
+
+namespace my_kernels {
+
+void AddOne(tvm::ffi::TensorView x, tvm::ffi::TensorView y) {
+  TVM_FFI_ICHECK_EQ(x.ndim(), 1) << "x must be 1D";
+  TVM_FFI_ICHECK_EQ(x.size(0), y.size(0)) << "shape mismatch";
+
+  const int64_t n = x.size(0);
+
+  DLDevice dev = x.device();
+  sycl::queue* q = static_cast<sycl::queue*>(
+      TVMFFIEnvGetStream(dev.device_type, dev.device_id));
+  TVM_FFI_ICHECK(q != nullptr) << "no SYCL queue for device";
+
+  const float* x_data = static_cast<const float*>(x.data_ptr());
+  float* y_data = static_cast<float*>(y.data_ptr());
+
+  q->parallel_for(sycl::range<1>(static_cast<size_t>(n)),
+                  [=](sycl::id<1> i) { y_data[i] = x_data[i] + 1.0f; });
+}
+
+// Export under the name the Solution's entry_point refers to.
+TVM_FFI_DLL_EXPORT_TYPED_FUNC(add_one_sycl, AddOne);
+
+}  // namespace my_kernels
+```
+
+The matching Solution spec:
+
+```json
+{
+  "spec": {
+    "language": "sycl",
+    "target_hardware": ["xpu"],
+    "entry_point": "add_one.cpp::add_one_sycl",
+    "destination_passing_style": true
+  }
+}
+```
+"""
+
+SYCL_PROMPT = SYCL_PROMPT_SIMPLE + """
+## Writing fast SYCL for Intel GPUs
+
+### Work-group and sub-group sizing
+
+Intel GPUs execute in sub-groups (the warp equivalent). Supported widths are reported per
+device; 16 and 32 are the common ones. Pin the sub-group size when your kernel depends on
+it, rather than letting the compiler choose:
+
+```cpp
+q->parallel_for(
+    sycl::nd_range<1>(global_size, local_size),
+    [=](sycl::nd_item<1> item) [[sycl::reqd_sub_group_size(32)]] {
+      // ...
+    });
+```
+
+Use `nd_range` (not plain `range`) whenever you need work-group cooperation, shared local
+memory, or barriers. Choose `local_size` as a multiple of the sub-group size, and keep it
+within the device's `max_work_group_size`.
+
+### Sub-group collectives instead of manual reduction
+
+Sub-group primitives are considerably faster than shared-memory tree reductions and much
+less error-prone:
+
+```cpp
+auto sg = item.get_sub_group();
+float total = sycl::reduce_over_group(sg, value, sycl::plus<float>());
+float shifted = sycl::shift_group_left(sg, value, 1);
+float bcast = sycl::group_broadcast(sg, value, 0);
+```
+
+`sycl::reduce_over_group` also works over the whole work-group with `item.get_group()`.
+
+### Shared local memory
+
+SLM is the counterpart of CUDA shared memory. Allocate it with a local accessor:
+
+```cpp
+q->submit([&](sycl::handler& h) {
+  sycl::local_accessor<float, 1> tile(sycl::range<1>(tile_size), h);
+  h.parallel_for(sycl::nd_range<1>(global, local), [=](sycl::nd_item<1> item) {
+    tile[item.get_local_id(0)] = in[item.get_global_id(0)];
+    sycl::group_barrier(item.get_group());
+    // ...
+  });
+});
+```
+
+The per-device SLM budget is reported as `local_mem_size` (commonly 64-128 KiB). Exceeding
+it fails at launch.
+
+### Vectorized access
+
+Memory-bound kernels usually want wider accesses. `sycl::vec` loads move 4 floats at a
+time:
+
+```cpp
+sycl::vec<float, 4> v;
+v.load(0, sycl::global_ptr<const float>(x_data + i * 4));
+```
+
+Prefer contiguous, coalesced access across the sub-group; strided access costs the same
+here as anywhere else.
+
+### Matrix units
+
+Recent Intel GPUs have XMX/DPAS matrix engines, exposed through
+`sycl::ext::oneapi::experimental::matrix`. A device reports whether it has them
+(`has_subgroup_matrix_multiply_accumulate`). Use them for GEMM-shaped work; do not assume
+they exist without checking, and provide a fallback path.
+
+### Prefer a tuned library where one exists
+
+For standard GEMM, convolution and similar primitives, oneMKL and oneDNN are usually
+faster than hand-written kernels and are already tuned per architecture. Declare them in
+the Solution's `dependencies` (`"onemkl"`, `"onednn"`) and call them on the same queue.
+Hand-write a kernel when you are fusing operations or doing something the libraries do not
+cover.
+
+## Correctness requirements
+
+- Validate shapes and dtypes with `TVM_FFI_ICHECK*` before touching data.
+- Guard against out-of-range indices; the last work-group is usually partial.
+- Match the dtypes in the Definition exactly. `sycl::half` is `float16`;
+  `sycl::ext::oneapi::bfloat16` is `bfloat16`.
+- Accumulate in `float` even when inputs and outputs are half precision, unless the
+  Definition says otherwise.
+
+## Portability
+
+Leaving the AOT target unset compiles to SPIR-V, which is JIT-compiled at load time and
+runs on any supported Intel GPU, including parts released after the kernel was written.
+Write portable code by default: query device properties rather than hard-coding a
+sub-group size or SLM budget for one part.
+
+## Common mistakes
+
+1. Creating a local `sycl::queue` instead of using `TVMFFIEnvGetStream` -- wrong context,
+   undefined behaviour with framework pointers.
+2. Calling `q->wait()` inside the kernel -- serializes and distorts measurement.
+3. Using `sycl::buffer`/`sycl::accessor` with framework pointers -- these take ownership
+   and synchronize; use USM pointers directly.
+4. Assuming a sub-group size of 32 -- query it or pin it explicitly.
+5. Capturing a host pointer in the kernel lambda -- everything a device lambda captures
+   must be device-accessible or trivially copyable by value.
+6. Forgetting `TVM_FFI_DLL_EXPORT_TYPED_FUNC` -- the module will load but the entry point
+   will not be found.
+"""

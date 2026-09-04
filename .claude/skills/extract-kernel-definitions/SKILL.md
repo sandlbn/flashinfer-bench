@@ -507,3 +507,84 @@ schema by hand.
   [`docs/fi_trace.rst`](https://github.com/flashinfer-ai/flashinfer/blob/main/docs/fi_trace.rst).
 - Reference SGLang harness:
   [`tests/trace/example_sglang.py`](https://github.com/flashinfer-ai/flashinfer/blob/main/tests/trace/example_sglang.py).
+
+
+## Path C: hooks on a live HuggingFace model
+
+Path A needs SGLang with the FlashInfer backend, which is CUDA-only. Path B reads a
+`config.json` and gives you a schema but no real shapes. Path C sits between them: run the
+model itself under module hooks on whatever accelerator you have, and emit definitions for
+the operations that actually executed, with workloads at the shapes they actually ran at.
+
+```bash
+python scripts/extract_model_kernels_xpu.py \
+    --model Qwen/Qwen2.5-0.5B-Instruct \
+    --output ./qwen-intel-trace \
+    --max-new-tokens 32
+```
+
+Example output for Qwen2.5-0.5B — 1176 RMSNorm and 2328 linear calls observed in one short
+generation:
+
+```
+rmsnorm_h896_float16          2 workload(s)
+linear_k896_n896_float16      1 workload(s)     # qkv / o projections
+linear_k896_n4864_float16     1 workload(s)     # gate / up
+linear_k4864_n896_float16     1 workload(s)     # down
+```
+
+**What Path C sees and does not see.** It hooks `nn.Module` boundaries, so it captures
+norms, linear projections and anything else that is a module. It does *not* see inside
+fused attention kernels or ops called as bare functions — for those, Path A's trace dump or
+Path B's manual transcription is still the answer. Use Path C to get real shapes for the
+module-level operations quickly, on hardware where Path A cannot run.
+
+Definitions it produces are ordinary hardware-agnostic definitions. Nothing about them is
+Intel-specific; only the route to obtaining them is.
+
+### Attributing time with unitrace
+
+Module hooks tell you which shapes ran, not where the time went. On Intel, `unitrace`
+(intel/pti-gpu) is the Nsight Compute counterpart — per-kernel device time through Level
+Zero and PTI:
+
+```bash
+git clone https://github.com/intel/pti-gpu.git
+cd pti-gpu/tools/unitrace && mkdir build && cd build
+cmake -DCMAKE_BUILD_TYPE=Release .. && cmake --build . -j2
+```
+
+Then either run it directly over a script, or profile one solution on one workload through
+`flashinfer_bench.agents.flashinfer_bench_run_unitrace`, which mirrors the NCU tool and
+runs the same solution runner the benchmark uses.
+
+Use it to rank the backlog. On Qwen2.5-0.5B, `torch.profiler` attribution put GEMM
+(`gemm_kernel` + `aten::mm`) at ~83% of device time, with norms and elementwise ops making
+up most of the rest — so linear projections are where the time is, and oneDNN/oneMKL is the
+first thing to try there rather than a hand-written kernel.
+
+## Intel GPUs
+
+**Definitions are hardware-agnostic and do not need to be re-extracted for Intel.** A
+Definition describes an operation's interface — axes, dtypes, and a plain PyTorch
+reference. Nothing in it is NVIDIA-specific, so a definition harvested from an SGLang run
+on an H100 is exactly the definition an Intel GPU implements.
+
+That matters practically: the harvesting path in this skill needs SGLang with the
+FlashInfer backend, which is CUDA-only. Extract on NVIDIA, then use the result everywhere.
+Do not attempt to re-derive definitions on Intel hardware.
+
+What *is* Intel-specific comes later, and lives elsewhere:
+
+- **Solutions** — a definition can have CUDA, Triton, and SYCL implementations side by
+  side, distinguished by `spec.language` and `spec.target_hardware`. See
+  `examples/sycl/README.md`.
+- **Traces** — record the hardware they ran on (`environment.hardware_id`) and are grouped
+  by it, never ranked across devices.
+
+Before benchmarking any definition on a new Intel device, cross-validate its reference
+there:
+
+```bash
+flashinfer-bench validate-references --local tmp/flashinfer-trace --device xpu:0
+```

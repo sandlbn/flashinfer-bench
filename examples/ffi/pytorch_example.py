@@ -7,8 +7,16 @@ from pathlib import Path
 import torch
 import tvm_ffi
 
+from flashinfer_bench.device import list_devices
+
 
 def main():
+    # The distributed .so is framework-agnostic, but it is built for one backend.
+    # Run it on whichever accelerator this machine actually has.
+    devices = list_devices()
+    device = devices[0] if devices else "cpu"
+    print(f"Running on {device}")
+
     dist_dir = Path("distributed")
     so_path = dist_dir / "kernel.so"
 
@@ -30,12 +38,12 @@ def main():
     M, N, K = 1024, 4096, 4096
 
     torch.manual_seed(0)
-    A = torch.randn(M, K, dtype=torch.float16, device="cuda")
+    A = torch.randn(M, K, dtype=torch.float16, device=device)
 
     torch.manual_seed(1)
-    B = torch.randn(N, K, dtype=torch.float16, device="cuda")
+    B = torch.randn(N, K, dtype=torch.float16, device=device)
 
-    C = torch.empty(M, N, dtype=torch.float16, device="cuda")
+    C = torch.empty(M, N, dtype=torch.float16, device=device)
 
     # Run kernel: C = A @ B.T
     kernel_fn(A, B, C)

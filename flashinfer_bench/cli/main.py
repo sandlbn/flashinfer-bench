@@ -328,6 +328,59 @@ def run(args: argparse.Namespace):
         logger.info(message)
 
 
+def add_baselines(args: argparse.Namespace) -> None:
+    """Add upstream vLLM / SGLang Intel kernels to a dataset as benchmark baselines.
+
+    Beating PyTorch eager is the easy bar; the bar that matters on Intel is beating the
+    SYCL kernels those projects already ship. This writes them into the dataset as ordinary
+    Solutions so a normal benchmark run measures them side by side with everything else.
+    """
+    from flashinfer_bench.integration import available_providers, make_baseline_solutions
+
+    trace_set = TraceSet.from_path(str(args.local))
+    providers = args.providers.split(",") if args.providers else None
+
+    installed = available_providers()
+    if not installed:
+        raise RuntimeError(
+            "No upstream Intel kernel library found. Install vllm-xpu-kernels "
+            "(github.com/vllm-project/vllm-xpu-kernels) or sgl-kernel-xpu "
+            "(github.com/sgl-project/sgl-kernel-xpu)."
+        )
+    logger.info(f"Available kernel providers: {', '.join(installed)}")
+
+    wanted = args.definitions.split(",") if args.definitions else None
+    written = 0
+    unmatched = []
+
+    for name, definition in sorted(trace_set.definitions.items()):
+        if wanted is not None and name not in wanted:
+            continue
+        solutions = make_baseline_solutions(definition, providers)
+        if not solutions:
+            unmatched.append(name)
+            continue
+        out_dir = Path(args.local) / "solutions" / "baseline" / definition.op_type
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for solution in solutions:
+            path = out_dir / f"{_safe_path_segment(solution.name)}.json"
+            save_json_file(solution, path)
+            logger.info(f"{name}: added baseline '{solution.name}'")
+            written += 1
+
+    logger.info(f"Wrote {written} baseline solution(s)")
+    if unmatched:
+        logger.info(
+            f"No upstream kernel matches {len(unmatched)} definition(s): "
+            f"{', '.join(unmatched[:10])}" + (" ..." if len(unmatched) > 10 else "")
+        )
+    if written == 0:
+        logger.warning(
+            "Nothing written. Baselines only apply to definitions whose signature matches "
+            "an upstream kernel exactly; see flashinfer_bench/integration/xpu_kernels.py."
+        )
+
+
 def validate_references(args: argparse.Namespace) -> None:
     """Cross-validate reference implementations on a device before benchmarking it.
 
@@ -682,6 +735,27 @@ def cli():
         "--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"]
     )
     ref_parser.set_defaults(func=validate_references)
+
+    baselines_parser = command_subparsers.add_parser(
+        "add-baselines",
+        help="Add upstream vLLM / SGLang Intel kernels to a dataset as benchmark baselines.",
+    )
+    baselines_parser.add_argument(
+        "--local", type=Path, required=True, help="Path to the trace set dataset."
+    )
+    baselines_parser.add_argument(
+        "--providers",
+        type=str,
+        default=None,
+        help="Comma-separated providers (vllm-xpu, sgl-kernel-xpu). Default: all installed.",
+    )
+    baselines_parser.add_argument(
+        "--definitions", type=str, default=None, help="Comma-separated definition names."
+    )
+    baselines_parser.add_argument(
+        "--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"]
+    )
+    baselines_parser.set_defaults(func=add_baselines)
 
     validate_parser = command_subparsers.add_parser(
         "validate", help="Validate dataset correctness and completeness."

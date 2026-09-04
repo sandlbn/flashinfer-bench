@@ -227,3 +227,24 @@ Update this file when changing repository URLs, directory structure, or adding n
 
 - [extract-kernel-definitions](../extract-kernel-definitions/SKILL.md)
 - [add-reference-tests](../add-reference-tests/SKILL.md)
+
+
+## Intel kernel repositories
+
+Two upstream projects hold the SYCL kernels that Intel serving actually uses. Clone them
+when working on Intel kernel optimization (see the `optimize-intel-kernels` skill); they
+are not needed for model onboarding.
+
+```bash
+git clone --depth 1 https://github.com/sgl-project/sgl-kernel-xpu.git tmp/sgl-kernel-xpu
+git clone --depth 1 https://github.com/vllm-project/vllm-xpu-kernels.git tmp/vllm-xpu-kernels
+```
+
+- **sgl-kernel-xpu** — SGLang's Intel kernels: FMHA, MLA (incl. sparse), GroupGEMM,
+  LoRA SGEMM, GDN attention. Built per-architecture for `bmg` (Battlemage, device IP 20) or
+  `cri` (Crescent Island, IP 35); no other Intel GPU is a supported target.
+- **vllm-xpu-kernels** — vLLM's Intel kernels: norms, RoPE, activations, the fp8/mxfp4
+  quantization family, and KV-cache ops.
+
+Together they are the backlog of kernels worth optimizing on Intel, and the baselines any
+new solution has to beat.

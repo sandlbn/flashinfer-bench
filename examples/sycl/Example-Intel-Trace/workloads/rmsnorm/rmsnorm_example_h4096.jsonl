@@ -1,0 +1,2 @@
+{"definition": "rmsnorm_example_h4096", "workload": {"axes": {"batch": 512, "hidden": 4096}, "inputs": {"x": {"type": "random"}, "weight": {"type": "random"}, "eps": {"type": "scalar", "value": 1e-06}}, "uuid": "rmsnorm-example-b512"}}
+{"definition": "rmsnorm_example_h4096", "workload": {"axes": {"batch": 4096, "hidden": 4096}, "inputs": {"x": {"type": "random"}, "weight": {"type": "random"}, "eps": {"type": "scalar", "value": 1e-06}}, "uuid": "rmsnorm-example-b4096"}}

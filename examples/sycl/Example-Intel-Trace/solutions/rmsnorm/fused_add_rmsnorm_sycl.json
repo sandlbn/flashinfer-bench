@@ -1,0 +1,20 @@
+{
+  "name": "fused_add_rmsnorm_sycl",
+  "definition": "fused_add_rmsnorm_h896",
+  "author": "flashinfer-bench-examples",
+  "spec": {
+    "language": "sycl",
+    "target_hardware": [
+      "xpu"
+    ],
+    "entry_point": "fused_add_rmsnorm_sycl.cpp::fused_add_rmsnorm_sycl",
+    "destination_passing_style": true
+  },
+  "sources": [
+    {
+      "path": "fused_add_rmsnorm_sycl.cpp",
+      "content": "// Fused residual-add + RMSNorm in SYCL for Intel GPUs.\n//\n// This is the shape of kernel that matters on Intel: both sgl-kernel-xpu and\n// vllm-xpu-kernels ship a `fused_add_rms_norm`, because every transformer block runs one\n// per sublayer. Fusing the residual add into the norm halves the memory traffic --\n// the residual is read once and written once, instead of round-tripping through a\n// separate elementwise kernel.\n//\n//   residual_out = x + residual\n//   out          = rmsnorm(residual_out) * weight\n//\n// One work-group per row; a single group reduction for the sum of squares.\n\n#include <sycl/sycl.hpp>\n#include <tvm/ffi/container/tensor.h>\n#include <tvm/ffi/error.h>\n#include <tvm/ffi/extra/c_env_api.h>\n#include <tvm/ffi/function.h>\n\nnamespace fib_examples {\n\nnamespace {\nconstexpr size_t kWorkGroupSize = 256;\n}  // namespace\n\nvoid FusedAddRMSNormSycl(tvm::ffi::TensorView x, tvm::ffi::TensorView residual,\n                         tvm::ffi::TensorView weight, double eps,\n                         tvm::ffi::TensorView out, tvm::ffi::TensorView residual_out) {\n  TVM_FFI_ICHECK_EQ(x.ndim(), 2) << \"x must be [tokens, hidden]\";\n  TVM_FFI_ICHECK_EQ(residual.ndim(), 2) << \"residual must be [tokens, hidden]\";\n  TVM_FFI_ICHECK_EQ(weight.ndim(), 1) << \"weight must be [hidden]\";\n  TVM_FFI_ICHECK_EQ(weight.size(0), x.size(1)) << \"weight/hidden mismatch\";\n\n  const int64_t tokens = x.size(0);\n  const int64_t hidden = x.size(1);\n  if (tokens == 0 || hidden == 0) return;\n\n  DLDevice dev = x.device();\n  sycl::queue* q = static_cast<sycl::queue*>(\n      TVMFFIEnvGetStream(dev.device_type, dev.device_id));\n  TVM_FFI_ICHECK(q != nullptr) << \"no SYCL queue for device\";\n\n  const float* x_data = static_cast<const float*>(x.data_ptr());\n  const float* res_data = static_cast<const float*>(residual.data_ptr());\n  const float* w_data = static_cast<const float*>(weight.data_ptr());\n  float* out_data = static_cast<float*>(out.data_ptr());\n  float* res_out_data = static_cast<float*>(residual_out.data_ptr());\n  const float eps_f = static_cast<float>(eps);\n  const float inv_hidden = 1.0f / static_cast<float>(hidden);\n\n  q->parallel_for(\n      sycl::nd_range<1>(static_cast<size_t>(tokens) * kWorkGroupSize, kWorkGroupSize),\n      [=](sycl::nd_item<1> item) {\n        const int64_t row = static_cast<int64_t>(item.get_group(0));\n        const size_t lid = item.get_local_id(0);\n        const size_t lsize = item.get_local_range(0);\n\n        const float* x_row = x_data + row * hidden;\n        const float* res_row = res_data + row * hidden;\n        float* out_row = out_data + row * hidden;\n        float* res_out_row = res_out_data + row * hidden;\n\n        // Fused add: compute the new residual once, keep it for the rescale pass.\n        float partial = 0.0f;\n        for (int64_t i = static_cast<int64_t>(lid); i < hidden;\n             i += static_cast<int64_t>(lsize)) {\n          const float v = x_row[i] + res_row[i];\n          res_out_row[i] = v;\n          partial += v * v;\n        }\n\n        const float sum_sq =\n            sycl::reduce_over_group(item.get_group(), partial, sycl::plus<float>());\n        const float scale = sycl::rsqrt(sum_sq * inv_hidden + eps_f);\n\n        for (int64_t i = static_cast<int64_t>(lid); i < hidden;\n             i += static_cast<int64_t>(lsize)) {\n          out_row[i] = res_out_row[i] * scale * w_data[i];\n        }\n      });\n}\n\nTVM_FFI_DLL_EXPORT_TYPED_FUNC(fused_add_rmsnorm_sycl, FusedAddRMSNormSycl);\n\n}  // namespace fib_examples\n"
+    }
+  ],
+  "description": "Single pass: residual add, group reduction, fused rescale."
+}

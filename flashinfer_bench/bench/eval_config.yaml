@@ -11,6 +11,15 @@
 # Anything set below overrides it.
 
 op_type_config:
+  # GEMM-shaped work needs far more warmup than the generic default before it settles.
+  # Intel's own Triton benchmark suite uses n_warmup=800 for GEMM and 1000 for GEMM with a
+  # fused epilogue (intel-xpu-backend-for-triton/benchmarks/triton_kernels_benchmark).
+  # Their flash-attention benchmark notes the requirement is per-backend, not per-op:
+  #   n_warmup_bwd = 400  # Maximum across sycl-tla=400, triton=10, onednn=10
+  # A tiled GEMM has autotuning and JIT to settle; an elementwise kernel does not.
+  gemm:
+    warmup_runs: 800
+
   moe:
     required_matched_ratio: 0.95
   sampling:

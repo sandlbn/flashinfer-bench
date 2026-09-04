@@ -11,13 +11,21 @@ from flashinfer_bench.device import default_device_type
 from flashinfer_bench.env import get_fib_cache_path
 
 from .builder import Builder, BuildError
-from .builders import PythonBuilder, TileLangBuilder, TorchBuilder, TritonBuilder, TVMFFIBuilder
+from .builders import (
+    PythonBuilder,
+    SyclBuilder,
+    TileLangBuilder,
+    TorchBuilder,
+    TritonBuilder,
+    TVMFFIBuilder,
+)
 from .runnable import Runnable
 
 _BUILDER_PRIORITY: List[Type[Builder]] = [
     TritonBuilder,
     TileLangBuilder,
     PythonBuilder,
+    SyclBuilder,
     TVMFFIBuilder,
     TorchBuilder,
 ]
@@ -75,6 +83,7 @@ class BuilderRegistry:
         - TritonBuilder: Build Triton solutions.
         - TileLangBuilder: Build TileLang solutions.
         - PythonBuilder: Build Python solutions.
+        - SyclBuilder: Build SYCL solutions with oneAPI DPC++.
         - TVMFFIBuilder: Build CUDA/C++ solutions using TVM-FFI backend.
         - TorchBuilder: Build CUDA/C++ solutions using PyTorch extension system.
 
