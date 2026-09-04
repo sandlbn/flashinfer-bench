@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import subprocess
@@ -25,18 +26,56 @@ from flashinfer_bench.data import (
 from flashinfer_bench.utils import dtype_str_to_torch_dtype, env_snapshot
 
 
-def _rand_tensor(shape: List[int], dtype: torch.dtype, device: torch.device) -> torch.Tensor:
-    if dtype in (torch.float32, torch.float16, torch.bfloat16):
-        return torch.randn(shape, dtype=dtype, device=device)
+def _workload_seed(definition: Definition, workload: Workload, trial: int) -> int:
+    """Derive a deterministic RNG seed from the workload identity and trial index.
 
-    # low-precision floats
+    Seeding from the workload rather than a global counter makes a benchmark run
+    reproducible from the dataset alone, and makes two backends generate bit-identical
+    inputs for the same workload -- which is what allows a reference implementation to be
+    cross-validated against another device.
+
+    Distinct trials still get distinct data, so multiple trials remain a real test of the
+    solution rather than the same tensors measured repeatedly.
+    """
+    h = hashlib.sha256()
+    h.update(definition.name.encode())
+    h.update(workload.uuid.encode())
+    h.update(repr(sorted(workload.axes.items())).encode())
+    h.update(str(trial).encode())
+    return int.from_bytes(h.digest()[:8], "big") % ((1 << 63) - 1)
+
+
+def _rand_tensor(
+    shape: List[int],
+    dtype: torch.dtype,
+    device: torch.device,
+    generator: Optional[torch.Generator] = None,
+) -> torch.Tensor:
+    """Generate a random tensor on the host, then move it to ``device``.
+
+    Generation is always done on the CPU even when the target is an accelerator. Device
+    RNG streams differ between backends, so generating on-device would make the same
+    workload produce different inputs on CUDA and XPU, and no cross-backend comparison
+    of a reference implementation would be meaningful. The cost is one host-to-device
+    copy per tensor per trial, amortised against warmup and timed iterations.
+    """
+    cpu = torch.device("cpu")
+
+    if dtype in (torch.float32, torch.float16, torch.bfloat16):
+        return torch.randn(shape, dtype=dtype, device=cpu, generator=generator).to(device=device)
+
+    # low-precision floats: generate and clamp in fp32, narrow on the target device
     if dtype in (torch.float8_e4m3fn, torch.float8_e5m2, torch.float4_e2m1fn_x2):
-        t = torch.randn(shape, dtype=torch.float32, device=device).clamp_(-2.0, 2.0)
-        return t.to(dtype)
+        t = torch.randn(shape, dtype=torch.float32, device=cpu, generator=generator).clamp_(
+            -2.0, 2.0
+        )
+        return t.to(device=device).to(dtype)
 
     # booleans
     if dtype is torch.bool:
-        return torch.randint(0, 2, shape, dtype=torch.bool, device=device)
+        return torch.randint(0, 2, shape, dtype=torch.bool, device=cpu, generator=generator).to(
+            device=device
+        )
 
     # integers
     if dtype in (torch.int8, torch.int16, torch.int32, torch.int64):
@@ -47,7 +86,9 @@ def _rand_tensor(shape: List[int], dtype: torch.dtype, device: torch.device) -> 
             torch.int64: (-1024, 1024),
         }
         low, high = ranges[dtype]
-        return torch.randint(low, high, shape, device=device, dtype=dtype)
+        return torch.randint(low, high, shape, device=cpu, dtype=dtype, generator=generator).to(
+            device=device
+        )
 
     raise ValueError(f"Unsupported random dtype: {dtype}")
 
@@ -261,14 +302,26 @@ def gen_inputs(
     workload: Workload,
     device: str,
     safe_tensors: Optional[Dict[str, torch.Tensor]] = None,
+    trial: int = 0,
 ) -> List[Any]:
     """Generate input tensors in definition order.
 
     Returns a list of input values (tensors or scalars) in the same order
     as definition.inputs.
+
+    Random inputs are deterministic in ``(definition, workload, trial)``: the same trial
+    of the same workload yields the same tensors on every run and on every backend. See
+    :func:`_workload_seed`.
+
+    Parameters
+    ----------
+    trial : int
+        Index of the benchmark trial. Different trials produce different data.
     """
     shapes = definition.get_input_shapes(workload.axes)
     dev = torch.device(device)
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(_workload_seed(definition, workload, trial))
     out: List[Any] = []
 
     for idx, (name, spec) in enumerate(definition.inputs.items()):
@@ -285,9 +338,9 @@ def gen_inputs(
             shape = shapes[idx]
 
             if shape is None:
-                value = _rand_tensor((), dtype, dev).item()
+                value = _rand_tensor((), dtype, dev, generator).item()
             else:
-                value = _rand_tensor(shape, dtype, dev)
+                value = _rand_tensor(shape, dtype, dev, generator)
 
                 if is_sampling_operation(definition) and name == "probs":
                     value = torch.softmax(value, dim=-1)  # convert logits to probs for sampling

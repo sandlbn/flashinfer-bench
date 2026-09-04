@@ -20,6 +20,7 @@ from flashinfer_bench.data import (
     TraceSet,
     Workload,
 )
+from flashinfer_bench.device import get_accelerator
 from flashinfer_bench.env import get_fib_dataset_path, get_fib_enable_tracing
 from flashinfer_bench.utils import dtype_str_to_torch_dtype
 
@@ -320,8 +321,9 @@ class TracingRuntime:
         The deferred entries buffer is cleared after processing.
         """
         # Synchronize CUDA before taking snapshots
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
+        accelerator = get_accelerator()
+        if accelerator.type != "cpu":
+            accelerator.synchronize()
 
         for entry in self._cuda_graph_entries:
             # Create CPU snapshots

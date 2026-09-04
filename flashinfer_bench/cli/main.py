@@ -256,9 +256,12 @@ def serve(args: argparse.Namespace):
     if devices is None:
         import flashinfer_bench.utils as fib_utils
 
-        devices = fib_utils.list_cuda_devices()
+        devices = fib_utils.list_devices()
     if not devices:
-        raise RuntimeError("No CUDA devices available")
+        raise RuntimeError(
+            "No benchmark devices available. Set FIB_DEVICE_BACKEND to select a "
+            "backend explicitly (cuda, xpu, cpu)."
+        )
 
     config = BenchmarkConfig(
         warmup_runs=args.warmup_runs,
@@ -424,7 +427,7 @@ def cli():
         "--devices",
         type=str,
         default=None,
-        help="Comma-separated CUDA devices (e.g. cuda:0,cuda:1). Default: all available.",
+        help="Comma-separated devices (e.g. cuda:0,cuda:1 or xpu:0). Default: all available.",
     )
     serve_parser.add_argument("--host", type=str, default="0.0.0.0", help="Server host")
     serve_parser.add_argument("--port", type=int, default=8000, help="Server port")

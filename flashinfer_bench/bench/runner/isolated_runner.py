@@ -17,6 +17,7 @@ from flashinfer_bench.bench.evaluators import resolve_evaluator
 from flashinfer_bench.bench.utils import make_eval
 from flashinfer_bench.compile import BuilderRegistry, Runnable
 from flashinfer_bench.data import Definition, Evaluation, EvaluationStatus, Solution, Workload
+from flashinfer_bench.device import get_accelerator
 from flashinfer_bench.utils import redirect_stdio_to_tempfile
 
 from .runner import BaselineHandle, DeviceBaseline, Runner, RunnerError, RunnerFatalError
@@ -25,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 
 class SubprocessWorker:
-    """Each instance binds to a CUDA device; the baseline resides in the main process; each Solution starts an independent Worker process for strong isolation."""
+    """Each instance binds to one device; the baseline resides in the main process; each Solution starts an independent Worker process for strong isolation."""
 
     def __init__(self, device: str) -> None:
         """Per device subprocess worker
@@ -220,7 +221,7 @@ def _solution_worker_main(
     """
     log_path = redirect_stdio_to_tempfile()
     try:
-        torch.cuda.set_device(int(device.split(":")[1]))
+        get_accelerator(device).set_device(device)
         registry = BuilderRegistry.get_instance()
 
         # Handshake
@@ -287,16 +288,20 @@ class IsolatedRunner(Runner):
         self._device_retry_counts: Dict[str, int] = {}
         self._worker_max_retries = 3
 
-        self._available_devices = fib_utils.list_cuda_devices()
+        self._available_devices = fib_utils.list_devices()
         self._workers = [SubprocessWorker(d) for d in self._available_devices]
         self._curr_worker_idx = 0
 
         if len(self._workers) == 0:
-            raise RuntimeError("No CUDA devices available")
+            raise RuntimeError(
+                "No benchmark devices available. Set FIB_DEVICE_BACKEND to select a "
+                "backend explicitly (cuda, xpu, cpu)."
+            )
 
+        backend = get_accelerator(self._available_devices[0]).type
         logger.info(
-            f"Initialized benchmark multi-process on {len(self._available_devices)} CUDA devices "
-            f"and {len(self._workers)} workers"
+            f"Initialized benchmark multi-process on {len(self._available_devices)} "
+            f"{backend} devices and {len(self._workers)} workers"
         )
 
     def _pick_workers(self, K: int) -> list[SubprocessWorker]:

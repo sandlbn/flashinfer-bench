@@ -26,6 +26,7 @@ FlashInfer-Bench is a GPU kernel optimization benchmarking framework for:
 flashinfer-bench/
 ├── flashinfer_bench/           # Main Python package
 │   ├── data/                   #   Definition, Solution, Workload, Trace data classes
+│   ├── device/                 #   Accelerator abstraction (CUDA / Intel XPU / CPU)
 │   ├── bench/                  #   Benchmarking engine + evaluators
 │   ├── compile/                #   Build system (Python/Triton/CUDA)
 │   ├── apply/                  #   Kernel auto-replacement API
@@ -139,6 +140,19 @@ Start with `flashinfer_bench/data/`. This package defines `Definition`, `Solutio
 Start with `flashinfer_bench/bench/` for the benchmarking engine, and
 `flashinfer_bench/compile/` for the build system that compiles solutions.
 
+### Device backends and timing
+
+Start with `flashinfer_bench/device/`. Devices are addressed by string (`cuda:0`,
+`xpu:0`, `cpu`) and every backend-specific operation -- synchronization, device
+selection, cache management, timing methodology, capability reporting -- goes through
+`get_accelerator(device)`. Benchmark, evaluator and runner code must contain no vendor
+branches; add a backend by registering an `Accelerator`, and a new device within an
+existing backend by adding a capability record.
+
+Timing methodologies are not interchangeable (CUPTI device-side duration vs. device
+events including launch overhead), so the timer used is recorded in every trace at
+`evaluation.environment.libs.timing`.
+
 ### Kernel auto-replacement at runtime
 
 Start with `flashinfer_bench/apply/`. The `apply(...)` function is the shared entry point
@@ -215,6 +229,7 @@ Update `CLAUDE.md` when any of the following change:
 
 - The internal vs external trace boundary or sync lifecycle
 - Repository directory structure
+- The set of supported device backends or the timing methodology per backend
 - Core concept definitions
 - The definition JSON schema conventions
 

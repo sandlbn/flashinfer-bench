@@ -19,6 +19,7 @@ from flashinfer_bench.bench.evaluators import resolve_evaluator
 from flashinfer_bench.bench.utils import make_eval
 from flashinfer_bench.compile import BuilderRegistry, BuildError
 from flashinfer_bench.data import Definition, Evaluation, EvaluationStatus, Solution, Workload
+from flashinfer_bench.device import get_accelerator
 from flashinfer_bench.utils import redirect_stdio_to_tempfile
 
 from .runner import BaselineHandle, DeviceBaseline, Runner, RunnerError, RunnerFatalError
@@ -118,9 +119,10 @@ class PersistentSubprocessWorker:
 
         # Clear GPU memory after worker shutdown
         try:
-            torch.cuda.set_device(int(self._device.split(":")[1]))
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize(device=self._device)
+            accelerator = get_accelerator(self._device)
+            accelerator.set_device(self._device)
+            accelerator.empty_cache()
+            accelerator.synchronize(self._device)
         except Exception:
             pass
 
@@ -395,17 +397,21 @@ class PersistentRunner(Runner):
         self._device_retry_counts: Dict[str, int] = {}
         self._worker_max_retries = 3
 
-        self._available_devices = fib_utils.list_cuda_devices()
+        self._available_devices = fib_utils.list_devices()
         self._workers = [PersistentSubprocessWorker(d) for d in self._available_devices]
 
         self._curr_worker_idx = 0
 
         if len(self._workers) == 0:
-            raise RuntimeError("No CUDA devices available")
+            raise RuntimeError(
+                "No benchmark devices available. Set FIB_DEVICE_BACKEND to select a "
+                "backend explicitly (cuda, xpu, cpu)."
+            )
 
+        backend = get_accelerator(self._available_devices[0]).type
         logger.info(
-            f"Initialized benchmark persistent runner on {len(self._available_devices)} CUDA devices "
-            f"and {len(self._workers)} workers"
+            f"Initialized benchmark persistent runner on {len(self._available_devices)} "
+            f"{backend} devices and {len(self._workers)} workers"
         )
 
     def _pick_workers(self, K: int) -> list[PersistentSubprocessWorker]:
@@ -642,8 +648,9 @@ def _persistent_worker_main(conn: mp.connection.Connection, device: str) -> None
     device : str
         Device string (e.g. "cuda:0").
     """
+    accelerator = get_accelerator(device)
     try:
-        torch.cuda.set_device(int(device.split(":")[1]))
+        accelerator.set_device(device)
         registry = BuilderRegistry.get_instance()
 
         conn.send({"cmd": WorkerResponse.READY.value})
@@ -662,7 +669,7 @@ def _persistent_worker_main(conn: mp.connection.Connection, device: str) -> None
                         # GPU health check
                         test_tensor = torch.zeros(1, device=device)
                         test_tensor += 1
-                        torch.cuda.synchronize(device=device)
+                        accelerator.synchronize(device)
                         del test_tensor
                         conn.send({"cmd": WorkerResponse.HEALTHY.value})
                     except Exception:

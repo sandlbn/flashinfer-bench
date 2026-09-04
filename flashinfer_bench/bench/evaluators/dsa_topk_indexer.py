@@ -14,9 +14,10 @@ from typing_extensions import override
 from flashinfer_bench.bench.config import ResolvedEvalConfig
 from flashinfer_bench.bench.runner.runner import BaselineHandle, DeviceBaseline
 from flashinfer_bench.bench.timing import time_runnable
-from flashinfer_bench.bench.utils import gen_inputs, load_safetensors, make_eval
+from flashinfer_bench.bench.utils import _workload_seed, gen_inputs, load_safetensors, make_eval
 from flashinfer_bench.compile import BuilderRegistry, Runnable
 from flashinfer_bench.data import Correctness, Definition, Evaluation, EvaluationStatus, Workload
+from flashinfer_bench.device import device_synchronize
 
 from .default import DefaultEvaluator
 from .utils import allocate_outputs, normalize_result
@@ -237,20 +238,32 @@ class DsaTopkIndexerEvaluator(DefaultEvaluator):
         outputs: List[List[torch.Tensor]] = []
         dev = torch.device(device)
 
-        for _ in range(cfg.num_trials):
-            inp = gen_inputs(definition, workload, device=device, safe_tensors=loaded_safe_tensors)
+        for trial in range(cfg.num_trials):
+            inp = gen_inputs(
+                definition, workload, device=device, safe_tensors=loaded_safe_tensors, trial=trial
+            )
 
             if k_cache_is_random:
                 num_pages = inp[k_cache_idx].shape[0]
+                # Generated on the host from the same workload seed as gen_inputs, so
+                # this evaluator stays reproducible and comparable across backends.
+                k_gen = torch.Generator(device="cpu")
+                k_gen.manual_seed(_workload_seed(definition, workload, trial))
                 k_bf16 = torch.randn(
-                    num_pages, page_size, 1, head_dim, dtype=torch.bfloat16, device=dev
-                )
+                    num_pages,
+                    page_size,
+                    1,
+                    head_dim,
+                    dtype=torch.bfloat16,
+                    device="cpu",
+                    generator=k_gen,
+                ).to(dev)
                 inp[k_cache_idx] = _pack_fp8_k_cache(k_bf16, page_size, head_dim)
 
             inputs.append(inp)
             with torch.no_grad():
                 result = ref_runnable(*inp)
-            torch.cuda.synchronize(device)
+            device_synchronize(device)
             outputs.append(normalize_result(definition, result, device))
 
         if cfg.profile_baseline:
@@ -298,11 +311,11 @@ class DsaTopkIndexerEvaluator(DefaultEvaluator):
                     out = allocate_outputs(definition, inp, device)
                     with torch.no_grad():
                         sol_runnable(*inp, *out)
-                    torch.cuda.synchronize(device)
+                    device_synchronize(device)
                 else:
                     with torch.no_grad():
                         result = sol_runnable(*inp)
-                    torch.cuda.synchronize(device)
+                    device_synchronize(device)
                     out = normalize_result(definition, result, device)
             except Exception:
                 traceback.print_exc()

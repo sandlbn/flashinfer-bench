@@ -7,6 +7,7 @@ from typing import ClassVar, Dict, List, Type
 import filelock
 
 from flashinfer_bench.data import BuildSpec, Definition, Solution, SourceFile, SupportedLanguages
+from flashinfer_bench.device import default_device_type
 from flashinfer_bench.env import get_fib_cache_path
 
 from .builder import Builder, BuildError
@@ -181,7 +182,7 @@ class BuilderRegistry:
             author="__builtin__",
             spec=BuildSpec(
                 language=SupportedLanguages.PYTHON,
-                target_hardware=["cuda"],
+                target_hardware=[default_device_type()],
                 entry_point="main.py::run",
                 destination_passing_style=False,
             ),

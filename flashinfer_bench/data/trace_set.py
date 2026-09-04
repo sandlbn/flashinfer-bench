@@ -758,7 +758,7 @@ class TraceSet:
         # Throw error if the tensor path exists
         if file_path.exists():
             raise ValueError(f"Tensor save path already exists: {file_path}")
-        cpu_tensors = {k: (v.cpu() if v.is_cuda else v) for k, v in tensors.items()}
+        cpu_tensors = {k: (v.cpu() if v.device.type != "cpu" else v) for k, v in tensors.items()}
         safetensors.torch.save_file(cpu_tensors, file_path)
         return str(file_path.relative_to(self.root))
 

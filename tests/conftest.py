@@ -4,6 +4,22 @@ from typing import List
 import pytest
 
 
+def _backend_available(backend: str) -> bool:
+    """Check whether an accelerator backend is usable in this environment.
+
+    Returns
+    -------
+    bool
+        True if the backend is registered and reports itself available.
+    """
+    try:
+        from flashinfer_bench.device import get_accelerator
+
+        return type(get_accelerator(backend)).is_available()
+    except Exception:
+        return False
+
+
 def _torch_cuda_available() -> bool:
     """Check if CUDA is available from PyTorch.
 
@@ -12,23 +28,46 @@ def _torch_cuda_available() -> bool:
     bool
         True if CUDA is available from PyTorch, False otherwise.
     """
-    try:
-        import torch
+    return _backend_available("cuda")
 
-        return torch.cuda.is_available()
-    except ImportError:
-        return False
+
+def _torch_xpu_available() -> bool:
+    """Check if an Intel XPU is available from PyTorch.
+
+    Returns
+    -------
+    bool
+        True if an XPU is available from PyTorch, False otherwise.
+    """
+    return _backend_available("xpu")
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: List[pytest.Item]) -> None:
-    """Modify pytest collection to skip tests that require CUDA when CUDA is not available."""
-    if _torch_cuda_available():
-        return
+    """Skip tests whose required accelerator backend is not present."""
+    has_cuda = _torch_cuda_available()
+    has_xpu = _torch_xpu_available()
 
-    skip_cuda = pytest.mark.skip(reason="CUDA not available from PyTorch, skip test")
+    skips = {
+        "requires_torch_cuda": (
+            has_cuda,
+            pytest.mark.skip(reason="CUDA not available from PyTorch, skip test"),
+        ),
+        "requires_torch_xpu": (
+            has_xpu,
+            pytest.mark.skip(reason="Intel XPU not available from PyTorch, skip test"),
+        ),
+        "requires_accelerator": (
+            has_cuda or has_xpu,
+            pytest.mark.skip(reason="No accelerator available from PyTorch, skip test"),
+        ),
+    }
+
     for item in items:
-        if any(item.iter_markers(name="requires_torch_cuda")):
-            item.add_marker(skip_cuda)
+        for marker_name, (available, skip_marker) in skips.items():
+            if available:
+                continue
+            if any(item.iter_markers(name=marker_name)):
+                item.add_marker(skip_marker)
 
 
 @pytest.fixture

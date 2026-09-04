@@ -27,7 +27,6 @@ dependencies = [
   "torch>=2.8.0",
   "pydantic>=2.0.0",
   "safetensors>=0.5.0",
-  "flashinfer-python>=0.6.4",
   "apache-tvm-ffi>=0.1.2",
   "docstring-parser>=0.16",
   "pyyaml>=6.0",
@@ -55,7 +54,10 @@ dev = [
   "setuptools",
 ]
 serve = ["fastapi>=0.100.0", "uvicorn[standard]>=0.20.0"]
-cuda12 = ["nvidia-cublas-cu12>=12.3", "nvidia-cudnn-cu12>=9.0"]
+# CUPTI-based kernel timing. Without it, CUDA kernels are timed with device events,
+# which include launch overhead and are not comparable to CUPTI numbers.
+cuda = ["flashinfer-python>=0.6.4"]
+cuda12 = ["nvidia-cublas-cu12>=12.3", "nvidia-cudnn-cu12>=9.0", "flashinfer-python>=0.6.4"]
 
 [project.scripts]
 flashinfer-bench = "flashinfer_bench.cli.main:cli"
@@ -102,7 +104,11 @@ strict = true
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 addopts = "-rA --durations=0 --ignore=3rdparty"
-markers = ["requires_torch_cuda: tests that require torch and CUDA available"]
+markers = [
+  "requires_torch_cuda: tests that require torch and CUDA available",
+  "requires_torch_xpu: tests that require torch and an Intel XPU available",
+  "requires_accelerator: tests that require any non-CPU accelerator",
+]
 log_cli = true
 log_cli_level = "INFO"
 

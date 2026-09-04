@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import platform
 import sys
 import tempfile
 from functools import cache
@@ -98,22 +97,33 @@ def is_dtype_integer(dtype: torch.dtype) -> bool:
 
 def is_cuda_available() -> bool:
     """Check if CUDA is available."""
-    import torch
+    from flashinfer_bench.device import CudaAccelerator
 
-    return torch.cuda.is_available()
+    return CudaAccelerator.is_available()
 
 
 def list_cuda_devices() -> List[str]:
-    import torch
+    """List visible CUDA devices.
 
-    n = torch.cuda.device_count()
-    return [f"cuda:{i}" for i in range(n)]
+    Deprecated in favour of :func:`list_devices`, which honours the configured backend.
+    """
+    from flashinfer_bench.device import CudaAccelerator
+
+    return CudaAccelerator().list_devices()
+
+
+def list_devices() -> List[str]:
+    """List visible devices of the configured backend (see ``FIB_DEVICE_BACKEND``)."""
+    from flashinfer_bench.device import list_devices as _list_devices
+
+    return _list_devices()
 
 
 def env_snapshot(device: str) -> Environment:
     import torch
 
     from flashinfer_bench.data import Environment
+    from flashinfer_bench.device import get_accelerator
 
     libs: Dict[str, str] = {"torch": torch.__version__}
     try:
@@ -130,40 +140,28 @@ def env_snapshot(device: str) -> Environment:
     except Exception:
         pass
 
-    try:
-        import torch.version as tv
+    accelerator = get_accelerator(device)
+    libs.update(accelerator.lib_versions())
+    # How the latency was measured, so numbers from different backends are never
+    # silently compared as if one methodology produced both.
+    libs["timing"] = accelerator.make_timer(device).name
 
-        if getattr(tv, "cuda", None):
-            libs["cuda"] = tv.cuda
-    except Exception:
-        pass
     return Environment(hardware=hardware_from_device(device), libs=libs)
 
 
 def hardware_from_device(device: str) -> str:
+    """Raw vendor name of ``device``, as recorded in ``Environment.hardware``."""
     import torch
 
+    from flashinfer_bench.device import get_accelerator
+
     d = torch.device(device)
-    if d.type == "cuda":
-        return torch.cuda.get_device_name(d.index)
-    if d.type == "cpu":
-        # Best-effort CPU model
-        try:
-            with open("/proc/cpuinfo") as f:
-                for line in f:
-                    if line.startswith("model name"):
-                        return line.split(":", 1)[1].strip()
-        except Exception:
-            pass
-        return platform.processor() or platform.machine() or "CPU"
     if d.type == "mps":
         return "Apple GPU (MPS)"
-    if d.type == "xpu" and hasattr(torch, "xpu"):
-        try:
-            return torch.xpu.get_device_name(d.index)
-        except Exception:
-            return "Intel XPU"
-    return d.type
+    try:
+        return get_accelerator(device).device_name(device)
+    except Exception:
+        return d.type
 
 
 def redirect_stdio_to_tempfile() -> str:

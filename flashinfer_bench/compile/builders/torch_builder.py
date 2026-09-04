@@ -40,18 +40,23 @@ class TorchBuilder(Builder):
 
     @staticmethod
     def is_available() -> bool:
-        """Check if CUDA is available in the current environment.
+        """Check if PyTorch's C++/CUDA extension loader is usable.
+
+        Availability is about the *toolchain*, not the device: C++ solutions build and
+        run without any GPU present. Whether a specific solution can be built is decided
+        by :meth:`can_build`, and whether a CUDA source file compiles is decided by
+        ``torch.utils.cpp_extension`` at build time.
 
         Returns
         -------
         bool
-            True if PyTorch is installed and CUDA is available, False otherwise.
+            True if PyTorch is installed, False otherwise.
         """
         try:
-            import torch
+            import torch  # noqa: F401
         except ImportError:
             return False
-        return torch.cuda.is_available()
+        return True
 
     def can_build(self, solution: Solution) -> bool:
         """Check if this builder can handle the given solution. The solution should be CUDA or

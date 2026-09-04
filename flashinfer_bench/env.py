@@ -55,3 +55,19 @@ def get_fib_cache_path() -> Path:
     if value:
         return Path(value).expanduser()
     return Path.home() / ".cache" / "flashinfer_bench" / "cache"
+
+
+def get_fib_device_backend() -> str:
+    """Get the value of the FIB_DEVICE_BACKEND environment variable. It selects which
+    accelerator backend to benchmark on: ``"auto"`` (the default) picks the first
+    available backend, or name one explicitly (``"cuda"``, ``"xpu"``, ``"cpu"``).
+
+    Naming a backend explicitly is honored even when that backend is unavailable, so a
+    misconfigured environment fails loudly instead of silently falling back to the CPU.
+
+    Returns
+    -------
+    str
+        The selected backend name, lowercased.
+    """
+    return os.environ.get("FIB_DEVICE_BACKEND", "auto").strip().lower() or "auto"

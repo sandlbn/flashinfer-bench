@@ -12,6 +12,7 @@ from flashinfer_bench.bench.config import ResolvedEvalConfig
 from flashinfer_bench.bench.utils import compute_error_stats, make_eval
 from flashinfer_bench.compile import Runnable
 from flashinfer_bench.data import Correctness, Definition, Evaluation, EvaluationStatus
+from flashinfer_bench.device import device_synchronize
 
 from .default import DefaultEvaluator
 from .utils import allocate_outputs
@@ -51,11 +52,11 @@ class DsaSparseAttentionEvaluator(DefaultEvaluator):
                     out = allocate_outputs(definition, inp, device)
                     with torch.no_grad():
                         sol_runnable(*inp, *out)
-                    torch.cuda.synchronize(device)
+                    device_synchronize(device)
                 else:
                     with torch.no_grad():
                         result = sol_runnable(*inp)
-                    torch.cuda.synchronize(device)
+                    device_synchronize(device)
                     out = _flexible_normalize(result, device)
             except Exception:
                 traceback.print_exc()

@@ -1,0 +1,97 @@
+---
+title: "Hardware Support"
+description: "Which accelerators FlashInfer-Bench runs on, how a device is selected, and how timing differs between backends."
+---
+
+## Supported backends
+
+FlashInfer-Bench addresses devices by string — `cuda:0`, `xpu:0`, `cpu`. Everything
+backend-specific behind those strings lives in `flashinfer_bench.device`, so benchmark
+and evaluator code contains no vendor branches.
+
+| Backend | Device strings | Status | Kernel timing |
+| --- | --- | --- | --- |
+| NVIDIA CUDA | `cuda:N` | Supported | CUPTI activity tracing (device-side kernel duration) |
+| Intel GPU (XPU) | `xpu:N` | In bring-up | Device events (includes launch overhead) |
+| CPU | `cpu` | Reference and testing only | Host wall clock |
+
+The CPU backend is not a benchmarking target. It exists so runners, evaluators and
+validation gates can be exercised without a GPU, and so a reference implementation can
+still run when an accelerator lacks an operator.
+
+## Selecting a device
+
+By default, the first available accelerator backend is used. Override it with
+`FIB_DEVICE_BACKEND`:
+
+```bash
+FIB_DEVICE_BACKEND=xpu flashinfer-bench run
+FIB_DEVICE_BACKEND=cpu flashinfer-bench run   # no GPU required
+```
+
+Naming a backend explicitly is honoured even when that backend is unavailable, so a
+misconfigured environment fails with a clear error instead of silently benchmarking on
+the CPU. The CLI's `--devices` flag takes device strings directly:
+
+```bash
+flashinfer-bench serve --local ./dataset --devices xpu:0,xpu:1
+```
+
+## Timing is not interchangeable between backends
+
+A CUPTI trace reports device-side kernel duration. A device-event timer brackets the
+launch as well. Those numbers are not comparable, so every trace records which timer
+produced it in `evaluation.environment.libs.timing`.
+
+<Warning>
+Never compare latencies across backends without checking that field, and never compare a
+solution's latency against a reference latency measured on different hardware. Leaderboard
+results are grouped by hardware for this reason.
+</Warning>
+
+CUPTI timing requires `flashinfer-python`, which is an optional dependency:
+
+```bash
+pip install flashinfer-bench[cuda]
+```
+
+Without it, CUDA kernels are timed with device events and a warning is emitted — the
+measurement still runs, but the methodology has changed.
+
+## Intel GPUs
+
+Intel support targets Battlemage (Xe2-HPG, e.g. Arc B580) today, with Xe3P
+"Crescent Island" as the next target. Both use the same software stack, so both are
+served by one backend.
+
+Install PyTorch with XPU support from Intel's wheel index:
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/xpu
+pip install flashinfer-bench
+```
+
+Verify the device is visible:
+
+```python
+>>> from flashinfer_bench.device import get_accelerator, list_devices
+>>> list_devices()
+['xpu:0']
+>>> get_accelerator("xpu:0").canonical_id("xpu:0")
+'INTEL_ARC_B580'
+```
+
+Triton solutions run on Intel GPUs through the Intel Triton backend
+(`pytorch-triton-xpu`, installed alongside the XPU torch wheels) with no changes to the
+solution. Native SYCL solutions are not yet supported.
+
+### Adding a new Intel part
+
+Devices are described by a capability record — supported dtypes, last-level cache size
+for cold-cache timing, the ahead-of-time SYCL target, and whether graph capture is
+available. Enabling a new part means adding a row to `_PART_PROFILES` in
+`flashinfer_bench/device/xpu.py`, not adding a code path.
+
+A part with no row still works. It receives conservative defaults, and its SYCL target
+stays unset, which makes native kernels compile to SPIR-V and JIT at load time — the path
+that lets a device run on the day it arrives.

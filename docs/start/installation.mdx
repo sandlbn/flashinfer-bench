@@ -7,6 +7,8 @@ description: "Set up FlashInfer-Bench from PyPI or source and verify your enviro
 
 - OS: Linux
 - Python: 3.10, 3.11, 3.12, 3.13
+- An accelerator: NVIDIA (CUDA) or Intel (XPU). See [Hardware Support](/start/hardware-support)
+  for backend selection, Intel install steps, and how kernel timing differs per backend.
 
 ## Python Package (WIP)
 
@@ -15,6 +17,15 @@ FlashInfer-Bench is available via pip:
 ```bash
 python3 -m pip install flashinfer-bench
 ```
+
+On NVIDIA hardware, add the `cuda` extra to get CUPTI-based kernel timing:
+
+```bash
+python3 -m pip install "flashinfer-bench[cuda]"
+```
+
+Without it, CUDA kernels are timed with device events instead, which include launch
+overhead and are not comparable to CUPTI numbers.
 
 ## Install from Source
 

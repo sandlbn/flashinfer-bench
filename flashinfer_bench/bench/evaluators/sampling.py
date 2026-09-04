@@ -20,6 +20,7 @@ from flashinfer_bench.bench.utils import (
 )
 from flashinfer_bench.compile import BuilderRegistry, Runnable
 from flashinfer_bench.data import Correctness, Definition, Evaluation, EvaluationStatus, Workload
+from flashinfer_bench.device import device_synchronize
 
 from .default import DefaultEvaluator
 from .utils import allocate_outputs, normalize_result
@@ -141,11 +142,11 @@ class SamplingEvaluator(DefaultEvaluator):
                     out = allocate_outputs(definition, inp, device)
                     with torch.no_grad():
                         sol_runnable(*inp, *out)
-                    torch.cuda.synchronize(device)
+                    device_synchronize(device)
                 else:
                     with torch.no_grad():
                         result = sol_runnable(*inp)
-                    torch.cuda.synchronize(device)
+                    device_synchronize(device)
                     out = normalize_result(definition, result, device)
             except Exception:
                 traceback.print_exc()
@@ -200,7 +201,7 @@ class SamplingEvaluator(DefaultEvaluator):
             sol_freqs = _sample_token_distributions(
                 sol_runnable, inp, device, definition, num_trials=500000
             )
-            torch.cuda.synchronize(device)
+            device_synchronize(device)
         except Exception:
             traceback.print_exc()
             return None, make_eval(

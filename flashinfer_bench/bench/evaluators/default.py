@@ -27,6 +27,7 @@ from flashinfer_bench.data import (
     Performance,
     Workload,
 )
+from flashinfer_bench.device import device_synchronize
 
 from .utils import allocate_outputs, normalize_result
 
@@ -56,13 +57,15 @@ class DefaultEvaluator(Evaluator):
         inputs: List[List[Any]] = []
         outputs: List[List[torch.Tensor]] = []
 
-        for _ in range(cfg.num_trials):
-            inp = gen_inputs(definition, workload, device=device, safe_tensors=loaded_safe_tensors)
+        for trial in range(cfg.num_trials):
+            inp = gen_inputs(
+                definition, workload, device=device, safe_tensors=loaded_safe_tensors, trial=trial
+            )
             inputs.append(inp)
 
             with torch.no_grad():
                 result = ref_runnable(*inp)
-            torch.cuda.synchronize(device)
+            device_synchronize(device)
             outputs.append(normalize_result(definition, result, device))
 
         if cfg.profile_baseline:
@@ -109,12 +112,12 @@ class DefaultEvaluator(Evaluator):
                     out = allocate_outputs(definition, inp, device)
                     with torch.no_grad():
                         sol_runnable(*inp, *out)
-                    torch.cuda.synchronize(device)
+                    device_synchronize(device)
                 else:
                     # Value-returning style: call and normalize result
                     with torch.no_grad():
                         result = sol_runnable(*inp)
-                    torch.cuda.synchronize(device)
+                    device_synchronize(device)
                     out = normalize_result(definition, result, device)
             except Exception:
                 traceback.print_exc()
