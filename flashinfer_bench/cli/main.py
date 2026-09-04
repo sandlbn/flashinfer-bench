@@ -328,6 +328,78 @@ def run(args: argparse.Namespace):
         logger.info(message)
 
 
+def validate_references(args: argparse.Namespace) -> None:
+    """Cross-validate reference implementations on a device before benchmarking it.
+
+    A solution's correctness is judged against the definition's reference running on the
+    same device, so a reference that is wrong on new hardware would validate wrong
+    solutions. This runs each reference on the target device and on the host with
+    identical inputs and reports which definitions are cleared.
+
+    Exits non-zero if any definition fails, so CI can gate on it.
+    """
+    import json
+
+    from flashinfer_bench.bench import check_references
+    from flashinfer_bench.device import get_accelerator, list_devices
+
+    trace_set = TraceSet.from_path(str(args.local))
+
+    device = args.device
+    if device is None:
+        devices = list_devices()
+        if not devices:
+            raise RuntimeError(
+                "No devices available. Set FIB_DEVICE_BACKEND to select a backend "
+                "explicitly (cuda, xpu, cpu)."
+            )
+        device = devices[0]
+
+    raw_overrides = {
+        "num_trials": args.num_trials,
+        "rtol": args.rtol,
+        "atol": args.atol,
+        "required_matched_ratio": args.required_matched_ratio,
+    }
+    overrides = {k: v for k, v in raw_overrides.items() if v is not None}
+    config = BenchmarkConfig.default(**overrides)
+
+    definitions = args.definitions.split(",") if args.definitions else None
+
+    accelerator = get_accelerator(device)
+    logger.info(
+        "Cross-validating references on %s (%s) against %s",
+        device,
+        accelerator.canonical_id(device),
+        "cpu",
+    )
+
+    attestation = check_references(trace_set, device, config, definitions)
+
+    cleared, quarantined = attestation.cleared, attestation.quarantined
+    logger.info("Cleared %d definition(s) on %s", len(cleared), attestation.hardware)
+    if quarantined:
+        logger.error(
+            "Quarantined %d definition(s) on %s -- these must not be benchmarked there:",
+            len(quarantined),
+            attestation.hardware,
+        )
+        for result in attestation.results:
+            if not result.ok:
+                logger.error(
+                    "  %-44s %-18s %s", result.definition, result.status.value, result.detail or ""
+                )
+
+    if args.output:
+        output = Path(args.output)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(attestation.to_dict(), indent=2) + "\n")
+        logger.info("Attestation written to %s", output)
+
+    if quarantined:
+        raise SystemExit(1)
+
+
 def _load_traces(args: argparse.Namespace) -> List[TraceSet]:
     trace_sets = []
     if not args.local:
@@ -583,6 +655,34 @@ def cli():
     visualize_parser.set_defaults(func=visualize)
 
     # --- validate ---
+    ref_parser = command_subparsers.add_parser(
+        "validate-references",
+        help="Cross-validate reference implementations on a device against the host.",
+    )
+    ref_parser.add_argument(
+        "--local", type=Path, required=True, help="Path to the trace set dataset."
+    )
+    ref_parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help="Device to validate (e.g. xpu:0). Default: first available.",
+    )
+    ref_parser.add_argument(
+        "--definitions", type=str, default=None, help="Comma-separated definition names."
+    )
+    ref_parser.add_argument(
+        "--output", type=str, default=None, help="Path to write the attestation JSON."
+    )
+    ref_parser.add_argument("--num-trials", type=int, default=None)
+    ref_parser.add_argument("--rtol", type=float, default=None)
+    ref_parser.add_argument("--atol", type=float, default=None)
+    ref_parser.add_argument("--required-matched-ratio", type=float, default=None)
+    ref_parser.add_argument(
+        "--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"]
+    )
+    ref_parser.set_defaults(func=validate_references)
+
     validate_parser = command_subparsers.add_parser(
         "validate", help="Validate dataset correctness and completeness."
     )

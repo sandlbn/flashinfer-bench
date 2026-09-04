@@ -85,6 +85,43 @@ Triton solutions run on Intel GPUs through the Intel Triton backend
 (`pytorch-triton-xpu`, installed alongside the XPU torch wheels) with no changes to the
 solution. Native SYCL solutions are not yet supported.
 
+## Bringing up a new device
+
+Before benchmarking on hardware FlashInfer-Bench has not run on before, cross-validate the
+reference implementations. A solution's correctness is judged against its definition's
+PyTorch reference *running on the same device* — so if an operator is wrong, emulated, or
+lower-precision on that backend, a wrong solution would validate against a wrong reference
+and the error would be invisible.
+
+```bash
+flashinfer-bench validate-references --local ./dataset --device xpu:0 \
+    --output attestation-b580.json
+```
+
+Each reference runs on the device and on the host with bit-identical inputs, and the
+outputs are compared. The command exits non-zero if any definition fails, so CI can gate
+on it. Definitions come back in one of these states:
+
+| Status | Meaning |
+| --- | --- |
+| `PASSED` | Cleared for benchmarking on this device |
+| `MISMATCH` | Device and host references disagree — do not benchmark |
+| `UNSUPPORTED_DTYPE` | The device lacks a dtype the definition needs |
+| `TARGET_ERROR` | The reference could not run on the device |
+| `BASELINE_ERROR` | The reference could not run on the host either |
+| `BUILD_ERROR` | The reference could not be built |
+| `NO_WORKLOAD` | No workload in the dataset, so nothing was checked |
+
+Anything other than `PASSED` quarantines the definition. A quarantined definition is not a
+bug in the benchmark — it is the system declining to produce a number it cannot stand
+behind.
+
+<Note>
+Workloads are hardware-independent. A workload captured from an SGLang run on an H100 is a
+valid replay input on an Intel GPU, so bringing up new hardware never requires
+re-collecting workloads.
+</Note>
+
 ### Adding a new Intel part
 
 Devices are described by a capability record — supported dtypes, last-level cache size
