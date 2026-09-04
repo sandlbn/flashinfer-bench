@@ -12,15 +12,23 @@ import torch
 from torch import multiprocessing as mp
 
 import flashinfer_bench.utils as fib_utils
-from flashinfer_bench.bench.config import BenchmarkConfig
+from flashinfer_bench.bench.config import BenchmarkConfig, device_eval_defaults
 from flashinfer_bench.bench.evaluators import resolve_evaluator
 from flashinfer_bench.bench.utils import make_eval
 from flashinfer_bench.compile import BuilderRegistry, Runnable
 from flashinfer_bench.data import Definition, Evaluation, EvaluationStatus, Solution, Workload
-from flashinfer_bench.device import get_accelerator
+from flashinfer_bench.device import get_accelerator, hardware_id
 from flashinfer_bench.utils import redirect_stdio_to_tempfile
 
-from .runner import BaselineHandle, DeviceBaseline, Runner, RunnerError, RunnerFatalError
+from .runner import (
+    BaselineHandle,
+    DeviceBaseline,
+    Runner,
+    RunnerError,
+    RunnerFatalError,
+    from_transport,
+    to_transport,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +55,9 @@ class SubprocessWorker:
         trace_set_root: Optional[Path] = None,
     ) -> BaselineHandle:
         evaluator_cls = resolve_evaluator(definition)
-        eval_cfg = cfg.resolve_eval_config(definition)
+        eval_cfg = cfg.resolve_eval_config(
+            definition, hardware_id(self._device), device_eval_defaults(self._device)
+        )
         baseline = evaluator_cls.build_baseline(
             definition=definition,
             workload=workload,
@@ -137,8 +147,8 @@ class SubprocessWorker:
                     parent_conn.send(
                         {
                             "ok": True,
-                            "inputs": bl.inputs,
-                            "ref_outputs": bl.outputs,
+                            "inputs": to_transport(bl.inputs, self._device),
+                            "ref_outputs": to_transport(bl.outputs, self._device),
                             "ref_mean_latency_ms": bl.mean_latency_ms,
                         }
                     )
@@ -221,7 +231,11 @@ def _solution_worker_main(
     """
     log_path = redirect_stdio_to_tempfile()
     try:
-        get_accelerator(device).set_device(device)
+        accelerator = get_accelerator(device)
+        accelerator.set_device(device)
+        # Paid before the handshake so first-use kernel compilation is not charged to
+        # the solution being evaluated.
+        accelerator.warmup(device)
         registry = BuilderRegistry.get_instance()
 
         # Handshake
@@ -247,8 +261,8 @@ def _solution_worker_main(
         conn.send({"cmd": "LOAN"})
         loan = conn.recv()
 
-        inputs_bl = loan["inputs"]
-        ref_outputs_bl = loan["ref_outputs"]
+        inputs_bl = from_transport(loan["inputs"], device)
+        ref_outputs_bl = from_transport(loan["ref_outputs"], device)
         ref_mean_latency_ms = loan["ref_mean_latency_ms"]
 
         inputs: List[List[Any]] = [
@@ -256,7 +270,9 @@ def _solution_worker_main(
         ]
 
         evaluator_cls = resolve_evaluator(definition)
-        eval_cfg = cfg.resolve_eval_config(definition)
+        eval_cfg = cfg.resolve_eval_config(
+            definition, hardware_id(device), device_eval_defaults(device)
+        )
         evaluation = evaluator_cls.evaluate(
             definition=definition,
             sol_runnable=runnable_sol,

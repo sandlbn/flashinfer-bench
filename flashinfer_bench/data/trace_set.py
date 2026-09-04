@@ -252,6 +252,31 @@ class TraceSet:
         """
         return self._solution_by_name.get(name)
 
+    @staticmethod
+    def trace_hardware_id(trace: Trace) -> Optional[str]:
+        """Canonical hardware identifier a trace was produced on.
+
+        Falls back to normalizing the raw driver name for traces written before
+        ``Environment.hardware_id`` existed, so legacy traces still group correctly.
+        """
+        if trace.evaluation is None:
+            return None
+        env = trace.evaluation.environment
+        if env.hardware_id:
+            return env.hardware_id
+        from flashinfer_bench.device import canonicalize_device_name
+
+        return canonicalize_device_name(env.hardware)
+
+    def hardware_ids(self, def_name: str) -> List[str]:
+        """Distinct hardware a definition has traces from."""
+        ids = {
+            hw
+            for t in self.traces.get(def_name, [])
+            if (hw := self.trace_hardware_id(t)) is not None
+        }
+        return sorted(ids)
+
     def filter_traces(self, def_name: str, atol: float = 1e-2, rtol: float = 1e-2) -> List[Trace]:
         """Filter traces for a definition based on error bounds.
 
@@ -290,11 +315,19 @@ class TraceSet:
         axes: Optional[Dict[str, int]] = None,
         max_abs_error: float = 1e-2,
         max_rel_error: float = 1e-2,
+        hardware: Optional[str] = None,
+        allow_mixed_hardware: bool = False,
     ) -> Optional[Trace]:
         """Get the best performing trace for a definition based on speedup factor.
 
         Finds the trace with the highest speedup factor among those that meet the
         specified criteria including axis constraints and error tolerances.
+
+        Results from different hardware are not comparable. A speedup measured against a
+        slow reference on one accelerator is not the same achievement as the same ratio
+        against a fast reference on another, and the two may not even have been timed by
+        the same methodology. When candidates span multiple devices, this raises rather
+        than quietly returning a winner from an unintended comparison.
 
         Parameters
         ----------
@@ -308,14 +341,28 @@ class TraceSet:
             Maximum absolute error tolerance, by default 1e-2.
         max_rel_error : float, optional
             Maximum relative error tolerance, by default 1e-2.
+        hardware : Optional[str], optional
+            Restrict candidates to this canonical hardware id (e.g. ``INTEL_ARC_B580``).
+        allow_mixed_hardware : bool, optional
+            Rank across hardware anyway. Only meaningful when the caller has established
+            that the comparison is valid.
 
         Returns
         -------
         Optional[Trace]
             The best performing trace meeting all criteria, or None if no traces
             match the requirements.
+
+        Raises
+        ------
+        ValueError
+            If candidates span multiple hardware and neither ``hardware`` nor
+            ``allow_mixed_hardware`` was given.
         """
         candidates = self.traces.get(def_name, [])
+
+        if hardware is not None:
+            candidates = [t for t in candidates if self.trace_hardware_id(t) == hardware]
 
         # Axes exact match
         # TODO(shanli): advanced input filtering
@@ -339,14 +386,23 @@ class TraceSet:
             and t.evaluation.correctness.max_relative_error <= max_rel_error
         ]
 
-        # Return the one with best speedup
-        if candidates:
-            return max(
-                candidates,
-                key=lambda t: t.evaluation.performance.speedup_factor if t.evaluation else 0,
-            )
+        if not candidates:
+            return None
 
-        return None
+        if hardware is None and not allow_mixed_hardware:
+            present = sorted({hw for t in candidates if (hw := self.trace_hardware_id(t))})
+            if len(present) > 1:
+                raise ValueError(
+                    f"Traces for '{def_name}' span multiple hardware ({', '.join(present)}). "
+                    "Speedups from different devices are not comparable -- pass "
+                    "hardware=... to rank within one device, or allow_mixed_hardware=True "
+                    "if the comparison is known to be valid."
+                )
+
+        # Return the one with best speedup
+        return max(
+            candidates, key=lambda t: t.evaluation.performance.speedup_factor if t.evaluation else 0
+        )
 
     def summary(
         self,

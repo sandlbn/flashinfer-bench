@@ -7,11 +7,13 @@ from .accelerator import (
     default_device_type,
     device_synchronize,
     get_accelerator,
+    hardware_id,
     list_devices,
     parse_device,
     register_accelerator,
     registered_types,
     reset_registry_cache,
+    unregister_accelerator,
 )
 from .capabilities import DEFAULT_DTYPES, FP4_DTYPES, FP8_DTYPES, Capabilities
 from .cpu import CpuAccelerator
@@ -37,9 +39,11 @@ __all__ = [
     "default_device_type",
     "device_synchronize",
     "get_accelerator",
+    "hardware_id",
     "list_devices",
     "parse_device",
     "register_accelerator",
     "registered_types",
+    "unregister_accelerator",
     "reset_registry_cache",
 ]

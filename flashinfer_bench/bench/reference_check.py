@@ -26,8 +26,7 @@ from typing import Any, Dict, FrozenSet, List, Optional, Sequence
 
 import torch
 
-from flashinfer_bench.bench.config import BenchmarkConfig, ResolvedEvalConfig
-from flashinfer_bench.bench.evaluators.utils import normalize_result
+from flashinfer_bench.bench.config import BenchmarkConfig, ResolvedEvalConfig, device_eval_defaults
 from flashinfer_bench.bench.utils import compute_error_stats, gen_inputs, load_safetensors
 from flashinfer_bench.compile import BuilderRegistry
 from flashinfer_bench.data import Definition, TraceSet, Workload
@@ -156,6 +155,11 @@ def _run_reference(
     runnable: Any, definition: Definition, inputs: List[Any], device: str
 ) -> List[torch.Tensor]:
     """Run a reference implementation and normalise its outputs to a tensor list."""
+    # Imported here rather than at module scope: the evaluators package imports the
+    # runners, which import the evaluators back, so pulling it in at import time makes
+    # `flashinfer_bench.bench` circular.
+    from flashinfer_bench.bench.evaluators.utils import normalize_result
+
     with torch.no_grad():
         result = runnable(*inputs)
     get_accelerator(device).synchronize(device)
@@ -342,7 +346,9 @@ def check_references(
             )
             continue
 
-        cfg = config.resolve_eval_config(definition)
+        cfg = config.resolve_eval_config(
+            definition, accelerator.canonical_id(device), device_eval_defaults(device)
+        )
         result = check_reference(definition, workload, device, cfg, trace_set.root)
         results.append(result)
         logger.info(

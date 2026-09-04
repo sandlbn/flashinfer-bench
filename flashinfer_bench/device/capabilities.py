@@ -53,6 +53,14 @@ class Capabilities:
     supports_graphs : bool
         Whether the device supports captured graph replay (CUDA graphs and
         equivalents). Gates the graph capture path in tracing.
+    supports_ipc_tensors : bool
+        Whether a tensor on this device can be sent to another process directly. CUDA has
+        IPC handles and CPU has shared memory; Intel XPU has neither today, so its tensors
+        must be routed through host memory to reach a worker process.
+    recommended_warmup_runs : Optional[int]
+        Warmup iterations this device needs before a measurement settles, when nothing
+        else specifies a value. Devices that ramp clocks from idle need considerably more
+        than the generic default; ``None`` means the generic default is fine.
     extra : Dict[str, Any]
         Device-specific details that have no cross-vendor meaning -- ISA revision,
         subgroup sizes, shared-local-memory budget, EU/SM counts. Kept untyped on
@@ -64,6 +72,8 @@ class Capabilities:
     l2_bytes: int = 64 * _MIB
     sycl_target: Optional[str] = None
     supports_graphs: bool = False
+    supports_ipc_tensors: bool = True
+    recommended_warmup_runs: Optional[int] = None
     extra: Dict[str, Any] = field(default_factory=dict)
 
     def supports_dtype(self, dtype: str) -> bool:

@@ -60,7 +60,8 @@ The `environment` object specifies the exact execution environment for this benc
 
 | **Field** | **Type** | **Required** | **Description** |
 | --- | --- | --- | --- |
-| `hardware` | string | Yes | The name of the hardware, e.g., `"NVIDIA_H100"`. |
+| `hardware` | string | Yes | Raw device name as reported by the driver, e.g., `"NVIDIA H100 80GB HBM3"`. Varies with driver version. |
+| `hardware_id` | string | No | Normalized, stable hardware identifier, e.g., `"NVIDIA_H100"`, `"INTEL_ARC_B580"`. Use this as the grouping key for leaderboards; `null` on traces written before this field existed. |
 | `libs` | object | Yes | A snapshot of the relevant software libraries and their versions. Keys are library names, and values are version strings. |
 
 ### The `correctness` and `performance` Nullable Table

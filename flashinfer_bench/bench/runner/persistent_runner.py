@@ -14,15 +14,23 @@ import torch
 from torch import multiprocessing as mp
 
 import flashinfer_bench.utils as fib_utils
-from flashinfer_bench.bench.config import BenchmarkConfig
+from flashinfer_bench.bench.config import BenchmarkConfig, device_eval_defaults
 from flashinfer_bench.bench.evaluators import resolve_evaluator
 from flashinfer_bench.bench.utils import make_eval
 from flashinfer_bench.compile import BuilderRegistry, BuildError
 from flashinfer_bench.data import Definition, Evaluation, EvaluationStatus, Solution, Workload
-from flashinfer_bench.device import get_accelerator
+from flashinfer_bench.device import get_accelerator, hardware_id
 from flashinfer_bench.utils import redirect_stdio_to_tempfile
 
-from .runner import BaselineHandle, DeviceBaseline, Runner, RunnerError, RunnerFatalError
+from .runner import (
+    BaselineHandle,
+    DeviceBaseline,
+    Runner,
+    RunnerError,
+    RunnerFatalError,
+    from_transport,
+    to_transport,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -252,7 +260,9 @@ class PersistentSubprocessWorker:
         trace_set_root: Optional[Path] = None,
     ) -> BaselineHandle:
         evaluator_cls = resolve_evaluator(definition)
-        eval_cfg = cfg.resolve_eval_config(definition)
+        eval_cfg = cfg.resolve_eval_config(
+            definition, hardware_id(self._device), device_eval_defaults(self._device)
+        )
         baseline = evaluator_cls.build_baseline(
             definition=definition,
             workload=workload,
@@ -287,8 +297,8 @@ class PersistentSubprocessWorker:
             "cmd": WorkerCommand.RUN_SOLUTION.value,
             "definition": bl.definition,
             "solution": solution,
-            "inputs": bl.inputs,
-            "ref_outputs": bl.outputs,
+            "inputs": to_transport(bl.inputs, self._device),
+            "ref_outputs": to_transport(bl.outputs, self._device),
             "ref_mean_latency_ms": bl.mean_latency_ms,
             "config": cfg,
             "solution_name": solution.name,
@@ -651,6 +661,9 @@ def _persistent_worker_main(conn: mp.connection.Connection, device: str) -> None
     accelerator = get_accelerator(device)
     try:
         accelerator.set_device(device)
+        # Before READY, so first-use kernel compilation is not charged to -- or timed
+        # out by -- the first solution that happens to run.
+        accelerator.warmup(device)
         registry = BuilderRegistry.get_instance()
 
         conn.send({"cmd": WorkerResponse.READY.value})
@@ -680,8 +693,8 @@ def _persistent_worker_main(conn: mp.connection.Connection, device: str) -> None
                 elif cmd == WorkerCommand.RUN_SOLUTION.value:
                     definition = msg["definition"]
                     solution = msg["solution"]
-                    inputs_bl = msg["inputs"]
-                    ref_outputs_bl = msg["ref_outputs"]
+                    inputs_bl = from_transport(msg["inputs"], device)
+                    ref_outputs_bl = from_transport(msg["ref_outputs"], device)
                     ref_mean_latency_ms = msg["ref_mean_latency_ms"]
                     cfg = msg["config"]
 
@@ -697,7 +710,9 @@ def _persistent_worker_main(conn: mp.connection.Connection, device: str) -> None
                         ]
 
                         evaluator_cls = resolve_evaluator(definition)
-                        eval_cfg = cfg.resolve_eval_config(definition)
+                        eval_cfg = cfg.resolve_eval_config(
+                            definition, hardware_id(device), device_eval_defaults(device)
+                        )
                         evaluation = evaluator_cls.evaluate(
                             definition=definition,
                             sol_runnable=runnable_sol,

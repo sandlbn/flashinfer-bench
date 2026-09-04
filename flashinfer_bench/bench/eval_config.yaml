@@ -1,5 +1,14 @@
-# Per op_type / per definition eval config overrides.
+# Per op_type / per definition / per hardware eval config overrides.
 # See BenchmarkConfig in flashinfer_bench/bench/config.py for the full schema.
+#
+# Merge order, lowest to highest:
+#   defaults -> device recommendation -> op_type_config -> definition_config
+#            -> hardware_config -> CLI flags
+#
+# The device recommendation comes from the backend itself (see Capabilities in
+# flashinfer_bench/device/capabilities.py). Intel GPUs, for instance, ask for 200 warmup
+# iterations rather than the generic 10, because discrete parts ramp clocks from idle.
+# Anything set below overrides it.
 
 op_type_config:
   moe:
@@ -8,3 +17,20 @@ op_type_config:
     extra:
       sampling_validation_trials: 100
       sampling_tvd_threshold: 0.2
+
+# Per-hardware overrides, keyed by canonical hardware id (Environment.hardware_id).
+#
+# Bringing up a new accelerator invites quietly loosening tolerances until things pass.
+# Every such override belongs here, where it is one reviewable line in a diff, and every
+# one needs a comment saying why the hardware genuinely differs -- not just that the test
+# failed. The achieved error stays recorded in Correctness, so a relaxation that is
+# masking a real bug remains visible.
+#
+# Example (commented out; add entries only with a justification):
+#
+# hardware_config:
+#   INTEL_ARC_B580:
+#     # Xe2 accumulates <reduction> in a different order than the CUDA reference, giving
+#     # a larger but bounded error on <op>. Measured max_rel over N runs: <value>.
+#     rtol: 0.02
+hardware_config: {}

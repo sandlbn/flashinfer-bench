@@ -6,7 +6,7 @@ import os
 import sys
 import tempfile
 from functools import cache
-from typing import TYPE_CHECKING, Dict, List
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 if TYPE_CHECKING:
     import torch
@@ -146,7 +146,12 @@ def env_snapshot(device: str) -> Environment:
     # silently compared as if one methodology produced both.
     libs["timing"] = accelerator.make_timer(device).name
 
-    return Environment(hardware=hardware_from_device(device), libs=libs)
+    try:
+        hardware_id: Optional[str] = accelerator.canonical_id(device)
+    except Exception:
+        hardware_id = None
+
+    return Environment(hardware=hardware_from_device(device), hardware_id=hardware_id, libs=libs)
 
 
 def hardware_from_device(device: str) -> str:

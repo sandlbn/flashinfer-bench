@@ -59,9 +59,23 @@ class Environment(BaseModelWithDocstrings):
     """
 
     hardware: NonEmptyString
-    """Hardware identifier where the evaluation was performed (e.g., 'NVIDIA_H100')."""
+    """Hardware identifier where the evaluation was performed (e.g., 'NVIDIA_H100').
+
+    This is the raw name reported by the driver, which varies with driver version. Use
+    :attr:`hardware_id` as the grouping key."""
+    hardware_id: Optional[str] = Field(default=None)
+    """Normalized, stable hardware identifier (e.g., 'NVIDIA_H100', 'INTEL_ARC_B580').
+
+    Raw driver names differ across driver versions and carry trademark marks, which makes
+    them unsuitable for grouping leaderboard results. This field is the canonical form.
+    ``None`` on traces produced before this field existed."""
     libs: Dict[str, str] = Field(default_factory=dict)
-    """Dictionary of library names to version strings used during evaluation."""
+    """Dictionary of library names to version strings used during evaluation.
+
+    Also carries ``timing``, naming the methodology that produced
+    :attr:`Performance.latency_ms` (e.g. ``cupti``, ``event``). Latencies measured by
+    different methodologies are not comparable, so this is required to rank traces
+    against each other."""
 
 
 class EvaluationStatus(str, Enum):

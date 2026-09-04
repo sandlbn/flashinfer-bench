@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from typing import List, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from flashinfer_bench.compile import BuilderRegistry
-from flashinfer_bench.data import EvaluationStatus, Trace, TraceSet
+from flashinfer_bench.data import Definition, EvaluationStatus, Trace, TraceSet
+from flashinfer_bench.device import list_devices
 
 from .config import BenchmarkConfig
+from .reference_check import unsupported_dtypes
 from .runner import IsolatedRunner, PersistentRunner
 
 logger = logging.getLogger(__name__)
@@ -92,7 +94,15 @@ class Benchmark:
             if missing_defs:
                 logger.warning(f"Definitions not found in trace set: {sorted(missing_defs)}")
 
+        skipped_unsupported: Dict[str, str] = {}
+
         for def_name, definition in definitions_to_run:
+            unsupported = self._unsupported_reason(definition)
+            if unsupported is not None:
+                skipped_unsupported[def_name] = unsupported
+                logger.warning(f"Skipping def={def_name}: {unsupported}")
+                continue
+
             sols = self._trace_set.solutions.get(def_name, [])
             if not sols:
                 logger.warning(f"No solutions found for def={def_name}, skipping definition")
@@ -174,6 +184,12 @@ class Benchmark:
             if missing_sols:
                 logger.warning(f"Solutions not found in trace set: {sorted(missing_sols)}")
 
+        if skipped_unsupported:
+            logger.warning(
+                f"{len(skipped_unsupported)} definition(s) were not benchmarked because the "
+                f"hardware does not support them: {sorted(skipped_unsupported)}"
+            )
+
         # Create a new TraceSet with the results
         result_trace_set = TraceSet(
             root=self._trace_set.root,
@@ -184,6 +200,32 @@ class Benchmark:
         )
 
         return result_trace_set
+
+    def _unsupported_reason(self, definition: Definition) -> Optional[str]:
+        """Why this definition cannot run on any available device, or ``None``.
+
+        A definition needing a dtype the hardware lacks must not be benchmarked. Left to
+        run, it either fails in a way that reads as a broken kernel, or -- worse -- lands
+        on a silently emulated path and gets timed as though it were native. Skipping it
+        and saying so is the honest outcome.
+        """
+        devices = self._devices()
+        if not devices:
+            return None
+
+        missing_per_device = {d: unsupported_dtypes(definition, d) for d in devices}
+        if not all(missing_per_device.values()):
+            return None  # at least one device can run it
+
+        missing = sorted(set().union(*missing_per_device.values()))
+        return f"no available device supports dtype(s) {', '.join(missing)}"
+
+    def _devices(self) -> List[str]:
+        """Devices this benchmark will run on."""
+        try:
+            return list(getattr(self._runner, "_available_devices", None) or list_devices())
+        except Exception:
+            return []
 
     def close(self) -> None:
         """Release all resources held by the benchmark runner."""

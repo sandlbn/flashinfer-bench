@@ -93,11 +93,19 @@ class BenchmarkConfig(BaseModel):
     sampling_tvd_threshold: Optional[float] = Field(default=None, ge=0, le=1)
     """Deprecated CLI override for Sampling evaluator TVD threshold."""
 
-    # Per op_type / per definition overrides
+    # Per op_type / per definition / per hardware overrides
     op_type_config: Dict[str, EvalConfig] = Field(default_factory=dict)
     """Per-op-type eval overrides keyed by `definition.op_type`."""
     definition_config: Dict[str, EvalConfig] = Field(default_factory=dict)
     """Per-definition eval overrides keyed by `definition.name`."""
+    hardware_config: Dict[str, EvalConfig] = Field(default_factory=dict)
+    """Per-hardware eval overrides keyed by canonical hardware id (e.g. `INTEL_ARC_B580`).
+
+    Bringing up a new accelerator tends to invite quietly loosening tolerances until
+    things pass. Keeping those overrides here means every one of them is a reviewable
+    line in `eval_config.yaml` rather than a constant buried in an evaluator, and the
+    achieved error is still recorded in `Correctness` so a relaxation that is masking a
+    real bug stays visible."""
 
     @model_validator(mode="after")
     def _validate_fields(self) -> BenchmarkConfig:
@@ -125,19 +133,41 @@ class BenchmarkConfig(BaseModel):
             return cls.from_yaml(str(yaml_path), **overrides)
         return cls(**overrides)
 
-    def resolve_eval_config(self, definition: Any) -> ResolvedEvalConfig:
+    def resolve_eval_config(
+        self,
+        definition: Any,
+        hardware: Optional[str] = None,
+        device_defaults: Optional[EvalConfig] = None,
+    ) -> ResolvedEvalConfig:
         """Merge priority (lowest -> highest): ResolvedEvalConfig defaults ->
-        op_type_config -> definition_config -> top-level / CLI overrides.
+        device_defaults -> op_type_config -> definition_config -> hardware_config ->
+        top-level / CLI overrides.
 
-        Top-level fields win when non-None, so a CLI flag such as
+        Hardware sits above definition because it describes the machine the numbers came
+        from, which is the most specific context available; a CLI flag still wins over
+        all of it. Top-level fields win when non-None, so a flag such as
         ``--required-matched-ratio 0.9`` is never silently shadowed by a value
         coming from the packaged ``eval_config.yaml``.
+
+        Parameters
+        ----------
+        definition : Any
+            The definition being evaluated.
+        hardware : Optional[str]
+            Canonical hardware id of the device (e.g. ``"INTEL_ARC_B580"``). When
+            ``None``, no hardware layer is applied.
+        device_defaults : Optional[EvalConfig]
+            What the backend itself recommends, applied at the lowest priority so any
+            explicit configuration or CLI flag still wins. See
+            :func:`device_eval_defaults`.
         """
         merged: Dict[str, Any] = {"profile_baseline": self.profile_baseline, "extra": {}}
 
         layers = [
+            device_defaults,
             self.op_type_config.get(definition.op_type),
             self.definition_config.get(definition.name),
+            self.hardware_config.get(hardware) if hardware else None,
         ]
         for layer in layers:
             if layer is None:
@@ -166,3 +196,22 @@ class BenchmarkConfig(BaseModel):
         merged["extra"].update({k: v for k, v in extra_overrides.items() if v is not None})
 
         return ResolvedEvalConfig(**merged)
+
+
+def device_eval_defaults(device: str) -> Optional[EvalConfig]:
+    """Eval parameters a device recommends for itself.
+
+    Applied at the lowest priority in :meth:`BenchmarkConfig.resolve_eval_config`, so it
+    fills in only what nothing else specified. Returns ``None`` when the device has no
+    recommendation, or cannot be identified.
+    """
+    from flashinfer_bench.device import get_accelerator
+
+    try:
+        capabilities = get_accelerator(device).capabilities(device)
+    except Exception:
+        return None
+
+    if capabilities.recommended_warmup_runs is None:
+        return None
+    return EvalConfig(warmup_runs=capabilities.recommended_warmup_runs)

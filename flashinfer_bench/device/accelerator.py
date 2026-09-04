@@ -39,9 +39,12 @@ def canonicalize_device_name(name: str) -> str:
     """
     cleaned = _TRADEMARK_RE.sub(" ", name).upper()
     token = _NON_ALNUM_RE.sub("_", cleaned).strip("_")
-    # Vendor suffixes that add no identity and would fragment grouping.
+    # Vendor suffixes that add no identity and would fragment grouping -- but only when
+    # something identifying survives. An integrated part often reports just
+    # "Intel(R) Graphics", and stripping there would leave the bare vendor name, which
+    # every Intel GPU would then collide on.
     for noise in ("_GRAPHICS", "_GPU"):
-        if token.endswith(noise):
+        if token.endswith(noise) and token.count("_") >= 2:
             token = token[: -len(noise)]
     return token or "UNKNOWN"
 
@@ -137,6 +140,16 @@ class Accelerator(ABC):
         """Backend-specific library versions, merged into the trace environment."""
         return {}
 
+    def warmup(self, device: str) -> None:
+        """Force one-time device work before anything is timed.
+
+        Some runtimes compile kernels on first use. That cost belongs outside the
+        benchmark: paid inside a timed evaluation it distorts the measurement, and paid
+        inside a timeout-bounded one it can fail the run outright. The default is a no-op
+        for backends that ship precompiled kernels.
+        """
+        return None
+
     def supports_graphs(self, device: str) -> bool:
         """Whether captured graph replay is available on ``device``."""
         return self.capabilities(device).supports_graphs
@@ -153,6 +166,17 @@ def register_accelerator(cls: Type[Accelerator]) -> Type[Accelerator]:
     """Register an accelerator class under its :attr:`Accelerator.type`."""
     _REGISTRY[cls.type] = cls
     return cls
+
+
+def unregister_accelerator(dev_type: str) -> None:
+    """Remove a backend from the registry and drop its memoized instance.
+
+    Registration is global, so a backend registered by a test would otherwise stay
+    visible to every later test -- including the ones that ask which device is the
+    default.
+    """
+    _REGISTRY.pop(dev_type, None)
+    _INSTANCES.pop(dev_type, None)
 
 
 def registered_types() -> List[str]:
@@ -215,6 +239,19 @@ def get_accelerator(device: Any = None) -> Accelerator:
 def list_devices() -> List[str]:
     """Device strings for the default backend."""
     return get_accelerator().list_devices()
+
+
+def hardware_id(device: str) -> Optional[str]:
+    """Canonical hardware id for ``device``, or ``None`` if it cannot be determined.
+
+    Used to key per-hardware evaluation config and to group leaderboard results, so a
+    device that cannot be identified simply gets no hardware-specific treatment rather
+    than failing the run.
+    """
+    try:
+        return get_accelerator(device).canonical_id(device)
+    except Exception:
+        return None
 
 
 def device_synchronize(device: str) -> None:

@@ -51,3 +51,50 @@ class Runner(ABC):
     def close(self) -> None:
         """Release all resources and terminate worker processes."""
         ...
+
+
+def _map_tensors(value: Any, fn: Any) -> Any:
+    """Apply ``fn`` to every tensor inside a nested list/tuple/dict, preserving shape."""
+    if isinstance(value, torch.Tensor):
+        return fn(value)
+    if isinstance(value, list):
+        return [_map_tensors(v, fn) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_map_tensors(v, fn) for v in value)
+    if isinstance(value, dict):
+        return {k: _map_tensors(v, fn) for k, v in value.items()}
+    return value
+
+
+def needs_host_transport(device: str) -> bool:
+    """Whether tensors on ``device`` must go through host memory to reach a worker.
+
+    CUDA has IPC handles and CPU has shared memory, so their tensors can be sent to a
+    worker process directly. Intel XPU has neither in torch today -- pickling an XPU
+    tensor raises ``_share_fd_: only available on CPU`` -- so its baselines are copied to
+    the host for the crossing and restored on the far side.
+    """
+    from flashinfer_bench.device import get_accelerator
+
+    try:
+        return not get_accelerator(device).capabilities(device).supports_ipc_tensors
+    except Exception:
+        return False
+
+
+def to_transport(value: Any, device: str) -> Any:
+    """Prepare tensors for the crossing into a worker process.
+
+    A no-op on devices whose tensors can be shared directly, so the CUDA path is
+    unchanged and pays no copy.
+    """
+    if not needs_host_transport(device):
+        return value
+    return _map_tensors(value, lambda t: t.detach().to("cpu"))
+
+
+def from_transport(value: Any, device: str) -> Any:
+    """Restore tensors received from another process onto ``device``."""
+    if not needs_host_transport(device):
+        return value
+    return _map_tensors(value, lambda t: t.to(device))

@@ -30,7 +30,36 @@ jobs:
         run: uv python install ${{ matrix.python }}
 
       - name: Install dependencies
-        run: uv sync --python ${{ matrix.python }} --extra dev --extra serve
+        run: uv sync --python ${{ matrix.python }} --extra dev --extra serve --extra cuda
 
       - name: Run Python tests
         run: uv run --python ${{ matrix.python }} pytest
+
+  run_cpu_backend_test:
+    name: Run tests without an accelerator toolchain
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7.1.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+
+      - name: Install Python
+        run: uv python install 3.12
+
+      # Deliberately without the cuda extra: a machine with no NVIDIA toolchain must
+      # still install, import and benchmark on the CPU backend. This is the job that
+      # would have caught flashinfer being imported at module scope.
+      - name: Install dependencies
+        run: uv sync --python 3.12 --extra dev --extra serve
+
+      - name: Run device and gate tests on the CPU backend
+        env:
+          FIB_DEVICE_BACKEND: cpu
+        run: uv run --python 3.12 pytest tests/device tests/bench tests/data -q

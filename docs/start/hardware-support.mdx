@@ -58,6 +58,51 @@ pip install flashinfer-bench[cuda]
 Without it, CUDA kernels are timed with device events and a warning is emitted — the
 measurement still runs, but the methodology has changed.
 
+## Comparing results across hardware
+
+Speedup is measured against the definition's reference **on the same device**. That makes
+a speedup meaningful within one device, and not transferable between two: 3× over a slow
+Xe2 reference is not the same achievement as 3× over a fast Hopper reference, and the two
+may not even have been timed the same way.
+
+`get_best_trace` therefore refuses to rank traces that span multiple devices:
+
+```python
+ts.get_best_trace("rmsnorm_h4096")                              # raises if mixed
+ts.get_best_trace("rmsnorm_h4096", hardware="INTEL_ARC_B580")   # ranks within one device
+ts.hardware_ids("rmsnorm_h4096")                                # what is present
+```
+
+Pass `allow_mixed_hardware=True` only when you have established that the comparison is
+valid.
+
+### Per-hardware tolerances
+
+Bringing up a new accelerator invites quietly loosening tolerances until things pass.
+Hardware-specific tolerances therefore live in one reviewable place — the
+`hardware_config` block of `eval_config.yaml`, keyed by canonical hardware id:
+
+```yaml
+hardware_config:
+  INTEL_ARC_B580:
+    # Justify every entry: say why the hardware genuinely differs, not that a test failed.
+    rtol: 0.02
+```
+
+They override op-type and per-definition config, and are themselves overridden by CLI
+flags. The achieved error stays recorded in `Correctness`, so a relaxation that is masking
+a real bug remains visible.
+
+## Definitions the hardware cannot run
+
+A definition whose dtypes the device does not support is **skipped**, not benchmarked. Run
+anyway, it either fails in a way that reads as a broken kernel, or lands on a silently
+emulated path and gets timed as though it were native. Supported dtypes come from the
+device's capability record; the run logs what it skipped and why.
+
+This matters immediately on Xe2, which has no native FP8: FP8 definitions in the dataset
+are reported as unsupported rather than as failures.
+
 ## Intel GPUs
 
 Intel support targets Battlemage (Xe2-HPG, e.g. Arc B580) today, with Xe3P
@@ -122,13 +167,57 @@ valid replay input on an Intel GPU, so bringing up new hardware never requires
 re-collecting workloads.
 </Note>
 
+### First run compiles kernels
+
+Intel's runtime compiles kernels to device code on first use and caches them under
+`~/.cache/neo_compiler_cache`. On a cold cache that compilation takes minutes — long
+enough, left inside a timed evaluation, to report a perfectly good solution as `TIMEOUT`.
+
+Benchmark workers therefore warm the device up before signalling ready, so the cost is
+paid once at startup and outside any timed or timeout-bounded region. Expect the first
+run on a new machine to pause for a minute or two with a log line explaining why;
+subsequent runs start in about a second.
+
+### Warmup and measurement variance
+
+Intel GPUs default to **200 warmup iterations** rather than the generic 10. Discrete Arc
+parts ramp clocks from idle, and the first couple of hundred iterations run measurably
+slower than the steady state. This is a default, so any config layer or `--warmup-runs`
+still overrides it.
+
+Warmup does not address every source of variance. On integrated parts, measured latency is
+flat from the very first iteration — there is no ramp — but the package shifts power
+between CPU and GPU, producing sporadic excursions to roughly 2.5x that last for hundreds
+of iterations and then recover. Because those excursions can span more than half a
+measurement, they move the reported median, and a solution identical to the reference can
+report anywhere from 0.9x to 1.6x.
+
+<Warning>
+Treat single measurements from an integrated Intel GPU as indicative, not authoritative.
+Raise `--num-trials` and compare distributions rather than one number.
+</Warning>
+
+### Tensors reach workers through host memory
+
+Benchmark workers are separate processes that receive baseline tensors over a pipe. CUDA
+passes device tensors directly via IPC handles; torch has no equivalent for XPU, where
+pickling one raises `_share_fd_: only available on CPU`. The XPU capability record
+declares this, and baselines are copied through host memory for the crossing. The cost is
+one round trip per workload, not per iteration, and devices that support IPC are
+unaffected.
+
 ### Adding a new Intel part
 
-Devices are described by a capability record — supported dtypes, last-level cache size
-for cold-cache timing, the ahead-of-time SYCL target, and whether graph capture is
-available. Enabling a new part means adding a row to `_PART_PROFILES` in
-`flashinfer_bench/device/xpu.py`, not adding a code path.
+Most of the capability record comes from the driver, not from a table: cache size,
+sub-group widths, shared local memory, EU counts, and whether the part has XMX/DPAS
+matrix units are all read from `torch.xpu.get_device_properties` and recorded into the
+trace. A part FlashInfer-Bench has never seen still works, with no SYCL target set, so
+native kernels compile to SPIR-V and JIT at load time — the path that lets a device run
+on the day it arrives.
 
-A part with no row still works. It receives conservative defaults, and its SYCL target
-stays unset, which makes native kernels compile to SPIR-V and JIT at load time — the path
-that lets a device run on the day it arrives.
+`_PART_PROFILES` in `flashinfer_bench/device/xpu.py` only supplies what the driver cannot:
+a fallback cache size and the ahead-of-time SYCL target triple.
+
+Integrated parts often report a generic name — `Intel(R) Graphics` — which every such
+device would collide on. Those are disambiguated by PCI device id, giving ids like
+`INTEL_GRAPHICS_FD80`.

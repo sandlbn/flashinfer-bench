@@ -880,7 +880,96 @@ def check_trace_content(
                     )
                 )
 
+    messages.extend(_check_trace_comparability(trace_entries))
+
     return make_result(messages)
+
+
+def _check_trace_comparability(trace_entries: list[ScannedTrace]) -> list[CheckMessage]:
+    """Check that a definition's timed traces can be meaningfully compared.
+
+    A latency is only interpretable alongside the hardware it ran on and the methodology
+    that measured it. CUPTI reports device-side kernel duration; a device-event timer
+    brackets the launch too. Ranking those against each other produces a number that
+    looks authoritative and means nothing.
+
+    Missing metadata is reported as a warning, since traces predating these fields are
+    valid. Traces that mix *different* methodologies are an error, because that can only
+    arise from a run that recorded them.
+    """
+    messages: list[CheckMessage] = []
+
+    timings: set[str] = set()
+    hardware: set[str] = set()
+    untimed = 0
+    unidentified = 0
+
+    for trace_entry in trace_entries:
+        if trace_entry.error is not None:
+            continue
+        for trace in trace_entry.traces:
+            evaluation = trace.evaluation
+            if evaluation is None or evaluation.performance is None:
+                continue
+
+            timing = evaluation.environment.libs.get("timing")
+            if timing:
+                timings.add(timing)
+            else:
+                untimed += 1
+
+            if evaluation.environment.hardware_id:
+                hardware.add(evaluation.environment.hardware_id)
+            else:
+                unidentified += 1
+
+    if untimed:
+        messages.append(
+            CheckMessage(
+                level="warning",
+                message=(
+                    f"{untimed} timed trace(s) do not record a timing methodology "
+                    "(environment.libs.timing); their latencies cannot be safely compared "
+                    "against traces measured differently"
+                ),
+            )
+        )
+
+    if unidentified:
+        messages.append(
+            CheckMessage(
+                level="warning",
+                message=(
+                    f"{unidentified} timed trace(s) do not record a canonical hardware id "
+                    "(environment.hardware_id); leaderboard grouping falls back to the raw "
+                    "driver name, which varies across driver versions"
+                ),
+            )
+        )
+
+    if len(timings) > 1:
+        messages.append(
+            CheckMessage(
+                level="error",
+                message=(
+                    f"traces mix timing methodologies ({', '.join(sorted(timings))}); "
+                    "these latencies are not comparable and must not be ranked together"
+                ),
+            )
+        )
+
+    if len(hardware) > 1:
+        messages.append(
+            CheckMessage(
+                level="info",
+                message=(
+                    f"traces span multiple hardware ({', '.join(sorted(hardware))}); "
+                    "results must be grouped by hardware, not ranked against each other"
+                ),
+            )
+        )
+
+    return messages
 
 
 # ---------------------------------------------------------------------------
