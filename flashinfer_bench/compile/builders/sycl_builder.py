@@ -46,11 +46,51 @@ _ONEAPI_SEARCH_GLOBS = ("{root}/compiler/*/bin/icpx", "{root}/compiler/latest/bi
 _ONEAPI_DEFAULT_ROOTS = ("/opt/intel/oneapi", "/usr/local/oneapi")
 """Standard install locations to check when ``ONEAPI_ROOT`` is not set."""
 
+_AOT_DEVICE_ENV = "FIB_SYCL_AOT_DEVICE"
+"""ocloc device name to compile ahead-of-time for (e.g. ``xe3``, ``bmg-g21``, ``pvc``).
+
+Without an AOT target the kernel is JIT-compiled from generic SPIR-V, and CUTLASS-SYCL in
+particular can fall back to generic code paths instead of the DPAS / 2D-block-IO ones.
+``ocloc compile -device <name>`` lists what a given driver accepts.
+"""
+
+_ONEDNN_ENV = "FIB_ONEDNN_DIR"
+"""Points at a oneDNN install, for solutions declaring the ``onednn`` dependency."""
+
+_ONEDNN_DEFAULT_ROOTS = ("/opt/intel/oneapi/dnnl/latest", "/usr")
+"""Where oneDNN usually lives when oneAPI is installed."""
+
+_XE_FUSE_ENV = "FIB_XE_FUSE_DIR"
+"""Points at an Xe-Fuse checkout, for solutions that declare the ``xe-fuse`` dependency."""
+
+_SYCL_TLA_ENV = "FIB_SYCL_TLA_DIR"
+"""Points at a sycl-tla (CUTLASS-SYCL) checkout. Defaults to Xe-Fuse's fetched copy."""
+
+_CUTLASS_SYCL_SPIRV_EXTS = (
+    "+SPV_INTEL_split_barrier",
+    "+SPV_INTEL_2d_block_io",
+    "+SPV_INTEL_subgroup_matrix_multiply_accumulate",
+)
+"""SPIR-V extensions CUTLASS-SYCL kernels emit instructions for.
+
+They are off by default, and the failure is at *link* time, not compile:
+``RequiresExtension: Feature requires the following SPIR-V extension``. The block-io and
+matrix-multiply-accumulate extensions are what the XMX/DPAS paths need.
+"""
+
+_CUTLASS_SYCL_DEFINES = ("-DCUTLASS_ENABLE_SYCL", "-DSYCL_INTEL_TARGET")
+"""Switches CUTLASS to its SYCL backend.
+
+Without these, CUTLASS assumes CUDA and the compile fails looking for
+``cuda_runtime_api.h`` -- a confusing error that has nothing to do with the kernel.
+"""
+
 _DEPENDENCY_LDFLAGS: Dict[str, List[str]] = {
     "onemkl": ["-fsycl", "-lmkl_sycl", "-lmkl_intel_ilp64", "-lmkl_core", "-lmkl_tbb_thread"],
     "mkl": ["-fsycl", "-lmkl_sycl", "-lmkl_intel_ilp64", "-lmkl_core", "-lmkl_tbb_thread"],
-    "onednn": ["-ldnnl"],
-    "dnnl": ["-ldnnl"],
+    "onednn": ["-ldnnl", "-Wl,-rpath,/opt/intel/oneapi/dnnl/latest/lib"],
+    "dnnl": ["-ldnnl", "-Wl,-rpath,/opt/intel/oneapi/dnnl/latest/lib"],
+    "onednn-sycl": ["-ldnnl", "-Wl,-rpath,/opt/intel/oneapi/dnnl/latest/lib"],
     "level_zero": ["-lze_loader"],
 }
 """Link flags for dependencies a solution may declare."""
@@ -171,6 +211,66 @@ class SyclBuilder(Builder):
         """Select the source files to compile."""
         return [str(p) for p in source_paths if p.suffix in self._CPP_EXTENSIONS]
 
+    def _dependency_cflags(self, solution: Solution) -> List[str]:
+        """Compile flags implied by the solution's declared dependencies.
+
+        Currently only ``xe-fuse``, which needs CUTLASS-SYCL headers and the two defines
+        that select its SYCL backend.
+        """
+        deps = {d.lower() for d in solution.spec.dependencies}
+        flags: List[str] = []
+
+        if deps & {"onednn", "dnnl", "onednn-sycl"}:
+            roots = [os.environ[_ONEDNN_ENV]] if os.environ.get(_ONEDNN_ENV) else []
+            roots.extend(_ONEDNN_DEFAULT_ROOTS)
+            for root in roots:
+                header = Path(root) / "include" / "oneapi" / "dnnl" / "dnnl.hpp"
+                if header.exists():
+                    flags += [f"-I{Path(root) / 'include'}", f"-L{Path(root) / 'lib'}"]
+                    break
+            else:
+                raise BuildError(
+                    "Solution declares a oneDNN dependency but dnnl.hpp was not found. "
+                    f"Install oneAPI or set {_ONEDNN_ENV} to a oneDNN prefix."
+                )
+
+        if "xe-fuse" not in deps and "xefuse" not in deps:
+            return flags
+
+        xe_fuse_dir = os.environ.get(_XE_FUSE_ENV)
+        if not xe_fuse_dir or not Path(xe_fuse_dir).exists():
+            raise BuildError(
+                f"Solution declares the 'xe-fuse' dependency but {_XE_FUSE_ENV} is not set "
+                "to an Xe-Fuse checkout. Clone https://github.com/IntelLabs/Xe-Fuse and "
+                f"export {_XE_FUSE_ENV}=/path/to/Xe-Fuse"
+            )
+
+        xe_fuse = Path(xe_fuse_dir)
+        sycl_tla = Path(
+            os.environ.get(_SYCL_TLA_ENV) or xe_fuse / "build" / "_deps" / "sycl_tla-src"
+        )
+        if not sycl_tla.exists():
+            raise BuildError(
+                f"sycl-tla not found at {sycl_tla}. Configure Xe-Fuse once so its CMake "
+                f"fetches it, or set {_SYCL_TLA_ENV} to an existing checkout."
+            )
+
+        aot_device = os.environ.get(_AOT_DEVICE_ENV)
+        if aot_device:
+            # Must be on the compile line too, not just the link line: the target gates
+            # which device code paths the SYCL front end emits.
+            flags.append("-fsycl-targets=spir64_gen")
+        flags += list(_CUTLASS_SYCL_DEFINES)
+        for include in (
+            xe_fuse / "include",
+            sycl_tla / "include",
+            sycl_tla / "tools" / "util" / "include",
+            sycl_tla / "examples" / "common",
+            sycl_tla / "applications",
+        ):
+            flags.append(f"-I{include}")
+        return flags
+
     def _target_flags(self, solution: Solution) -> List[str]:
         """Ahead-of-time target flags for the devices this solution targets.
 
@@ -200,6 +300,9 @@ class SyclBuilder(Builder):
     def _link_flags(self, solution: Solution) -> List[str]:
         """Link flags implied by the solution's declared dependencies."""
         flags: List[str] = ["-fsycl"]
+        deps_lower = {d.lower() for d in solution.spec.dependencies}
+        if "xe-fuse" in deps_lower or "xefuse" in deps_lower:
+            flags += ["-Xspirv-translator", f"-spirv-ext={','.join(_CUTLASS_SYCL_SPIRV_EXTS)}"]
         for dependency in solution.spec.dependencies:
             extra = _DEPENDENCY_LDFLAGS.get(dependency.lower())
             if extra:
@@ -255,7 +358,12 @@ class SyclBuilder(Builder):
                 f"(expected one of {', '.join(self._CPP_EXTENSIONS)})"
             )
 
-        cflags = ["-fsycl", "-O3", *self._target_flags(solution)]
+        cflags = [
+            "-fsycl",
+            "-O3",
+            *self._target_flags(solution),
+            *self._dependency_cflags(solution),
+        ]
 
         try:
             with _compiler_env(compiler):

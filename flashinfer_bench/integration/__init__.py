@@ -1,5 +1,11 @@
 """Integration layer for external frameworks like FlashInfer."""
 
+from .weight_layout import (
+    deinterleave_output,
+    interleave_gate_up,
+    qwen_style_mlp_weights,
+    rms_row_scale,
+)
 from .xpu_kernels import (
     SGL_KERNEL_XPU,
     VLLM_XPU,
@@ -13,6 +19,10 @@ from .xpu_kernels import (
 
 __all__ = [
     "BaselineKernel",
+    "deinterleave_output",
+    "interleave_gate_up",
+    "qwen_style_mlp_weights",
+    "rms_row_scale",
     "SGL_KERNEL_XPU",
     "VLLM_XPU",
     "available_providers",

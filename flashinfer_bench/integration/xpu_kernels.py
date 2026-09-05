@@ -133,7 +133,145 @@ def run(x, residual, weight, eps):
     return hidden, res
 """
 
+_SILU_AND_MUL_VLLM = """import torch
+import vllm_xpu_kernels._C  # noqa: F401  (registers torch.ops._C)
+
+
+def run(x):
+    d = x.shape[-1] // 2
+    out = torch.empty(x.shape[:-1] + (d,), dtype=x.dtype, device=x.device)
+    torch.ops._C.silu_and_mul(out, x)
+    return out
+"""
+
+_MUL_AND_SILU_VLLM = """import torch
+import vllm_xpu_kernels._C  # noqa: F401  (registers torch.ops._C)
+
+
+def run(x):
+    d = x.shape[-1] // 2
+    out = torch.empty(x.shape[:-1] + (d,), dtype=x.dtype, device=x.device)
+    torch.ops._C.mul_and_silu(out, x)
+    return out
+"""
+
+_GELU_AND_MUL_VLLM = """import torch
+import vllm_xpu_kernels._C  # noqa: F401  (registers torch.ops._C)
+
+
+def run(x):
+    d = x.shape[-1] // 2
+    out = torch.empty(x.shape[:-1] + (d,), dtype=x.dtype, device=x.device)
+    torch.ops._C.gelu_and_mul(out, x)
+    return out
+"""
+
+_GELU_TANH_AND_MUL_VLLM = """import torch
+import vllm_xpu_kernels._C  # noqa: F401  (registers torch.ops._C)
+
+
+def run(x):
+    d = x.shape[-1] // 2
+    out = torch.empty(x.shape[:-1] + (d,), dtype=x.dtype, device=x.device)
+    torch.ops._C.gelu_tanh_and_mul(out, x)
+    return out
+"""
+
+_GELU_NEW_VLLM = """import torch
+import vllm_xpu_kernels._C  # noqa: F401  (registers torch.ops._C)
+
+
+def run(x):
+    out = torch.empty_like(x)
+    torch.ops._C.gelu_new(out, x)
+    return out
+"""
+
+_GELU_FAST_VLLM = """import torch
+import vllm_xpu_kernels._C  # noqa: F401  (registers torch.ops._C)
+
+
+def run(x):
+    out = torch.empty_like(x)
+    torch.ops._C.gelu_fast(out, x)
+    return out
+"""
+
+_GELU_QUICK_VLLM = """import torch
+import vllm_xpu_kernels._C  # noqa: F401  (registers torch.ops._C)
+
+
+def run(x):
+    out = torch.empty_like(x)
+    torch.ops._C.gelu_quick(out, x)
+    return out
+"""
+
+
 REGISTRY: Tuple[BaselineKernel, ...] = (
+    BaselineKernel(
+        provider=VLLM_XPU,
+        name="silu_and_mul",
+        op_type="activation",
+        inputs=("x",),
+        outputs=("out",),
+        source=_SILU_AND_MUL_VLLM,
+        description="vLLM XPU silu_and_mul (SYCL): SwiGLU gate, silu(x[..., :d]) * x[..., d:].",
+    ),
+    BaselineKernel(
+        provider=VLLM_XPU,
+        name="mul_and_silu",
+        op_type="activation_mul_silu",
+        inputs=("x",),
+        outputs=("out",),
+        source=_MUL_AND_SILU_VLLM,
+        description="vLLM XPU mul_and_silu (SYCL): x[..., :d] * silu(x[..., d:]).",
+    ),
+    BaselineKernel(
+        provider=VLLM_XPU,
+        name="gelu_and_mul",
+        op_type="activation_gelu",
+        inputs=("x",),
+        outputs=("out",),
+        source=_GELU_AND_MUL_VLLM,
+        description="vLLM XPU gelu_and_mul (SYCL): GeGLU with exact gelu.",
+    ),
+    BaselineKernel(
+        provider=VLLM_XPU,
+        name="gelu_tanh_and_mul",
+        op_type="activation_gelu_tanh",
+        inputs=("x",),
+        outputs=("out",),
+        source=_GELU_TANH_AND_MUL_VLLM,
+        description="vLLM XPU gelu_tanh_and_mul (SYCL): GeGLU with tanh-approximate gelu.",
+    ),
+    BaselineKernel(
+        provider=VLLM_XPU,
+        name="gelu_new",
+        op_type="gelu_new",
+        inputs=("x",),
+        outputs=("out",),
+        source=_GELU_NEW_VLLM,
+        description="vLLM XPU gelu_new (SYCL): tanh-approximate GELU, elementwise.",
+    ),
+    BaselineKernel(
+        provider=VLLM_XPU,
+        name="gelu_fast",
+        op_type="gelu_fast",
+        inputs=("x",),
+        outputs=("out",),
+        source=_GELU_FAST_VLLM,
+        description="vLLM XPU gelu_fast (SYCL): sigmoid-approximate GELU, elementwise.",
+    ),
+    BaselineKernel(
+        provider=VLLM_XPU,
+        name="gelu_quick",
+        op_type="gelu_quick",
+        inputs=("x",),
+        outputs=("out",),
+        source=_GELU_QUICK_VLLM,
+        description="vLLM XPU gelu_quick (SYCL): x * sigmoid(1.702 x), elementwise.",
+    ),
     BaselineKernel(
         provider=VLLM_XPU,
         name="rms_norm",

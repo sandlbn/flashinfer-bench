@@ -223,6 +223,97 @@ Both build large SYCL codebases. Cap `MAX_JOBS`: individual translation units ca
 several GiB, and sgl-kernel-xpu's build has an OOM guard that stops the build rather than
 letting the host thrash. Expect tens of minutes.
 
+## Fusing into the GEMM epilogue with Xe-Fuse
+
+> **Read [`xe-fuse.md`](xe-fuse.md) before writing an Xe-Fuse kernel.** It carries the
+> build flags, the verified operand layout, the interleaved-vs-split-half trap, the
+> duplicated-output constraint that blocks kernel chaining, and measured numbers. All of it
+> was established by building and running, and several points contradict what the source
+> reads like.
+
+### Overview
+
+Everything above optimizes memory-bound kernels — norms, activations, RoPE — which together
+are single-digit percentages of device time. GEMM is typically ~70-85%, runs through oneDNN,
+and you will not beat oneDNN by writing a better matrix multiply.
+
+The lever is to stop treating them as separate kernels. [Xe-Fuse](https://github.com/IntelLabs/Xe-Fuse)
+folds the memory-bound work into the GEMM's *epilogue*, on data still in registers, removing
+both the extra launches and the round trip through memory.
+
+### Generating a fused kernel
+
+```bash
+git clone https://github.com/IntelLabs/Xe-Fuse.git
+cd Xe-Fuse/autotune
+python generate_kernel.py --preset k2 --m 2048 --n 9728 --k 896 -o k2_qwen.cpp
+```
+
+| Preset | Fusion | Maps to |
+| --- | --- | --- |
+| `k1`, `k1v2` | `D = acc * R[m]` | GEMM + RMSNorm row scaling |
+| `k2`, `k2v2` | `D = SwiGLU(acc * R[m])` | gate/up projection + norm + SwiGLU |
+| `k2_geglu`, `k2v2_geglu` | `D = GeGLU(acc * R[m])` | Gemma-style gated FFN |
+| `k0a` | `D = gamma[n] * (acc + residual)` | down projection + residual + norm |
+| `k3`, `k4`, `k4v2` | `D = RoPE(acc * R[m], cos_sin)` | qkv projection + RoPE |
+| `w8a8_dequant` | `int32_acc * scale_token[m] * scale_channel[n]` | quantized GEMM |
+
+The `v2` variants use a merged visitor (flat tree) rather than a composed one — same maths,
+different codegen. Benchmark them against each other rather than assuming.
+
+### Building one
+
+The generated kernel is a single translation unit including CUTLASS headers. It needs
+`sycl-tla` (Intel's CUTLASS-SYCL), which the project's CMake fetches, and two definitions
+that switch CUTLASS to its SYCL backend. Without them the compile fails looking for
+`cuda_runtime_api.h`, which is the wrong backend entirely:
+
+```bash
+icpx -fsycl -O2 -std=c++17 \
+  -DCUTLASS_ENABLE_SYCL -DSYCL_INTEL_TARGET \
+  -I<xe-fuse>/include \
+  -I<sycl-tla>/include -I<sycl-tla>/tools/util/include \
+  -I<sycl-tla>/examples/common -I<sycl-tla>/applications \
+  -c k2_qwen.cpp -o k2_qwen.o
+```
+
+One TU, a few minutes. This is a different cost profile from `sgl-kernel-xpu`, which
+instantiates hundreds of CUTLASS translation units and will exhaust host memory on a small
+machine.
+
+### Optimizing further
+
+The generated kernel is a starting point, not an answer. What it emits is a composable
+Epilogue Visitor Tree:
+
+```cpp
+using EVT = b::SwiGLU<b::ScaleRows<b::Acc, TileShape, float>>;
+using KernelConfig = b::MakeGemm<EVT, bf16, bf16, bf16, float, float, TileShape>;
+```
+
+That tree is the thing to optimize, built from a small vocabulary:
+
+- **Sources** — `Acc`, `AuxLoad<E>`, `ColBroadcast` (per-row `scale[m]`), `RowBroadcast`
+  (per-column `gamma[n]`)
+- **Binary** — `Mul`, `Add`, `ScaleRows`, `ScaleCols`, `AddResidual`, `BiasAdd`
+- **Activations** — `GeLU`, `GeLUTanh`, `SiLU`, `ReLU`, `Sigmoid`
+- **Pairwise (lane shuffle)** — `SwiGLU`, `GeGLU`, `RoPE`
+
+Two cheap axes to search:
+
+1. **Tile shape** — `--tile 128x256x32`, or `auto`. The same tuning that produced a
+   1.69x-3.93x spread on a hand-written SYCL kernel applies here too.
+2. **The tree itself** — composing a fusion no preset covers, e.g. residual add *and* a
+   gated activation in one epilogue.
+
+Wrap the result as a Solution the usual way: replace the generated standalone `main` with a
+TVM-FFI entry point taking the Definition's tensors and running on the framework's queue.
+It then competes in the same benchmark under the same correctness gates as everything else.
+
+**Xe-Fuse is marked "not stable" and not production-ready by IntelLabs.** Treat it as one
+solution source among several, never as a dependency — if it regresses you lose a
+contender, not the pipeline.
+
 ## Choosing a SYCL target
 
 Leaving `sycl_target` unset compiles to SPIR-V and JIT-compiles at load. That is portable

@@ -50,23 +50,40 @@ class KernelGenerator:
         self.use_ffi = use_ffi
 
         if api_key is None:
-            api_key = os.getenv("LLM_API_KEY")
-            if api_key is None:
+            # ANTHROPIC_API_KEY is accepted too, so a Foundry setup needs only the two
+            # ANTHROPIC_* variables rather than duplicating the key into LLM_API_KEY.
+            api_key = os.getenv("LLM_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
+            if not api_key:
                 raise ValueError(
-                    "API key must be provided or set in LLM_API_KEY environment variable"
+                    "API key must be provided, or set in LLM_API_KEY (or ANTHROPIC_API_KEY "
+                    "when using Microsoft Foundry)"
                 )
 
-        client_kwargs = {"api_key": api_key}
-        if base_url is not None:
-            client_kwargs["base_url"] = base_url
+        # Two client paths. Claude on Microsoft Foundry is reached with the native
+        # Anthropic SDK when ANTHROPIC_FOUNDRY_RESOURCE is set: that gets adaptive
+        # thinking and effort control, which matter for kernel generation because it is
+        # reasoning-heavy work. Everything else goes through the OpenAI-compatible
+        # client, including Foundry's OpenAI endpoint if you prefer it.
+        foundry_resource = os.getenv("ANTHROPIC_FOUNDRY_RESOURCE")
+        if foundry_resource:
+            from anthropic import AsyncAnthropicFoundry
 
-        self.client = openai.AsyncOpenAI(**client_kwargs)
+            self.backend = "anthropic"
+            self.client = AsyncAnthropicFoundry(resource=foundry_resource, api_key=api_key)
+            print(f"Using Anthropic on Microsoft Foundry (resource={foundry_resource})")
+        else:
+            self.backend = "openai"
+            client_kwargs = {"api_key": api_key}
+            if base_url is not None:
+                client_kwargs["base_url"] = base_url
+            self.client = openai.AsyncOpenAI(**client_kwargs)
 
     def _get_supported_language(self) -> SupportedLanguages:
         language_map = {
             "python": SupportedLanguages.PYTHON,
             "triton": SupportedLanguages.TRITON,
             "cuda": SupportedLanguages.CUDA,
+            "sycl": SupportedLanguages.SYCL,
         }
         if self.language.lower() in language_map:
             return language_map[self.language.lower()]
@@ -380,6 +397,7 @@ class KernelGenerator:
         patterns = {
             "kernel.h": r'<header_file name="kernel\.h">(.*?)</header_file>',
             "kernel.cu": r'<cuda_file name="kernel\.cu">(.*?)</cuda_file>',
+            "kernel.cpp": r'<sycl_file name="kernel\.cpp">(.*?)</sycl_file>',
             "main.cpp": r'<cpp_file name="main\.cpp">(.*?)</cpp_file>',
         }
 
@@ -436,7 +454,24 @@ class KernelGenerator:
     async def _generate_code_from_prompt(self, prompt: str):
         """Generate code from prompt using async API"""
         try:
-            if self.model_name.startswith("gpt-5") or self.model_name.startswith("o3"):
+            if self.backend == "anthropic":
+                # Streaming because kernel generation runs long at high effort, and a
+                # non-streaming request with a large max_tokens can hit the HTTP timeout.
+                async with self.client.messages.stream(
+                    model=self.model_name,
+                    max_tokens=64000,
+                    thinking={"type": "adaptive"},
+                    output_config={"effort": self.reasoning_effort},
+                    messages=[{"role": "user", "content": prompt}],
+                ) as stream:
+                    message = await stream.get_final_message()
+                if message.stop_reason == "refusal":
+                    detail = getattr(message.stop_details, "explanation", "")
+                    raise RuntimeError(f"Model declined to generate this kernel: {detail}")
+                generated_code = "".join(
+                    block.text for block in message.content if block.type == "text"
+                ).strip()
+            elif self.model_name.startswith("gpt-5") or self.model_name.startswith("o3"):
                 response = await self.client.responses.create(
                     model=self.model_name, input=prompt, reasoning={"effort": self.reasoning_effort}
                 )
@@ -465,7 +500,13 @@ class KernelGenerator:
             solution_name = f"{self.model_name}_{definition.name}_{self.language}_optimized_r{round_num}_c{candidate_idx}"
             solution_description = f"{self.model_name} optimized kernel for {definition.name} (round {round_num}, candidate {candidate_idx})"
 
-        if self.language.lower() == "cuda" and isinstance(code, dict):
+        if self.language.lower() == "sycl":
+            if isinstance(code, dict):
+                code = next(iter(code.values()))
+            sources = [SourceFile(path="kernel.cpp", content=code)]
+            # The SYCL prompt instructs the model to export this exact symbol.
+            entry_point = "kernel.cpp::run"
+        elif self.language.lower() == "cuda" and isinstance(code, dict):
             sources = []
             for filename, content in code.items():
                 sources.append(SourceFile(path=filename, content=content))

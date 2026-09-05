@@ -2,7 +2,7 @@
 This file contains the prompts for baseline agent generation.
 """
 
-from flashinfer_bench import FFI_PROMPT_SIMPLE, Definition, EvaluationStatus, Trace
+from flashinfer_bench import FFI_PROMPT_SIMPLE, SYCL_PROMPT_SIMPLE, Definition, EvaluationStatus, Trace
 
 
 def _format_definition(definition: Definition) -> str:
@@ -318,10 +318,79 @@ Requirements:
 - Handle exceptions gracefully with proper error messages"""
 
 
+SYCL_PROMPT = """You are an expert Intel GPU kernel engineer. Write a SYCL kernel that
+implements the following operation, targeting {target_gpu}.
+
+{definition}
+
+Requirements:
+- SYCL is C++. Emit one file.
+- Export the entry point as the symbol `run` using TVM_FFI_DLL_EXPORT_TYPED_FUNC.
+- Arguments arrive in Definition order: every input, then every output.
+- Validate shapes and dtypes with TVM_FFI_ICHECK before touching data.
+- Accumulate in float even when inputs and outputs are half precision.
+- Handle the dtypes the Definition declares; reject anything else with a clear error.
+
+Output format - emit exactly one file in this XML wrapper and nothing else:
+
+<sycl_file name="kernel.cpp">
+// your SYCL code here
+</sycl_file>
+
+The binding rules that follow are not optional; a kernel that ignores them will either
+fail to load or corrupt memory.
+"""
+
+
+SYCL_OPTIMIZATION_PROMPT = """You are optimizing a SYCL kernel for {target_gpu}.
+
+{definition}
+
+Current implementation:
+{current_code}
+
+Results from the last run:
+{trace_logs}
+
+Work in this order:
+
+1. CORRECTNESS FIRST. If the kernel failed to compile, failed at runtime, or produced
+   incorrect output, fix that and change nothing else. A fast wrong kernel is worthless -
+   the harness will reject it.
+   - Compile errors: check SYCL API usage and that every captured value is device-copyable.
+   - Incorrect output: check indexing at the boundary, and that accumulation is in float.
+
+2. THEN PERFORMANCE, if the kernel is already correct. What actually moves the needle on
+   Intel GPUs, roughly in order:
+   - Work-group and sub-group sizing. Sub-group widths are 16 and 32; pin the one you
+     depend on with the reqd_sub_group_size attribute. Intel's own tuned Triton kernels
+     overwhelmingly use large work-groups - num_warps=32 equivalents - not the small
+     CUDA-style blocks you may be used to.
+   - Group collectives - reduce_over_group - instead of hand-written shared-memory trees.
+   - Vectorised loads for memory-bound kernels; coalesced access across the sub-group.
+   - Shared local memory via local_accessor, staying inside the device budget.
+   - For GEMM-shaped work, prefer oneMKL or oneDNN over a hand-written kernel. Hand-write
+     when fusing operations the libraries do not cover - that is where the real headroom is.
+
+Report the speedup you are aiming for and why the change should produce it.
+
+Output format - emit exactly one file in this XML wrapper and nothing else:
+
+<sycl_file name="kernel.cpp">
+// your improved SYCL code here
+</sycl_file>
+"""
+
+
 def get_prompt(
     language: str, definition: Definition, target_gpu: str = "H100", use_ffi: bool = True
 ) -> str:
-    prompts = {"triton": TRITON_PROMPT, "python": PYTHON_PROMPT, "cuda": CUDA_PROMPT}
+    prompts = {
+        "triton": TRITON_PROMPT,
+        "python": PYTHON_PROMPT,
+        "cuda": CUDA_PROMPT,
+        "sycl": SYCL_PROMPT,
+    }
 
     if language not in prompts:
         raise ValueError(f"Unsupported language: {language}")
@@ -332,6 +401,10 @@ def get_prompt(
     if language.lower() == "cuda":
         binding_prompt = FFI_PROMPT_SIMPLE if use_ffi else TORCH_BINDINGS_PROMPT
         base_prompt = base_prompt + "\n\n" + binding_prompt
+    elif language.lower() == "sycl":
+        # Appended, never formatted: it contains C++ braces, which str.format would
+        # read as placeholders and reject.
+        base_prompt = base_prompt + "\n\n" + SYCL_PROMPT_SIMPLE
 
     return base_prompt
 
@@ -344,7 +417,11 @@ def get_optimization_prompt(
     target_gpu: str = "H100",
     use_ffi: bool = True,
 ) -> str:
-    optimization_prompts = {"triton": TRITON_OPTIMIZATION_PROMPT, "cuda": CUDA_OPTIMIZATION_PROMPT}
+    optimization_prompts = {
+        "triton": TRITON_OPTIMIZATION_PROMPT,
+        "cuda": CUDA_OPTIMIZATION_PROMPT,
+        "sycl": SYCL_OPTIMIZATION_PROMPT,
+    }
 
     if language not in optimization_prompts:
         raise ValueError(f"Unsupported language for optimization: {language}")
@@ -362,5 +439,7 @@ def get_optimization_prompt(
     if language.lower() == "cuda":
         binding_prompt = FFI_PROMPT_SIMPLE if use_ffi else TORCH_BINDINGS_PROMPT
         base_prompt = base_prompt + "\n\n" + binding_prompt
+    elif language.lower() == "sycl":
+        base_prompt = base_prompt + "\n\n" + SYCL_PROMPT_SIMPLE
 
     return base_prompt
