@@ -61,6 +61,21 @@ class Capabilities:
         Warmup iterations this device needs before a measurement settles, when nothing
         else specifies a value. Devices that ramp clocks from idle need considerably more
         than the generic default; ``None`` means the generic default is fine.
+    preferred_sub_group_size : Optional[int]
+        Sub-group (warp/wavefront) width a kernel should ask for on this device. Intel
+        parts commonly offer several -- Battlemage reports {16, 32} -- and the widest is
+        normally what a group reduction is cheapest over. ``None`` means the device has no
+        preference worth expressing, and a kernel should not pin one.
+    vector_bytes : int
+        Widest single memory access, in bytes. A memory-bound kernel that reads one
+        element per work-item leaves most of the pipe idle: widening RMSNorm's loads from
+        2 bytes to this value measured 1.35x at prefill batch sizes on Battlemage. Use
+        :meth:`vector_width` to turn it into an element count for a dtype.
+    supports_large_grf : bool
+        Whether the device can run kernels in a large register-file mode (256 registers
+        per thread instead of 128). Only meaningful when a kernel actually spills: on
+        Battlemage a CUTLASS tile spilling 8576 bytes/thread went from 8.67 ms to 0.62 ms
+        with it, while a kernel that already fits gains nothing and loses occupancy.
     extra : Dict[str, Any]
         Device-specific details that have no cross-vendor meaning -- ISA revision,
         subgroup sizes, shared-local-memory budget, EU/SM counts. Kept untyped on
@@ -74,6 +89,9 @@ class Capabilities:
     supports_graphs: bool = False
     supports_ipc_tensors: bool = True
     recommended_warmup_runs: Optional[int] = None
+    preferred_sub_group_size: Optional[int] = None
+    vector_bytes: int = 16
+    supports_large_grf: bool = False
     extra: Dict[str, Any] = field(default_factory=dict)
 
     def supports_dtype(self, dtype: str) -> bool:
@@ -83,3 +101,13 @@ class Capabilities:
     def unsupported_dtypes(self, dtypes: Any) -> FrozenSet[str]:
         """Return the subset of ``dtypes`` this device cannot execute."""
         return frozenset(d for d in dtypes if d not in self.supported_dtypes)
+
+    def vector_width(self, itemsize: int) -> int:
+        """Elements of ``itemsize`` bytes that fit in one widest-possible access.
+
+        At least one, so a dtype wider than the access width still produces a usable
+        loop rather than a zero-length one.
+        """
+        if itemsize <= 0:
+            raise ValueError(f"itemsize must be positive, got {itemsize}")
+        return max(1, self.vector_bytes // itemsize)

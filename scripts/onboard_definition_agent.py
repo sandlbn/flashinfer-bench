@@ -212,8 +212,7 @@ def tool_create_hf_pr(
     repo_id: str, title: str, description: str, branch: str, worktree: str
 ) -> str:
     # Step 1: create the PR (empty) to get the PR number
-    script_create = textwrap.dedent(
-        f"""\
+    script_create = textwrap.dedent(f"""\
         from huggingface_hub import HfApi
         api = HfApi()
         pr = api.create_pull_request(
@@ -224,8 +223,7 @@ def tool_create_hf_pr(
         )
         print('PR_URL:', pr.url)
         print('PR_NUM:', pr.num)
-    """
-    )
+    """)
     cmd = f"conda run -n {CONDA_ENV} python -c {repr(script_create)}"
     result = _run(cmd, timeout=60)
     out = result.get("stdout", "")
@@ -444,8 +442,7 @@ def dispatch_tool(name: str, inputs: dict) -> str:
 # System prompt
 # ──────────────────────────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT = textwrap.dedent(
-    """\
+SYSTEM_PROMPT = textwrap.dedent("""\
     You are a headless kernel definition onboarding agent for FlashInfer-Bench running in CI.
     Your job: submit PR1 (GitHub flashinfer-bench) and PR2 (HuggingFace flashinfer-trace)
     for a new kernel definition. No human is available — handle all steps autonomously.
@@ -537,8 +534,7 @@ SYSTEM_PROMPT = textwrap.dedent(
       ONBOARD_COMPLETE: pr1=<url> pr2=<url>
     On unrecoverable failure after max_attempts:
       ONBOARD_FAILED: <reason>
-"""
-).format(conda_env=CONDA_ENV, trace_dir=TRACE_DIR_DEFAULT, repo_root=REPO_ROOT)
+""").format(conda_env=CONDA_ENV, trace_dir=TRACE_DIR_DEFAULT, repo_root=REPO_ROOT)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -759,8 +755,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Headless definition onboarding agent — generates PR1 and PR2",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=textwrap.dedent(
-            """\
+        epilog=textwrap.dedent("""\
             Examples:
               # Prompt-only:
               python scripts/onboard_definition_agent.py \\
@@ -779,8 +774,7 @@ def main():
                   --prompt "onboard gqa_paged_prefill_causal_h40_kv10_d128_ps1 for Llama 3.1 70B" \\
                   --model-path /path/to/llama-70b \\
                   --tp 4
-        """
-        ),
+        """),
     )
     parser.add_argument("--prompt", default=None, help="Natural language onboarding request")
     parser.add_argument(

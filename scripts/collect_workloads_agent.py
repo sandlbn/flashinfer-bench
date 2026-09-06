@@ -364,8 +364,7 @@ def dispatch_tool(name: str, inputs: dict) -> str:
 # Agent loop
 # ──────────────────────────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT = textwrap.dedent(
-    """\
+SYSTEM_PROMPT = textwrap.dedent("""\
     You are a headless workload collection agent for FlashInfer-Bench running in CI.
     Your job: collect workloads for the given kernel definitions using SGLang inference,
     then verify the results. No human is available — you must handle all failures autonomously.
@@ -403,8 +402,7 @@ SYSTEM_PROMPT = textwrap.dedent(
       COLLECTION_COMPLETE: <definition_name> <workload_count> workloads <blob_count> blobs
     If you exhaust all retries, output:
       COLLECTION_FAILED: <reason>
-"""
-).format(conda_env=CONDA_ENV)
+""").format(conda_env=CONDA_ENV)
 
 
 def run_agent(
@@ -542,8 +540,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Headless workload collection agent (Anthropic tool-calling)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=textwrap.dedent(
-            """\
+        epilog=textwrap.dedent("""\
             Examples:
               # Explicit (fastest — no discovery phase):
               python collect_workloads_agent.py \\
@@ -559,8 +556,7 @@ def main():
               python collect_workloads_agent.py \\
                 --prompt "collect mla_ragged for DeepSeek V3" \\
                 --model-path /path/to/deepseek-v3
-        """
-        ),
+        """),
     )
     parser.add_argument(
         "--prompt",

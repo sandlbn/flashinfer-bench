@@ -273,7 +273,7 @@ Collection stays on NVIDIA because it depends on SGLang with the FlashInfer back
 collection there, then benchmark the resulting workloads on whatever hardware you have:
 
 ```bash
-flashinfer-bench run --local tmp/flashinfer-trace --devices xpu:0
+FIB_DEVICE_BACKEND=xpu flashinfer-bench run --local tmp/flashinfer-trace
 ```
 
 Definitions whose dtypes the target device cannot execute (FP8 on Xe2, for instance) are

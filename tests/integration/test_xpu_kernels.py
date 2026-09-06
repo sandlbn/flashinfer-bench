@@ -3,6 +3,13 @@
 The registry is checked without either provider installed: a baseline that binds to the
 wrong definition would produce a confidently wrong comparison, so matching is what these
 tests are mostly about.
+
+The fixtures below deliberately mirror the signature the shipped dataset actually uses --
+``(hidden_states, weight) -> (output)``, with epsilon carried in the reference rather than
+declared as an input. An earlier version of these tests invented its own convention, which
+matched the registry and nothing else, so every test passed while ``add-baselines`` bound
+to zero of 190 real definitions. :class:`TestMatchesRealDataset` is the guard against that
+happening again.
 """
 
 import pytest
@@ -11,16 +18,23 @@ from flashinfer_bench.data import Definition, SupportedLanguages, TensorSpec
 from flashinfer_bench.integration import xpu_kernels as xk
 
 RMSNORM_REF = (
-    "import torch\n\n\n"
-    "def run(x, weight, eps):\n"
-    "    return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + eps) * weight\n"
+    "import torch\n\n"
+    "EPS = 1e-6\n\n\n"
+    "def run(hidden_states, weight):\n"
+    "    x = hidden_states.to(torch.float32)\n"
+    "    return (x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + EPS) * weight).to(\n"
+    "        hidden_states.dtype\n"
+    "    )\n"
 )
 
 FUSED_REF = (
-    "import torch\n\n\n"
-    "def run(x, residual, weight, eps):\n"
-    "    r = x + residual\n"
-    "    return r * torch.rsqrt(r.pow(2).mean(-1, keepdim=True) + eps) * weight, r\n"
+    "import torch\n\n"
+    "EPS = 1e-6\n\n\n"
+    "def run(hidden_states, residual, weight):\n"
+    "    r = hidden_states.to(torch.float32) + residual.to(torch.float32)\n"
+    "    return (r * torch.rsqrt(r.pow(2).mean(-1, keepdim=True) + EPS) * weight).to(\n"
+    "        hidden_states.dtype\n"
+    "    )\n"
 )
 
 
@@ -30,11 +44,10 @@ def _rmsnorm_definition(name: str = "rn") -> Definition:
         op_type="rmsnorm",
         axes={"tokens": {"type": "var"}, "hidden": {"type": "const", "value": 896}},
         inputs={
-            "x": TensorSpec(shape=["tokens", "hidden"], dtype="float32"),
+            "hidden_states": TensorSpec(shape=["tokens", "hidden"], dtype="float32"),
             "weight": TensorSpec(shape=["hidden"], dtype="float32"),
-            "eps": TensorSpec(shape=None, dtype="float32"),
         },
-        outputs={"out": TensorSpec(shape=["tokens", "hidden"], dtype="float32")},
+        outputs={"output": TensorSpec(shape=["tokens", "hidden"], dtype="float32")},
         reference=RMSNORM_REF,
     )
 
@@ -45,15 +58,13 @@ def _fused_definition(name: str = "far") -> Definition:
         op_type="rmsnorm",
         axes={"tokens": {"type": "var"}, "hidden": {"type": "const", "value": 896}},
         inputs={
-            "x": TensorSpec(shape=["tokens", "hidden"], dtype="float32"),
+            "hidden_states": TensorSpec(shape=["tokens", "hidden"], dtype="float32"),
             "residual": TensorSpec(shape=["tokens", "hidden"], dtype="float32"),
             "weight": TensorSpec(shape=["hidden"], dtype="float32"),
-            "eps": TensorSpec(shape=None, dtype="float32"),
         },
-        outputs={
-            "out": TensorSpec(shape=["tokens", "hidden"], dtype="float32"),
-            "residual_out": TensorSpec(shape=["tokens", "hidden"], dtype="float32"),
-        },
+        # One output: the normalized result. Upstream also updates the residual in place,
+        # which this definition does not model -- matching that shape is the wrapper's job.
+        outputs={"output": TensorSpec(shape=["tokens", "hidden"], dtype="float32")},
         reference=FUSED_REF,
     )
 
@@ -141,7 +152,7 @@ class TestSolutionGeneration:
         (solution,) = xk.make_baseline_solutions(_fused_definition(), providers=[xk.VLLM_XPU])
         source = solution.sources[0].content
         assert "torch.ops._C.fused_add_rms_norm" in source
-        assert "def run(x, residual, weight, eps):" in source
+        assert "def run(hidden_states, residual, weight):" in source
 
     def test_in_place_kernels_clone_so_trials_stay_comparable(self, all_providers):
         """The upstream fused op mutates its inputs; trials must see identical data."""
@@ -173,3 +184,159 @@ class TestRegistryIntegrity:
         for kernel in xk.REGISTRY:
             expected = "def run(" + ", ".join(kernel.inputs) + "):"
             assert expected in kernel.source, f"{kernel.solution_name}: {expected}"
+
+
+class TestEpsilonResolution:
+    """Epsilon lives in the reference, not the inputs, and is not uniform across the set."""
+
+    def test_reads_epsilon_from_the_reference(self):
+        assert xk.definition_eps(_rmsnorm_definition()) == pytest.approx(1e-6)
+
+    def test_a_definition_may_use_a_different_epsilon(self):
+        """Two shipped RMSNorm definitions use 1e-5; assuming 1e-6 would corrupt them."""
+        definition = _rmsnorm_definition().model_copy(
+            update={"reference": RMSNORM_REF.replace("EPS = 1e-6", "EPS = 1e-5")}
+        )
+        assert xk.definition_eps(definition) == pytest.approx(1e-5)
+
+    def test_falls_back_to_the_framework_default(self):
+        """vLLM and SGLang both default RMSNorm epsilon to 1e-6."""
+        definition = _rmsnorm_definition().model_copy(
+            update={"reference": "import torch\n\n\ndef run(hidden_states, weight):\n    ...\n"}
+        )
+        assert xk.definition_eps(definition) == pytest.approx(xk.DEFAULT_EPS)
+
+    def test_epsilon_is_baked_into_the_generated_wrapper(self, all_providers):
+        definition = _rmsnorm_definition().model_copy(
+            update={"reference": RMSNORM_REF.replace("EPS = 1e-6", "EPS = 1e-5")}
+        )
+        for solution in xk.make_baseline_solutions(definition):
+            assert "EPS = 1e-05" in solution.sources[0].content
+
+
+class TestNearMissDiagnostics:
+    """A signature mismatch and an absent provider must not look the same."""
+
+    def test_names_the_differing_inputs(self, all_providers):
+        definition = _rmsnorm_definition().model_copy(
+            update={"inputs": {"x": TensorSpec(shape=["tokens", "hidden"], dtype="float32")}}
+        )
+        reasons = xk.explain_no_match(definition)
+        assert reasons and any("inputs differ" in r for r in reasons)
+
+    def test_a_different_op_type_is_not_a_near_miss(self, all_providers):
+        definition = _rmsnorm_definition().model_copy(update={"op_type": "gemm"})
+        assert xk.explain_no_match(definition) == []
+
+    def test_a_match_has_nothing_to_explain(self, all_providers):
+        assert xk.explain_no_match(_rmsnorm_definition()) == []
+
+
+class TestMatchesRealDataset:
+    """The guard that the fixture-based tests above cannot provide.
+
+    Everything else here checks the registry against definitions this file wrote, so the
+    registry and the tests can agree with each other and with nothing else -- which is
+    exactly what happened: eleven entries matched zero of 190 shipped definitions while
+    the suite stayed green. These tests read the dataset instead, and skip when it is not
+    checked out rather than asserting on a fixture that proves nothing.
+    """
+
+    @staticmethod
+    def _dataset_definitions(op_type: str):
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[2] / "tmp" / "flashinfer-trace"
+        paths = sorted((root / "definitions" / op_type).glob("*.json"))
+        if not paths:
+            pytest.skip("flashinfer-trace dataset not checked out under tmp/")
+        return [Definition.model_validate_json(p.read_text()) for p in paths]
+
+    def test_some_shipped_definition_gets_a_baseline(self, all_providers):
+        definitions = self._dataset_definitions("rmsnorm")
+        matched = [d.name for d in definitions if xk.find_baselines(d)]
+        assert matched, (
+            "No shipped RMSNorm definition matches any registry entry. The registry's "
+            "signatures have drifted from the dataset's; compare kernel.inputs against "
+            f"{tuple(definitions[0].inputs)} -> {tuple(definitions[0].outputs)}."
+        )
+
+    def test_every_registered_op_type_exists_in_the_dataset(self, all_providers):
+        """An entry whose op_type no definition uses can never match anything.
+
+        This was an expected failure until the `activation` op_type was written: seven
+        vLLM entries declared op_types (`activation`, `activation_gelu`, `gelu_quick`,
+        ...) that no definition used and no schema described. They are now one op_type
+        whose variants are told apart by their `fi_api` tag, because every gated
+        activation shares a signature.
+        """
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[2] / "tmp" / "flashinfer-trace"
+        if not (root / "definitions").is_dir():
+            pytest.skip("flashinfer-trace dataset not checked out under tmp/")
+        present = {p.name for p in (root / "definitions").iterdir() if p.is_dir()}
+        registered = {k.op_type for k in xk.REGISTRY}
+        orphans = sorted(registered - present)
+        assert not orphans, (
+            f"Registry entries declare op_types absent from the dataset: {orphans}. "
+            "They cannot match any definition, and there is no docs/op-types/ schema to "
+            "author one against."
+        )
+
+
+ROPE_REF = "import torch\n\n\ndef run(q, k, cos_sin_cache, positions):\n    ...\n"
+
+
+def _rope_definition(name: str = "rope_neox_style_d128") -> Definition:
+    return Definition(
+        name=name,
+        op_type="rope",
+        axes={
+            "num_tokens": {"type": "var"},
+            "num_qo_heads": {"type": "var"},
+            "num_kv_heads": {"type": "var"},
+            "head_size": {"type": "const", "value": 128},
+            "rotary_dim": {"type": "const", "value": 64},
+            "max_seq_len": {"type": "var"},
+        },
+        inputs={
+            "q": TensorSpec(shape=["num_tokens", "num_qo_heads", "head_size"], dtype="bfloat16"),
+            "k": TensorSpec(shape=["num_tokens", "num_kv_heads", "head_size"], dtype="bfloat16"),
+            "cos_sin_cache": TensorSpec(shape=["max_seq_len", "rotary_dim"], dtype="float32"),
+            "positions": TensorSpec(shape=["num_tokens"], dtype="int64"),
+        },
+        outputs={
+            "q_out": TensorSpec(
+                shape=["num_tokens", "num_qo_heads", "head_size"], dtype="bfloat16"
+            ),
+            "k_out": TensorSpec(
+                shape=["num_tokens", "num_kv_heads", "head_size"], dtype="bfloat16"
+            ),
+        },
+        reference=ROPE_REF,
+    )
+
+
+class TestRopeStyle:
+    """The two rope styles produce different numbers, so the style is never assumed."""
+
+    def test_neox_is_read_from_the_definition(self):
+        assert xk.definition_is_neox(_rope_definition("rope_neox_style_d128")) is True
+
+    def test_gptj_style_is_not_neox(self):
+        assert xk.definition_is_neox(_rope_definition("rope_gptj_interleaved_d128")) is False
+
+    def test_style_is_baked_into_the_wrapper(self, all_providers):
+        (solution,) = xk.make_baseline_solutions(_rope_definition(), providers=[xk.VLLM_XPU])
+        assert "IS_NEOX = True" in solution.sources[0].content
+
+    def test_rope_binds_to_the_rope_definition(self, all_providers):
+        found = {k.name for k in xk.find_baselines(_rope_definition())}
+        assert "rotary_embedding" in found
+
+    def test_the_wrapper_does_not_mutate_its_inputs(self, all_providers):
+        """Upstream rotates in place; repeated benchmark trials must see identical data."""
+        (solution,) = xk.make_baseline_solutions(_rope_definition(), providers=[xk.VLLM_XPU])
+        source = solution.sources[0].content
+        assert "q.clone()" in source and "k.clone()" in source

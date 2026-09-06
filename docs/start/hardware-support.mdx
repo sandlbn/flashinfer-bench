@@ -229,7 +229,7 @@ solution:
 
 ```bash
 flashinfer-bench add-baselines --local ./dataset
-flashinfer-bench run --local ./dataset --devices xpu:0
+FIB_DEVICE_BACKEND=xpu flashinfer-bench run --local ./dataset
 ```
 
 Baselines match strictly on op_type and exact input/output names, so a signature near-miss

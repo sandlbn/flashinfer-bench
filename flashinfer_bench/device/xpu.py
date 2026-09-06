@@ -230,6 +230,17 @@ class XpuAccelerator(Accelerator):
                 libs["level_zero_driver"] = str(driver)
         except Exception:
             pass
+        try:
+            # Which upstream kernel libraries were present, and at what version. A trace
+            # measuring a provider's kernel is otherwise indistinguishable from one
+            # measuring a locally patched build of it, which is what makes a reported
+            # provider bug checkable by someone else.
+            from flashinfer_bench.integration.providers import provider_provenance
+
+            for name, version in provider_provenance().items():
+                libs[name] = version
+        except Exception:
+            pass
         return libs
 
 
@@ -315,6 +326,15 @@ def _xpu_capabilities(index: int) -> Capabilities:
     if l2_bytes <= 0:
         l2_bytes = int(profile.get("l2_bytes", _CONSERVATIVE_L2_BYTES))  # type: ignore[arg-type]
 
+    # The driver enumerates the sub-group widths this part supports; take the widest,
+    # which is what a group reduction is cheapest over and what upstream Intel kernels
+    # pin. Read rather than tabulated, so a new part needs no entry to get this right.
+    sub_groups = extra.get("sub_group_sizes") or []
+    try:
+        preferred_sub_group = max(int(v) for v in sub_groups) if sub_groups else None
+    except (TypeError, ValueError):
+        preferred_sub_group = None
+
     return Capabilities(
         canonical_id=canonical,
         # Conservative until measured: a dtype that torch accepts but lowers to an
@@ -327,5 +347,14 @@ def _xpu_capabilities(index: int) -> Capabilities:
         # "_share_fd_: only available on CPU". Baselines route through host memory.
         supports_ipc_tensors=False,
         recommended_warmup_runs=_RECOMMENDED_WARMUP_RUNS,
+        preferred_sub_group_size=preferred_sub_group,
+        # 16 bytes is the widest single access on every Intel Xe part; the win from using
+        # it is large and the cost of a narrower access is silent, so this is not
+        # per-part data today.
+        vector_bytes=16,
+        # Large GRF has been available since Xe-HPG. A pre-silicon part with no capability
+        # record still gets it, which is correct: the flag only matters when a kernel
+        # spills, and refusing it there would hide the fix.
+        supports_large_grf=True,
         extra=extra,
     )

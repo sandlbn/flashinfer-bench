@@ -1,0 +1,58 @@
+---
+title: "Activation"
+---
+
+Gated and pointwise activation functions applied to an MLP's intermediate projection.
+
+The gated variants are the reason this is its own op_type rather than a detail of `gemm`.
+A gated MLP projects to twice the intermediate width in one matmul, then combines the two
+halves with an activation:
+
+```
+out[..., i] = act(x[..., i]) * x[..., d + i]
+```
+
+Fusing that combination into a single kernel removes one full pass over `[batch, 2d]`,
+which is why every serving stack ships a hand-written kernel for it rather than composing
+`silu` and `mul`.
+
+Variants:
+- **SwiGLU** (`silu_and_mul`): `silu(x[..., :d]) * x[..., d:]`. The activation in Llama,
+  Qwen, Mistral and most current models.
+- **Reversed SwiGLU** (`mul_and_silu`): `x[..., :d] * silu(x[..., d:])`. Same maths with
+  the halves swapped — a different kernel, and a wrong result if confused with the above.
+- **GeGLU** (`gelu_and_mul`): exact GELU on the gate half.
+- **GeGLU tanh** (`gelu_tanh_and_mul`): the tanh approximation of GELU, used by Gemma.
+- **Pointwise GELU** (`gelu_new`, `gelu_fast`, `gelu_quick`): ungated, `[batch, d]` in and
+  out. Different approximations of the same function, and they do not agree numerically.
+
+Axes (2 dimensions):
+- `batch_size`: variable — tokens in the batch
+- `d`: constant — the model's intermediate size
+- `two_d`: constant — `2 * d`, the gated projection's width (gated variants only)
+
+Inputs (1 tensor):
+- `x`: `[batch_size, two_d]` for gated variants, `[batch_size, d]` for pointwise ones
+
+Outputs (1 tensor):
+- `out`: `[batch_size, d]`
+
+## Why the `fi_api` tag matters here
+
+Every variant on this page has the identical signature — one input, one output, same
+dtypes. Signature matching alone therefore cannot tell `silu_and_mul` from
+`gelu_and_mul`, and binding the wrong one produces a kernel that runs cleanly and computes
+something else.
+
+So a definition **must** carry an `fi_api:` tag naming its exact operation, and anything
+matching a definition to an implementation must check it. This is the same failure the
+`gemma_rms_norm` kernel demonstrates in `rmsnorm`: byte-identical arguments, different
+maths.
+
+## Notes
+
+- The halves are **split**, not interleaved: `x[..., :d]` is the gate and `x[..., d:]` is
+  the up-projection. Some fused GEMM epilogues (CUTLASS-SYCL's `SwiGLU` among them) emit
+  *interleaved* pairs instead. Same maths, incompatible layout, and no error if confused.
+- Accumulate in float32 regardless of input dtype; the activation is evaluated in float
+  and cast once on store.

@@ -210,7 +210,14 @@ Start with `.claude/skills/`. Each subdirectory contains a `SKILL.md` with full 
   support status
 - **optimize-intel-kernels**: Write, validate and benchmark SYCL kernels for Intel GPUs
   against existing definitions; includes the Intel kernel backlog from `sgl-kernel-xpu`
-  and `vllm-xpu-kernels`
+  and `vllm-xpu-kernels`, the Xe-Fuse notes (`xe-fuse.md`), and the per-architecture
+  record (`architectures.md`). Per-part *values* live in `Capabilities` and are queried,
+  not tabulated; that file carries only the traps and the measurements, each named with
+  the hardware it came from
+- **onboard-model-intel**: End-to-end Intel counterpart of `onboard-model` — acquire
+  definitions on `xpu:0` without CUDA, cross-validate references, profile with unitrace,
+  source kernels from oneDNN / vllm-xpu-kernels / sgl-kernel-xpu / Xe-Fuse / SYCL, and
+  diagnose and fix provider problems
 - **clone-repos**: Clone SGLang, FlashInfer, sgl-cookbook, and flashinfer-trace to `tmp/`
 
 ## Common Misunderstandings

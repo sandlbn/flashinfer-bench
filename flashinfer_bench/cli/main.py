@@ -328,6 +328,140 @@ def run(args: argparse.Namespace):
         logger.info(message)
 
 
+def providers_cmd(args: argparse.Namespace) -> None:
+    """Inspect or acquire the Intel kernel providers.
+
+    Acquisition differs per provider -- a wheel, a source build that must be told the GPU
+    architecture, a checkout pointed at by an environment variable, a system library -- so
+    this reports all of them uniformly and installs the ones that can be installed.
+    """
+    from flashinfer_bench.integration import providers as prov
+
+    if args.provider_action in (None, "list"):
+        rows = prov.all_status()
+        width = max(len(r["name"]) for r in rows)
+        for r in rows:
+            mark = "installed" if r["installed"] == "yes" else "-"
+            version = f" {r['version']}" if r["version"] else ""
+            where = f"  {r['location']}" if r["location"] else ""
+            print(f"{r['name']:<{width}}  {r['kind']:<9} {mark}{version}{where}")
+            print(f"{'':<{width}}  {r['summary']}")
+            if r["installed"] != "yes":
+                print(f"{'':<{width}}  cost: {r['cost']}")
+        return
+
+    if args.provider_action == "verify":
+        # Registering an op that is not built for this backend costs a RUNTIME_ERROR on
+        # every workload of every matching definition, and reads like a wrapper bug. This
+        # calls each registered kernel once instead.
+        from flashinfer_bench.integration.xpu_kernels import (
+            REGISTRY,
+            available_providers,
+            verify_kernel,
+        )
+
+        trace_set = TraceSet.from_path(str(args.local))
+        installed = set(available_providers())
+        checked = failed = 0
+        for kernel in REGISTRY:
+            if kernel.provider not in installed:
+                continue
+            # Prefer a workload whose inputs are synthesizable. A workload backed by
+            # safetensors needs its LFS blob present, and a missing blob fails the check
+            # for a reason that has nothing to do with whether the kernel is built.
+            candidates = [
+                (d, t.workload)
+                for d in trace_set.definitions.values()
+                if kernel.matches(d)
+                # workloads are stored as Traces; the Workload is a field on each.
+                for t in trace_set.workloads.get(d.name, [])
+            ]
+            synthesizable = [
+                (d, w)
+                for d, w in candidates
+                if all(getattr(spec, "type", None) != "safetensors" for spec in w.inputs.values())
+            ]
+            pair = (synthesizable or candidates or [None])[0]
+            if pair is None:
+                logger.info(
+                    "%-16s %-34s no definition+workload to test with", kernel.provider, kernel.name
+                )
+                continue
+            ok, note = verify_kernel(pair[0], kernel, pair[1], args.device)
+            checked += 1
+            failed += 0 if ok else 1
+            logger.log(
+                logging.INFO if ok else logging.ERROR,
+                "%-16s %-34s %s  (%s)",
+                kernel.provider,
+                kernel.name,
+                "OK" if ok else "FAIL",
+                note,
+            )
+        logger.info("Verified %d kernel(s), %d failed", checked, failed)
+        if failed:
+            raise SystemExit(1)
+        return
+
+    if args.provider_action == "install":
+        try:
+            command, code = prov.install(
+                args.name, target=args.target, device=args.device, dry_run=args.dry_run
+            )
+        except prov.ProviderError as e:
+            # A refusal here is the useful outcome: it explains why before a multi-GiB
+            # build rather than during one.
+            logger.error("%s", e)
+            raise SystemExit(1) from None
+        if args.dry_run:
+            print(" ".join(command))
+            return
+        if code != 0:
+            logger.error("Acquisition of '%s' failed with status %d", args.name, code)
+            raise SystemExit(code)
+        logger.info("Installed '%s'", args.name)
+
+
+def _write_sycl_solutions(args: argparse.Namespace, trace_set) -> None:
+    """Expand the in-tree SYCL kernel templates over every definition they implement."""
+    from flashinfer_bench.integration import intree_kernels as intree
+
+    wanted = args.definitions.split(",") if args.definitions else None
+    written = 0
+    near_misses: List[str] = []
+    for name, definition in sorted(trace_set.definitions.items()):
+        if wanted is not None and name not in wanted:
+            continue
+        solutions = intree.make_intree_solutions(definition)
+        if not solutions:
+            near_misses.extend(f"{name}: {r}" for r in intree.explain_no_match(definition))
+            continue
+        out_dir = Path(args.local) / "solutions" / intree.AUTHOR / definition.op_type / name
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for solution in solutions:
+            path = out_dir / f"{_safe_path_segment(solution.name)}.json"
+            if args.dry_run:
+                logger.info(
+                    f"{name}: would add {solution.spec.language.value} solution '{solution.name}'"
+                )
+            else:
+                save_json_file(solution, path)
+                logger.info(
+                    f"{name}: added {solution.spec.language.value} solution '{solution.name}'"
+                )
+            written += 1
+
+    verb = "Would write" if args.dry_run else "Wrote"
+    logger.info(f"{verb} {written} in-tree solution(s)")
+    if near_misses:
+        logger.warning(
+            "%d definition(s) share an op_type with an in-tree kernel but do not match:",
+            len(near_misses),
+        )
+        for line in near_misses[:10]:
+            logger.warning("  %s", line)
+
+
 def add_baselines(args: argparse.Namespace) -> None:
     """Add upstream vLLM / SGLang Intel kernels to a dataset as benchmark baselines.
 
@@ -336,22 +470,33 @@ def add_baselines(args: argparse.Namespace) -> None:
     Solutions so a normal benchmark run measures them side by side with everything else.
     """
     from flashinfer_bench.integration import available_providers, make_baseline_solutions
+    from flashinfer_bench.integration.xpu_kernels import explain_no_match, registry_op_types
 
     trace_set = TraceSet.from_path(str(args.local))
     providers = args.providers.split(",") if args.providers else None
 
+    if args.in_tree:
+        # In-tree SYCL kernels are generated from templates rather than wrapped, so they
+        # need no provider installed and are the baseline every definition can have.
+        _write_sycl_solutions(args, trace_set)
+        return
+
     installed = available_providers()
     if not installed:
-        raise RuntimeError(
-            "No upstream Intel kernel library found. Install vllm-xpu-kernels "
-            "(github.com/vllm-project/vllm-xpu-kernels) or sgl-kernel-xpu "
-            "(github.com/sgl-project/sgl-kernel-xpu)."
+        # Not an error: an Intel box with no upstream library installed is the normal
+        # starting state, and the rest of the pipeline works without baselines.
+        logger.warning(
+            "No upstream Intel kernel library installed, so there are no baselines to "
+            "add. Install vllm-xpu-kernels (pip install vllm-xpu-kernels) or "
+            "sgl-kernel-xpu (github.com/sgl-project/sgl-kernel-xpu)."
         )
+        return
     logger.info(f"Available kernel providers: {', '.join(installed)}")
 
     wanted = args.definitions.split(",") if args.definitions else None
     written = 0
     unmatched = []
+    near_misses: List[str] = []
 
     for name, definition in sorted(trace_set.definitions.items()):
         if wanted is not None and name not in wanted:
@@ -359,20 +504,47 @@ def add_baselines(args: argparse.Namespace) -> None:
         solutions = make_baseline_solutions(definition, providers)
         if not solutions:
             unmatched.append(name)
+            near_misses.extend(f"{name}: {r}" for r in explain_no_match(definition, providers))
             continue
         out_dir = Path(args.local) / "solutions" / "baseline" / definition.op_type
         out_dir.mkdir(parents=True, exist_ok=True)
         for solution in solutions:
             path = out_dir / f"{_safe_path_segment(solution.name)}.json"
-            save_json_file(solution, path)
-            logger.info(f"{name}: added baseline '{solution.name}'")
+            if args.dry_run:
+                logger.info(f"{name}: would add baseline '{solution.name}' -> {path}")
+            else:
+                save_json_file(solution, path)
+                logger.info(f"{name}: added baseline '{solution.name}'")
             written += 1
 
-    logger.info(f"Wrote {written} baseline solution(s)")
+    verb = "Would write" if args.dry_run else "Wrote"
+    logger.info(f"{verb} {written} baseline solution(s)")
+
     if unmatched:
         logger.info(
             f"No upstream kernel matches {len(unmatched)} definition(s): "
             f"{', '.join(unmatched[:10])}" + (" ..." if len(unmatched) > 10 else "")
+        )
+    # A signature mismatch and an absent provider otherwise look identical from the
+    # outside, which is how a registry that matches nothing goes unnoticed.
+    if near_misses:
+        logger.warning(
+            "%d definition(s) share an op_type with a registered kernel but differ in "
+            "signature:",
+            len(near_misses),
+        )
+        for line in near_misses[:10]:
+            logger.warning("  %s", line)
+        if len(near_misses) > 10:
+            logger.warning("  ... and %d more", len(near_misses) - 10)
+    elif written == 0:
+        served = registry_op_types(providers)
+        present = sorted({d.op_type for d in trace_set.definitions.values()})
+        logger.warning(
+            "Nothing matched and nothing came close. Registered op_types: %s. "
+            "Dataset op_types: %s.",
+            ", ".join(served) or "(none)",
+            ", ".join(present) or "(none)",
         )
     if written == 0:
         logger.warning(
@@ -753,9 +925,53 @@ def cli():
         "--definitions", type=str, default=None, help="Comma-separated definition names."
     )
     baselines_parser.add_argument(
+        "--in-tree",
+        dest="in_tree",
+        action="store_true",
+        help=(
+            "Generate in-tree solutions (SYCL and Triton) from kernel templates instead "
+            "of wrapping an upstream library. Needs no provider installed."
+        ),
+    )
+    baselines_parser.add_argument(
+        "--dry-run", action="store_true", help="Report what would be written without writing it."
+    )
+    baselines_parser.add_argument(
         "--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"]
     )
     baselines_parser.set_defaults(func=add_baselines)
+
+    providers_parser = command_subparsers.add_parser(
+        "providers", help="List or install the Intel kernel providers."
+    )
+    provider_sub = providers_parser.add_subparsers(dest="provider_action")
+    provider_sub.add_parser("list", help="Show every provider and whether it is present.")
+    verify_parser = provider_sub.add_parser(
+        "verify", help="Call every registered upstream kernel once, to prove it is really built."
+    )
+    verify_parser.add_argument(
+        "--local", type=Path, required=True, help="Path to the trace set dataset."
+    )
+    verify_parser.add_argument("--device", type=str, default="xpu:0")
+
+    install_parser = provider_sub.add_parser("install", help="Acquire one provider.")
+    install_parser.add_argument("name", type=str, help="Provider name, e.g. vllm-xpu.")
+    install_parser.add_argument(
+        "--target",
+        type=str,
+        default=None,
+        help="SYCL target for a source build (bmg, cri). Default: derived from the device.",
+    )
+    install_parser.add_argument(
+        "--device", type=str, default=None, help="Device whose architecture to build for."
+    )
+    install_parser.add_argument(
+        "--dry-run", action="store_true", help="Print the command without running it."
+    )
+    providers_parser.add_argument(
+        "--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"]
+    )
+    providers_parser.set_defaults(func=providers_cmd)
 
     validate_parser = command_subparsers.add_parser(
         "validate", help="Validate dataset correctness and completeness."

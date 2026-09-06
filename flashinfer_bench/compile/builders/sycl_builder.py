@@ -54,6 +54,17 @@ particular can fall back to generic code paths instead of the DPAS / 2D-block-IO
 ``ocloc compile -device <name>`` lists what a given driver accepts.
 """
 
+_LARGE_GRF_ENV = "FIB_SYCL_LARGE_GRF"
+"""Set truthy to build AOT kernels in large-GRF mode (256 registers/thread, not 128).
+
+Large tiles spill catastrophically in the default small-GRF mode, and spilling is
+invisible to the correctness gate -- the kernel is right, just slow. An Xe-Fuse ``k2`` at
+tile 256x256x32 on Battlemage spilled 8576 bytes/thread and ran 8.8 ms against oneDNN's
+0.46 ms for the same work. Check ``Spill Memory Per Thread`` in unitrace's kernel
+properties before reaching for this: a smaller tile is usually the better fix, since large
+GRF halves the threads resident per EU.
+"""
+
 _ONEDNN_ENV = "FIB_ONEDNN_DIR"
 """Points at a oneDNN install, for solutions declaring the ``onednn`` dependency."""
 
@@ -88,12 +99,33 @@ Without these, CUTLASS assumes CUDA and the compile fails looking for
 _DEPENDENCY_LDFLAGS: Dict[str, List[str]] = {
     "onemkl": ["-fsycl", "-lmkl_sycl", "-lmkl_intel_ilp64", "-lmkl_core", "-lmkl_tbb_thread"],
     "mkl": ["-fsycl", "-lmkl_sycl", "-lmkl_intel_ilp64", "-lmkl_core", "-lmkl_tbb_thread"],
-    "onednn": ["-ldnnl", "-Wl,-rpath,/opt/intel/oneapi/dnnl/latest/lib"],
-    "dnnl": ["-ldnnl", "-Wl,-rpath,/opt/intel/oneapi/dnnl/latest/lib"],
-    "onednn-sycl": ["-ldnnl", "-Wl,-rpath,/opt/intel/oneapi/dnnl/latest/lib"],
+    # oneDNN's -L and -rpath are added by _link_flags from the resolved root, since the
+    # install prefix is discovered at build time and may come from FIB_ONEDNN_DIR.
+    "onednn": ["-ldnnl"],
+    "dnnl": ["-ldnnl"],
+    "onednn-sycl": ["-ldnnl"],
     "level_zero": ["-lze_loader"],
 }
 """Link flags for dependencies a solution may declare."""
+
+_ONEDNN_DEP_NAMES = frozenset({"onednn", "dnnl", "onednn-sycl"})
+"""Dependency spellings that select oneDNN."""
+
+
+@lru_cache(maxsize=1)
+def find_onednn_root() -> Optional[str]:
+    """Locate a oneDNN install, or ``None`` if none is present.
+
+    ``FIB_ONEDNN_DIR`` wins, then the standard oneAPI and system prefixes. The header is
+    what is probed, because a prefix carrying only the runtime library cannot build.
+    """
+    roots = [os.environ[_ONEDNN_ENV]] if os.environ.get(_ONEDNN_ENV) else []
+    roots.extend(_ONEDNN_DEFAULT_ROOTS)
+    for root in roots:
+        if (Path(root) / "include" / "oneapi" / "dnnl" / "dnnl.hpp").exists():
+            return root
+    return None
+
 
 _env_lock = threading.Lock()
 """Serializes the temporary ``CXX`` override, which is process-global."""
@@ -220,19 +252,14 @@ class SyclBuilder(Builder):
         deps = {d.lower() for d in solution.spec.dependencies}
         flags: List[str] = []
 
-        if deps & {"onednn", "dnnl", "onednn-sycl"}:
-            roots = [os.environ[_ONEDNN_ENV]] if os.environ.get(_ONEDNN_ENV) else []
-            roots.extend(_ONEDNN_DEFAULT_ROOTS)
-            for root in roots:
-                header = Path(root) / "include" / "oneapi" / "dnnl" / "dnnl.hpp"
-                if header.exists():
-                    flags += [f"-I{Path(root) / 'include'}", f"-L{Path(root) / 'lib'}"]
-                    break
-            else:
+        if deps & _ONEDNN_DEP_NAMES:
+            root = find_onednn_root()
+            if root is None:
                 raise BuildError(
                     "Solution declares a oneDNN dependency but dnnl.hpp was not found. "
                     f"Install oneAPI or set {_ONEDNN_ENV} to a oneDNN prefix."
                 )
+            flags.append(f"-I{Path(root) / 'include'}")
 
         if "xe-fuse" not in deps and "xefuse" not in deps:
             return flags
@@ -271,12 +298,12 @@ class SyclBuilder(Builder):
             flags.append(f"-I{include}")
         return flags
 
-    def _target_flags(self, solution: Solution) -> List[str]:
-        """Ahead-of-time target flags for the devices this solution targets.
+    def _aot_devices(self, solution: Solution) -> List[str]:
+        """ocloc device names for the hardware this solution targets, sorted and deduped.
 
-        Falls back to SPIR-V JIT when no target architecture is known, which is both the
-        portable choice and the only way to run on a device whose AOT triple has not been
-        published yet.
+        Empty when no target architecture is known, which selects SPIR-V JIT -- both the
+        portable choice and the only way to run on a device whose AOT device name has not
+        been published yet.
         """
         from flashinfer_bench.device import get_accelerator
 
@@ -293,14 +320,76 @@ class SyclBuilder(Builder):
             if sycl_target:
                 targets.append(sycl_target)
 
-        if not targets:
+        return sorted(set(targets))
+
+    def _supports_large_grf(self, solution: Solution) -> bool:
+        """Whether every target device can run in large-GRF mode.
+
+        Asked of the device rather than assumed, so the flag is not passed to a backend
+        that has no such mode.
+        """
+        from flashinfer_bench.device import get_accelerator
+
+        for hardware in solution.spec.target_hardware:
+            try:
+                caps = get_accelerator(hardware).capabilities(hardware)
+            except Exception:
+                continue
+            if caps.supports_large_grf:
+                return True
+        return False
+
+    def _target_flags(self, solution: Solution) -> List[str]:
+        """Compile-time AOT flags.
+
+        ``sycl_target`` holds an ocloc device name (``bmg``), which is *not* a valid
+        ``-fsycl-targets`` value -- passing it directly fails with ``invalid or
+        unsupported offload target``. The offload target is the ``spir64_gen`` backend;
+        the device name is a backend option, and belongs on the link step where device
+        code is actually generated. See :meth:`_target_link_flags`.
+        """
+        if not self._aot_devices(solution):
             return []
-        return [f"-fsycl-targets={','.join(sorted(set(targets)))}"]
+        return ["-fsycl-targets=spir64_gen"]
+
+    def _target_link_flags(self, solution: Solution) -> List[str]:
+        """Link-time AOT flags, where ``spir64_gen`` generates the device binary.
+
+        Each ``-Xs`` forwards exactly one token to the backend, so the option and its
+        value are passed as two separate ``-Xs`` pairs. Writing it as a single
+        ``-Xs "-device bmg"`` would need a quoted argument containing a space, which does
+        not survive being joined into a ninja command line.
+        """
+        devices = self._aot_devices(solution)
+        if not devices:
+            return []
+        flags = ["-fsycl-targets=spir64_gen", "-Xs", "-device", "-Xs", ",".join(devices)]
+        if os.environ.get(_LARGE_GRF_ENV, "").lower() in ("1", "true", "yes", "on"):
+            if not self._supports_large_grf(solution):
+                logger.warning(
+                    "%s is set but no target device reports large-GRF support; building "
+                    "without it rather than passing a flag the backend may reject.",
+                    _LARGE_GRF_ENV,
+                )
+                return flags
+            # An ocloc backend option, so it rides the same -Xs channel as -device. Only
+            # meaningful for an AOT build; a SPIR-V JIT gets its register mode from the
+            # runtime instead.
+            flags += ["-Xs", "-options", "-Xs", "-ze-opt-large-register-file"]
+        return flags
 
     def _link_flags(self, solution: Solution) -> List[str]:
         """Link flags implied by the solution's declared dependencies."""
         flags: List[str] = ["-fsycl"]
         deps_lower = {d.lower() for d in solution.spec.dependencies}
+        if deps_lower & _ONEDNN_DEP_NAMES:
+            # -ldnnl alone cannot resolve: oneDNN lives outside the default search path.
+            # The rpath must name the same prefix, so an install found via FIB_ONEDNN_DIR
+            # is also the one loaded at runtime.
+            root = find_onednn_root()
+            if root is not None:
+                lib = Path(root) / "lib"
+                flags += [f"-L{lib}", f"-Wl,-rpath,{lib}"]
         if "xe-fuse" in deps_lower or "xefuse" in deps_lower:
             flags += ["-Xspirv-translator", f"-spirv-ext={','.join(_CUTLASS_SYCL_SPIRV_EXTS)}"]
         for dependency in solution.spec.dependencies:
@@ -371,7 +460,7 @@ class SyclBuilder(Builder):
                     name=package_name,
                     cpp_files=sources,
                     extra_cflags=cflags,
-                    extra_ldflags=self._link_flags(solution),
+                    extra_ldflags=[*self._link_flags(solution), *self._target_link_flags(solution)],
                     extra_include_paths=[str(build_path)],
                     build_directory=build_path,
                 )

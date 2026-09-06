@@ -38,7 +38,7 @@ existing Definition + Workloads  (hardware-independent, already in the dataset)
    validate-references --device xpu:0   (reference must be correct on this device first)
               │
               ▼
-   flashinfer-bench run --devices xpu:0  (correctness gates performance)
+   FIB_DEVICE_BACKEND=xpu flashinfer-bench run  (correctness gates performance)
               │
               ▼
    Trace tagged with hardware_id + timing methodology
@@ -158,9 +158,14 @@ cover — which is where most of the available speedup actually is.
 ## Step 4: Validate and benchmark
 
 ```bash
-flashinfer-bench run --local tmp/flashinfer-trace \
-    --devices xpu:0 --definitions <name>
+FIB_DEVICE_BACKEND=xpu flashinfer-bench run --local tmp/flashinfer-trace \
+    --definitions <name>
 ```
+
+`run` has no `--devices` flag — only `serve` does. It benchmarks whatever
+`flashinfer_bench.device.list_devices()` returns, and `FIB_DEVICE_BACKEND` is what selects
+the backend. On an Intel-only machine the variable is unnecessary; on a host that also has
+an NVIDIA card it is mandatory, because the backend preference order is `cuda, xpu, cpu`.
 
 Correctness gates performance: a solution that fails numerically never gets a latency. The
 trace records `environment.hardware_id` and `environment.libs.timing`, so results are
@@ -184,7 +189,7 @@ Add the upstream kernels to the dataset as baselines, then benchmark normally:
 
 ```bash
 flashinfer-bench add-baselines --local tmp/flashinfer-trace
-flashinfer-bench run --local tmp/flashinfer-trace --devices xpu:0
+FIB_DEVICE_BACKEND=xpu flashinfer-bench run --local tmp/flashinfer-trace
 ```
 
 `add-baselines` writes a Solution per matching upstream kernel into
@@ -198,9 +203,14 @@ comparison. If your definition should have a baseline but gets none, the signatu
 line up with the upstream kernel — check `flashinfer_bench/integration/xpu_kernels.py` and
 add an entry with the real upstream signature rather than forcing a match.
 
-Currently registered: `rms_norm`, `fused_add_rms_norm`, `gemma_rms_norm` (vLLM XPU);
-`rmsnorm`, `fused_add_rmsnorm` (sgl-kernel-xpu). Adding more is a table entry plus a
-wrapper whose signature has been checked against the upstream binding.
+Currently registered: `rms_norm`, `fused_add_rms_norm`, and the activation family
+(`silu_and_mul`, `mul_and_silu`, `gelu_and_mul`, `gelu_tanh_and_mul`, `gelu_new`,
+`gelu_fast`, `gelu_quick`) from vLLM XPU; `rmsnorm` and `fused_add_rmsnorm` from
+sgl-kernel-xpu. Nothing yet for RoPE, attention, MLA, MoE, quantization or KV-cache ops.
+Adding more is a table entry plus a wrapper whose signature *and semantics* have been
+checked against the upstream binding — `gemma_rms_norm` was removed after matching
+`rms_norm`'s arguments exactly while computing `(1 + weight)` scaling. The step-by-step
+wiring procedure is in [`onboard-model-intel`](../onboard-model-intel/SKILL.md), Phase 5.
 
 **A solution slower than the upstream kernel is not an optimization.** Record it and say so.
 
@@ -313,6 +323,86 @@ It then competes in the same benchmark under the same correctness gates as every
 **Xe-Fuse is marked "not stable" and not production-ready by IntelLabs.** Treat it as one
 solution source among several, never as a dependency — if it regresses you lose a
 contender, not the pipeline.
+
+## Per-architecture facts
+
+[`architectures.md`](architectures.md) carries the per-part record: what Battlemage,
+integrated Xe3.0 and Crescent Island differ in, the measured effect of each optimization
+with the hardware it was measured on, and the traps.
+
+Read it for the *reasons*. For the values themselves, ask the device -- a capability record
+is right on a part nobody has documented yet:
+
+```python
+caps = get_accelerator("xpu:0").capabilities("xpu:0")
+caps.preferred_sub_group_size   # 32 on Battlemage, read from the driver
+caps.vector_width(2)            # 8 bfloat16 per 16-byte access
+caps.supports_large_grf         # gates the register-mode fix below
+caps.supported_dtypes           # Battlemage has no FP8
+```
+
+## Vectorize the loads before anything else
+
+A memory-bound kernel that reads one element per work-item leaves most of the memory pipe
+idle. `examples/sycl/rmsnorm_sycl.cpp` is written that way -- it is a readable
+introduction to `nd_range` and group reductions, not a fast kernel -- so do not copy its
+access pattern into anything you intend to benchmark.
+
+vLLM's Intel kernels (`vllm-xpu-kernels/csrc/layernorm.cpp`) do three things this example
+does not, and they are worth copying verbatim:
+
+```cpp
+// 1. Eight bfloat16 = one 16-byte access. This is the whole difference.
+template <typename T, int N>
+struct alignas(sizeof(T) * N) VecN { T val[N]; };
+constexpr int kVecSize = (sizeof(scalar_t) == 2) ? 8 : 4;
+
+// 2. Pin the sub-group; Battlemage offers {16, 32} and the reduction is cheapest at 32.
+void operator()(sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(32)]]
+
+// 3. Size the work-group to the row, not to a fixed constant.
+size_t wg = std::min(hidden / kVecSize, max_work_group_size);
+```
+
+Measured on Battlemage, bf16 RMSNorm at hidden=2048, against the same kernel with scalar
+loads:
+
+| batch | scalar | vectorized | |
+| --- | --- | --- | --- |
+| 12383 | 0.3213 ms | 0.2374 ms | **1.35x** |
+| 16254 | 0.4222 ms | 0.3165 ms | **1.34x** |
+| 1-79 | ~0.047 ms | ~0.047 ms | unchanged |
+
+The win is entirely in the bandwidth-bound regime, which is exactly where a scalar kernel
+loses to the upstream one. Vectorizing took the kernel from ~25% *slower* than vLLM at
+prefill to level with it, while keeping a 1.1-1.3x lead at decode sizes.
+
+Two corollaries. **Guard the wide path**: it needs `hidden % vec == 0` and 16-byte-aligned
+base pointers, so check both and keep a scalar fallback rather than assuming. And **do not
+reach for a register cache first** -- caching the row across the reduction to avoid the
+second read measured within noise at every batch size, and vLLM's kernel does not bother
+either. Vectorization is the lever; reuse is not.
+
+## Register mode, and why a correct kernel can be 14x slow
+
+A tile that does not fit the default 128-register file spills to scratch, and spilling is
+invisible to the correctness gate -- the kernel is right, just slow. Check it in unitrace's
+kernel-properties table before tuning anything else:
+
+```
+SIMD=16  GRF=128  Spill Memory Per Thread = 8576     # <- this is the problem
+```
+
+Two fixes, which do not compose:
+
+- `FIB_SYCL_LARGE_GRF=1` -- builds AOT kernels with 256 registers per thread instead of
+  128. On an Xe-Fuse `k2` at tile 256x256x32 this took spill to zero and latency from
+  8.668 ms to 0.618 ms.
+- a smaller tile, which avoids the spill instead of accommodating it, and keeps full
+  occupancy.
+
+Large GRF halves the threads resident per EU, so it pays only when it removes spill.
+Applying it to a tile that already fits makes things slightly worse. Measure both.
 
 ## Choosing a SYCL target
 

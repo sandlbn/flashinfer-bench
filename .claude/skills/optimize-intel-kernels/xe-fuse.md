@@ -230,6 +230,46 @@ to do it. The duplicated store never appears in the top costs.
 Tile search confirms tuning cannot rescue it — best of seven shapes was 128x256x16 at
 0.83x (k2 9.65 -> 8.16 ms), still well above oneDNN's ~5.3 ms.
 
+### Re-measured on Battlemage: the generated tile was miscompiled
+
+The verdict above was reached on an integrated Xe3.0 part. Re-measuring on Battlemage --
+the part Xe-Fuse actually targets -- reproduces the *conclusion* but overturns the
+*explanation*.
+
+The generated `k2` at its default tile is not 45% slower than oneDNN here. It is 19x
+slower. unitrace's kernel-properties table says why, and it is nothing to do with matrix
+multiply:
+
+```
+SIMD=16  GRF=128  Spill Memory Per Thread = 8576
+```
+
+A 256x256x32 tile does not fit in the default 128-register file, so every thread spills
+8.5 KB to scratch. Full MLP shape (M=2048, K=896, N=9728), bf16, Arc B580:
+
+| build | spill/thread | latency |
+| --- | --- | --- |
+| tile 256x256x32, default GRF | 8576 B | 8.668 ms |
+| **tile 256x256x32, large GRF** | **0 B** | **0.618 ms** |
+| tile 128x256x16, default GRF | 0 B | 0.593 ms |
+| tile 128x256x16, large GRF | 0 B | 0.625 ms |
+
+**One build flag is worth 14x here**, and it moves the kernel further than any tile search:
+`FIB_SYCL_LARGE_GRF=1`, which adds `-Xs -options -Xs -ze-opt-large-register-file` to the
+AOT link. Tile tuning reaches the same place from the other direction -- a tile small
+enough not to spill -- and the two do not compose: applying both is slightly *worse* than
+either, because large GRF halves the threads resident per EU and a non-spilling tile gains
+nothing to pay for it.
+
+**Check spill before tuning anything.** Spilling is invisible to the correctness gate: all
+four builds above produce identical output (rel err 0.0066). A kernel can be perfectly
+correct and 14x slow, and nothing in the benchmark will say so -- only the profiler will.
+
+With that fixed, the honest comparison against oneDNN post-ops at M=2048 is 0.593 ms
+against roughly 0.47 ms, so **CUTLASS-SYCL still loses, by about 1.3x rather than 19x**.
+The recommendation below is unchanged; the reason for it is now a real ~1.3x GEMM gap
+rather than a compilation artifact.
+
 ### The approach that does win: oneDNN post-ops
 
 Keep oneDNN's matmul and fuse with oneDNN's own post-op mechanism. Post-ops are
@@ -261,8 +301,9 @@ dependencies; `SyclBuilder` supplies the include, lib and rpath.
 primitives and their descriptors are rebuilt per call. Caching those should make the win
 uniform, and is the obvious next change.
 
-What might still change the Xe-Fuse verdict: re-measuring on Battlemage, which is what it
-actually targets. On this integrated Xe3.0 part, oneDNN post-ops are the better route.
+Re-measured on Battlemage (see above), oneDNN post-ops remain the better route -- but the
+Xe-Fuse gap there is ~1.3x, not the 19x a naive rebuild reports, and closing it further is
+a tile/register-mode question rather than a rewrite.
 
 `torch.compile` could not be measured as a third baseline — Inductor rejects this device
 (`device architecture not recognized: 32224837632`, Xe3.0 / IP 30).

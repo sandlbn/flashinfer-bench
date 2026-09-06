@@ -131,13 +131,69 @@ class TestCanBuild:
 
 
 class TestBuildFlags:
-    def test_unknown_target_falls_back_to_spirv_jit(self):
-        """No AOT triple means SPIR-V, which is how an unreleased device runs."""
+    def test_unknown_target_falls_back_to_spirv_jit(self, monkeypatch):
+        """No AOT device name means SPIR-V, which is how an unreleased device runs.
+
+        The accelerator is stubbed rather than read from the host: on a machine with a
+        real Intel GPU the capability lookup succeeds and returns a device name, so
+        asserting against live hardware would test the machine, not the fallback.
+        """
+        monkeypatch.setattr(SyclBuilder, "_aot_devices", lambda self, solution: [], raising=True)
         assert SyclBuilder()._target_flags(_solution(target_hardware=["xpu"])) == []
+        assert SyclBuilder()._target_link_flags(_solution(target_hardware=["xpu"])) == []
+
+    def test_known_device_uses_spir64_gen_backend(self, monkeypatch):
+        """An ocloc device name is a backend option, never an offload target.
+
+        Passing it straight to ``-fsycl-targets`` is what icpx rejects with "invalid or
+        unsupported offload target", so the device name must reach the compiler only
+        through ``-Xs`` on the link step.
+        """
+        monkeypatch.setattr(
+            SyclBuilder, "_aot_devices", lambda self, solution: ["bmg"], raising=True
+        )
+        solution = _solution(target_hardware=["xpu"])
+        assert SyclBuilder()._target_flags(solution) == ["-fsycl-targets=spir64_gen"]
+        assert SyclBuilder()._target_link_flags(solution) == [
+            "-fsycl-targets=spir64_gen",
+            "-Xs",
+            "-device",
+            "-Xs",
+            "bmg",
+        ]
+
+    def test_multiple_devices_share_one_device_option(self, monkeypatch):
+        """ocloc takes a comma-separated device list, not a repeated option."""
+        monkeypatch.setattr(
+            SyclBuilder, "_aot_devices", lambda self, solution: ["bmg", "cri"], raising=True
+        )
+        flags = SyclBuilder()._target_link_flags(_solution(target_hardware=["xpu"]))
+        assert flags[-1] == "bmg,cri"
+        assert flags.count("-device") == 1
 
     def test_known_dependencies_become_link_flags(self):
         flags = SyclBuilder()._link_flags(_solution(dependencies=["onednn"]))
         assert "-fsycl" in flags and "-ldnnl" in flags
+
+    def test_onednn_link_flags_carry_a_search_path(self, monkeypatch):
+        """``-ldnnl`` cannot resolve on its own -- oneDNN is outside the default path.
+
+        The regression this guards: the search path was emitted as a *compile* flag, so
+        the link step saw ``-ldnnl`` with nowhere to look and every oneDNN solution died
+        with ``cannot find -ldnnl``. The rpath must name the same prefix, so a build
+        found via FIB_ONEDNN_DIR is also the one loaded at runtime.
+        """
+        monkeypatch.setattr(sb, "find_onednn_root", lambda: "/opt/onednn", raising=True)
+        flags = SyclBuilder()._link_flags(_solution(dependencies=["onednn"]))
+        assert "-L/opt/onednn/lib" in flags
+        assert "-Wl,-rpath,/opt/onednn/lib" in flags
+
+    def test_onednn_search_path_is_not_a_compile_flag(self, monkeypatch):
+        """The include belongs on the compile line; the library path does not."""
+        monkeypatch.setattr(sb, "find_onednn_root", lambda: "/opt/onednn", raising=True)
+        cflags = SyclBuilder()._dependency_cflags(_solution(dependencies=["onednn"]))
+        assert "-I/opt/onednn/include" in cflags
+        assert not any(f.startswith("-L") for f in cflags)
 
     def test_unknown_dependency_is_ignored_not_fatal(self):
         flags = SyclBuilder()._link_flags(_solution(dependencies=["not-a-real-library"]))

@@ -151,7 +151,9 @@ def find_unitrace() -> Optional[str]:
     return str(local.resolve()) if local.exists() else None
 
 
-def profile_model(model: str, prompt: str, max_new_tokens: int, top: int) -> List[Tuple[str, float]]:
+def profile_model(
+    model: str, prompt: str, max_new_tokens: int, top: int
+) -> List[Tuple[str, float]]:
     """Rank kernels by share of device time, using unitrace.
 
     Returns ``[(kernel_name, percent)]``. Empty when unitrace is unavailable -- profiling
@@ -159,7 +161,9 @@ def profile_model(model: str, prompt: str, max_new_tokens: int, top: int) -> Lis
     """
     unitrace = find_unitrace()
     if unitrace is None:
-        logger.warning("unitrace not found; skipping profile (target must be given with --definition)")
+        logger.warning(
+            "unitrace not found; skipping profile (target must be given with --definition)"
+        )
         return []
 
     script = Path("_profile_target.py")
@@ -179,7 +183,9 @@ def profile_model(model: str, prompt: str, max_new_tokens: int, top: int) -> Lis
     try:
         result = subprocess.run(
             [unitrace, "--device-timing", sys.executable, str(script)],
-            capture_output=True, text=True, timeout=1800,
+            capture_output=True,
+            text=True,
+            timeout=1800,
         )
     except Exception as e:
         logger.warning(f"unitrace run failed ({e}); skipping profile")
@@ -274,8 +280,16 @@ def main() -> None:
     # ---- 2. extract -------------------------------------------------------------
     logger.info("\n=== 2. Extract definitions from the model ===")
     subprocess.run(
-        [sys.executable, "scripts/extract_model_kernels_xpu.py", "--model", args.model,
-         "--output", str(root), "--max-new-tokens", str(args.max_new_tokens)],
+        [
+            sys.executable,
+            "scripts/extract_model_kernels_xpu.py",
+            "--model",
+            args.model,
+            "--output",
+            str(root),
+            "--max-new-tokens",
+            str(args.max_new_tokens),
+        ],
         check=True,
     )
 

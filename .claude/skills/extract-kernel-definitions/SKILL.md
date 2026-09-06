@@ -570,9 +570,16 @@ Definition describes an operation's interface — axes, dtypes, and a plain PyTo
 reference. Nothing in it is NVIDIA-specific, so a definition harvested from an SGLang run
 on an H100 is exactly the definition an Intel GPU implements.
 
-That matters practically: the harvesting path in this skill needs SGLang with the
-FlashInfer backend, which is CUDA-only. Extract on NVIDIA, then use the result everywhere.
-Do not attempt to re-derive definitions on Intel hardware.
+That matters practically in both directions. **If the definition already exists in the
+dataset, reuse it — never re-extract it because you happen to be on Intel.** But when it
+does *not* exist, an Intel-only machine can produce it: Path A is CUDA-only, so Path C
+(module hooks on `xpu:0`) is the primary route there, with Path B filling in whatever the
+hooks cannot see. A definition harvested on a B580 goes into the dataset exactly like one
+harvested on an H100.
+
+[`onboard-model-intel`](../onboard-model-intel/SKILL.md) Phase 2 is the full Intel-native
+acquisition procedure, including deriving const axes from `config.json` plus the TP/EP
+setting without any GPU.
 
 What *is* Intel-specific comes later, and lives elsewhere:
 
