@@ -99,7 +99,13 @@ class EventTimer(Timer):
     warm cache and report an unrealistically low number.
     """
 
-    name: ClassVar[str] = "event"
+    name: ClassVar[str] = "event-batched"
+    """Distinct from the earlier "event", which timed one call per region.
+
+    The two are not comparable for short kernels -- the old methodology reported ~8x the
+    true latency for a few-microsecond kernel on Arc B580 -- and traces record this string,
+    so renaming is what keeps a stale measurement from being ranked against a current one.
+    """
 
     def __init__(self, module: Any, l2_bytes: int = 0) -> None:
         """
@@ -127,6 +133,41 @@ class EventTimer(Timer):
             logger.debug("Cache-flush buffer allocation failed (%s); timing warm-cache", e)
             return None
 
+    #: Aim for a timed region at least this long, in milliseconds. Event record and the
+    #: surrounding synchronize cost tens of microseconds on some backends, so a region that
+    #: contains a single short call reports mostly that overhead. A millisecond puts the
+    #: fixed cost below a percent without making a sweep slow.
+    _TARGET_REGION_MS: ClassVar[float] = 1.0
+
+    #: Never batch beyond this, so a pathologically fast kernel cannot blow up the run time
+    #: or hold the device for an unbounded stretch.
+    _MAX_INNER: ClassVar[int] = 2000
+
+    def _calibrate(self, fn: Any, args: Sequence[Any], device: str) -> int:
+        """Calls to place inside one timed region.
+
+        Timing one call per event pair made a ~3us kernel report ~47us, because the fixed
+        per-region cost dominated. That is not a small inaccuracy: it puts every
+        decode-sized elementwise measurement on the same floor, so kernels an order of
+        magnitude apart in real work look identical and ratios between them are noise.
+        """
+        import torch
+
+        with torch.no_grad():
+            self._module.synchronize(device)
+            start = self._module.Event(enable_timing=True)
+            end = self._module.Event(enable_timing=True)
+            start.record()
+            for _ in range(8):
+                fn(*args)
+            end.record()
+            self._module.synchronize(device)
+            per_call_ms = start.elapsed_time(end) / 8
+
+        if per_call_ms <= 0:
+            return self._MAX_INNER
+        return max(1, min(self._MAX_INNER, int(self._TARGET_REGION_MS / per_call_ms) + 1))
+
     def time_all(
         self, fn: Any, args: Sequence[Any], warmup: int, iters: int, device: str
     ) -> List[float]:
@@ -139,17 +180,25 @@ class EventTimer(Timer):
                 fn(*args)
             self._module.synchronize(device)
 
+            inner = self._calibrate(fn, args, device)
+
             times: List[float] = []
             for _ in range(iters):
+                # Flushed once per region rather than once per call. For a working set
+                # larger than the cache this changes nothing; for a smaller one the calls
+                # after the first read a warm cache, so the result is a lower bound on
+                # cold-cache latency -- which is the right error to make here, since the
+                # alternative reports the timer instead of the kernel.
                 if flush is not None:
                     flush.zero_()
                 start = self._module.Event(enable_timing=True)
                 end = self._module.Event(enable_timing=True)
                 start.record()
-                fn(*args)
+                for _ in range(inner):
+                    fn(*args)
                 end.record()
                 self._module.synchronize(device)
-                times.append(start.elapsed_time(end))
+                times.append(start.elapsed_time(end) / inner)
 
         return times
 
