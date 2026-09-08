@@ -14,7 +14,7 @@ from flashinfer_bench.compile import BuilderRegistry
 from flashinfer_bench.data import EvaluationStatus, Trace, TraceSet
 from flashinfer_bench.env import get_fib_cache_path
 
-from .config import ApplyConfigRegistry
+from .config import ApplyConfig, ApplyConfigRegistry
 from .key import ApplyKey, ApplyKeyFactory
 
 
@@ -31,7 +31,23 @@ def _apply_table_dir() -> Path:
 
 logger = logging.getLogger(__name__)
 
-_PROVIDER_MARKERS = ("vllm_xpu", "sgl_kernel_xpu", "vllm_", "flashinfer_wrapper")
+
+def _cfg_fingerprint(cfg: ApplyConfig) -> Dict[str, Any]:
+    """Every config field that changes what the table contains.
+
+    Listing only the tolerances meant a table built with the substitution gate off was
+    reused verbatim when it was switched on -- the gate appeared to do nothing, and an A/B
+    of it compared a cached table against itself.
+    """
+    return {
+        "max_atol": cfg.max_atol,
+        "max_rtol": cfg.max_rtol,
+        "min_gain_us": cfg.min_gain_us,
+        "on_miss_policy": cfg.on_miss_policy,
+    }
+
+
+_PROVIDER_MARKERS = ("vllm_xpu", "sgl_kernel_xpu", "flashinfer_wrapper")
 """Solution-name markers for a kernel the serving stack would run if we declined."""
 
 
@@ -669,17 +685,17 @@ class ApplyTable:
         for def_name in trace_set_dict["definitions"]:
             cfg = config_registry.per_definition.get(def_name)
             if cfg is not None:
-                per_def_cfg_dict[def_name] = {"max_atol": cfg.max_atol, "max_rtol": cfg.max_rtol}
+                per_def_cfg_dict[def_name] = _cfg_fingerprint(cfg)
 
         payload = {
             "cfg": {
-                "default": (
-                    {"max_atol": default_cfg.max_atol, "max_rtol": default_cfg.max_rtol}
-                    if default_cfg
-                    else None
-                ),
+                "default": _cfg_fingerprint(default_cfg) if default_cfg else None,
                 "per_def": per_def_cfg_dict,
             },
+            # The table is built for one part and one timing methodology, and filters on
+            # both. Leaving them out of the key let a table built on other hardware, or
+            # before a timer was corrected, be reused verbatim.
+            "timing": cls._current_timing(None),
             "definitions": trace_set_dict["definitions"],
             "solutions": trace_set_dict["solutions"],
             "traces": sorted(

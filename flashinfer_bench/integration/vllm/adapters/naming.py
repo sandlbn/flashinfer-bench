@@ -28,10 +28,17 @@ _SUFFIX = {
 
 
 def candidates(base: str, dtype: torch.dtype) -> Tuple[str, ...]:
-    """``(base_dtype, base)`` -- most specific first.
+    """``(base, base_dtype)`` -- the common name first.
 
-    The bare name stays in the list because most definitions carry no suffix; it is only
-    added where two precisions had to coexist at one width.
+    Order matters for cost, not correctness. Almost every definition is unsuffixed, so
+    asking for the suffixed name first is a near-certain miss, and a miss is not cheap: the
+    caller pays a full resolve, key build and dtype check before falling through. Putting
+    the bare name first makes the common case one lookup instead of two.
+
+    Trying the bare name first is still correct when a suffixed definition is the right one:
+    ``apply()`` refuses a solution whose declared dtype differs from the tensors handed to
+    it, so a bare bfloat16 definition presented with float16 activations falls through, and
+    the suffixed name is tried next.
     """
     suffix = _SUFFIX.get(dtype)
-    return (f"{base}_{suffix}", base) if suffix else (base,)
+    return (base, f"{base}_{suffix}") if suffix else (base,)

@@ -78,8 +78,9 @@ class TestRMSNorm3D:
         x = torch.randn(2, 3, HIDDEN)
         out = wrapper(layer, x)
 
-        # The dtype-qualified name is tried first; these tensors are float32.
-        assert calls["name"] == f"rmsnorm_h{HIDDEN}_float32"
+        # The bare name is tried first -- it is what almost every definition uses, and a
+        # miss costs a full resolve, so the common case must not pay for the rare one.
+        assert calls["name"] == f"rmsnorm_h{HIDDEN}"
         assert calls["kwargs"]["hidden_states"].shape == (6, HIDDEN)
         assert out.shape == x.shape
         torch.testing.assert_close(out, _ref_rmsnorm(x, layer.weight))
@@ -139,7 +140,7 @@ class TestSiluAndMul3D:
         x = torch.randn(2, 3, 2 * HIDDEN)
         out = wrapper(_Layer(), x)
 
-        assert calls["name"] == f"silu_and_mul_d{HIDDEN}_float32"
+        assert calls["name"] == f"silu_and_mul_d{HIDDEN}"
         assert calls["kwargs"]["x"].shape == (6, 2 * HIDDEN)
         assert out.shape == (2, 3, HIDDEN)
 
@@ -167,13 +168,15 @@ class TestDtypeQualifiedLookup:
     which reads as "nothing extracted for this shape".
     """
 
-    def test_falls_through_to_the_bare_name_when_no_suffixed_one_exists(self, monkeypatch):
+    def test_falls_through_to_the_suffixed_name_when_the_bare_one_does_not_match(self, monkeypatch):
+        """A bare definition of the wrong dtype is refused by apply(), so the suffixed one
+        is still reached -- which is what makes bare-first safe as well as cheaper."""
         tried = []
 
         def fake_apply(name, kwargs=None, fallback=None, **_):
             tried.append(name)
-            if name.endswith("_float32"):
-                return fallback(**(kwargs or {}))  # no suffixed definition here
+            if not name.endswith("_float32"):
+                return fallback(**(kwargs or {}))  # bare definition declares another dtype
             return _ref_rmsnorm(kwargs["hidden_states"], kwargs["weight"])
 
         monkeypatch.setattr(rmsnorm_mod, "apply", fake_apply)
@@ -182,8 +185,23 @@ class TestDtypeQualifiedLookup:
             _spec(adapter), lambda *_a, **_k: pytest.fail("should not fall back to vLLM")
         )
         out = wrapper(_Layer(torch.ones(HIDDEN)), torch.randn(4, HIDDEN))
-        assert tried == [f"rmsnorm_h{HIDDEN}_float32", f"rmsnorm_h{HIDDEN}"]
+        assert tried == [f"rmsnorm_h{HIDDEN}", f"rmsnorm_h{HIDDEN}_float32"]
         assert out.shape == (4, HIDDEN)
+
+    def test_a_hit_on_the_bare_name_costs_only_one_lookup(self, monkeypatch):
+        """Almost every definition is unsuffixed; the common path must not pay for the rare
+        one, because a miss is a full resolve, key build and dtype check."""
+        tried = []
+
+        def fake_apply(name, kwargs=None, fallback=None, **_):
+            tried.append(name)
+            return _ref_rmsnorm(kwargs["hidden_states"], kwargs["weight"])
+
+        monkeypatch.setattr(rmsnorm_mod, "apply", fake_apply)
+        adapter = RMSNormAdapter()
+        wrapper = adapter.make_wrapper(_spec(adapter), lambda *_a, **_k: pytest.fail("no"))
+        wrapper(_Layer(torch.ones(HIDDEN)), torch.randn(4, HIDDEN))
+        assert tried == [f"rmsnorm_h{HIDDEN}"]
 
     def test_the_original_runs_once_when_every_candidate_misses(self, monkeypatch):
         """Trying a second name must not re-run the fallback.

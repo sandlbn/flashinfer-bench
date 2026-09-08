@@ -170,3 +170,37 @@ class TestGate:
 
     def test_gate_off_by_default(self):
         assert ApplyConfig().min_gain_us == 0.0
+
+
+class TestCacheKey:
+    """The table is cached by digest, so anything that changes its contents must be in it.
+
+    Listing only the tolerances meant a table built with the gate off was reused verbatim
+    when the gate was switched on: the gate appeared to do nothing, and an end-to-end A/B of
+    it silently compared a cached table against itself.
+    """
+
+    def _registry(self, **kwargs):
+        registry = ApplyConfigRegistry()
+        registry.register("norm", ApplyConfig(max_atol=1.0, max_rtol=1.0, **kwargs))
+        return registry
+
+    def _trace_set(self):
+        return TraceSet(
+            root="/tmp/fake",
+            definitions={"norm": _definition()},
+            solutions={"norm": [_solution("norm__ours", "flashinfer-bench-intree")]},
+            traces={"norm": [_trace("norm__ours", 64, 0.005)]},
+        )
+
+    def test_gate_setting_changes_the_digest(self):
+        ts = self._trace_set()
+        off = ApplyTable._digest(ts, self._registry(min_gain_us=0.0))
+        on = ApplyTable._digest(ts, self._registry(min_gain_us=5.91))
+        assert off != on
+
+    def test_miss_policy_changes_the_digest(self):
+        ts = self._trace_set()
+        a = ApplyTable._digest(ts, self._registry(on_miss_policy="fallback_only"))
+        b = ApplyTable._digest(ts, self._registry(on_miss_policy="use_def_best"))
+        assert a != b
