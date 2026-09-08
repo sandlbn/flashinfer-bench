@@ -21,9 +21,21 @@ queue, so ordering already holds and the caller synchronizes when it needs the r
 Removing the block took the same kernel from 0.44x to 2.21x against the reference at m=1.
 Structure was never the problem; a per-call host block was.
 
-It stays opt-in only because kernel speed is not the whole story in a server: `apply()`
-dispatch costs a few microseconds per call, which is separate from this measurement and has
-to be re-checked end to end before this is turned on by default.
+**It stays off by default, and the end-to-end check now says it should.** The numbers above
+are against this definition's `reference`, which computes the projection as *two* GEMMs.
+vLLM issues *one* merged GEMM and then its own fused `silu_and_mul`, so the reference is
+roughly 2x worse than production before any kernel is written. Timed against what vLLM
+actually runs (Arc B580, k=1024 d=3072, bf16, wall-clock over 200 calls, 2026-09-08):
+
+    M=64    ours 0.0649ms  vLLM 0.0342ms  0.53x   <- we are ~2x slower
+    M=701   ours 0.1066ms  vLLM 0.1222ms  1.15x
+    M=2801  ours 0.4567ms  vLLM 0.5567ms  1.22x
+
+So the win is 1.15-1.22x at prefill widths and a ~2x *loss* at decode. A served run is
+mostly decode, and enabling fusion at every size measured flat-to-negative end to end
+(Qwen3-0.6B, 3 repeats, with and without the token gate). DEFAULT_MIN_TOKENS exists to keep
+the fused path away from the sizes where it loses; do not lower it on the strength of the
+`reference` ratios.
 
 It also takes the merged ``[2d, k]`` weight exactly as vLLM stores it. Splitting it into
 two ``[k, d]`` operands would mean a transposed copy of every MLP weight, which on a small

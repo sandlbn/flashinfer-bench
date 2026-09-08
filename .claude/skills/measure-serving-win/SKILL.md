@@ -129,7 +129,10 @@ reference.** `flashinfer-bench run` reports speedup versus the definition's PyTo
 reference, which makes several passes over memory and launches several kernels. vLLM does
 not run that; it runs its own fused kernel. A family reported at 2-3x versus the reference
 can be at parity with the kernel it would actually replace, and then `share x ratio` predicts
-a win that cannot exist. Take the ratio from a baseline solution wrapping the provider kernel
+a win that cannot exist. Watch for a reference that does *more work than production*: a
+gated-MLP reference computing two separate projections where the server issues one merged
+GEMM is ~2x worse before any kernel is written, and every ratio measured against it inherits
+that factor. Take the ratio from a baseline solution wrapping the provider kernel
 (`add-baselines --providers vllm-xpu`), not from the reference column.
 
 **Compare the kernel's runtime against what dispatch costs, before substituting at all.**
