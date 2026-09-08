@@ -179,9 +179,8 @@ def profile_model(
         "with torch.no_grad():\n"
         f"    m.generate(**enc, max_new_tokens={max_new_tokens}, do_sample=False)\n"
         "    torch.xpu.current_stream().synchronize()\n"  # hooked by unitrace;
-            # torch.xpu.synchronize() maps to zeDeviceSynchronize, which it does not hook,
-            # and the per-kernel records are discarded before the exit flush.
-
+        # torch.xpu.synchronize() maps to zeDeviceSynchronize, which it does not hook,
+        # and the per-kernel records are discarded before the exit flush.
     )
     try:
         result = subprocess.run(
@@ -254,6 +253,45 @@ def viable_candidates(device: str) -> List[Candidate]:
     return candidates
 
 
+def _import_from_dataset(dataset: Path, root: Path, name: str) -> None:
+    """Copy one definition and its workloads out of the dataset into the working dir.
+
+    Blobs come too when the workloads reference them; a workload whose inputs are
+    ``random`` needs none.
+    """
+    found = next((p for p in (dataset / "definitions").rglob(f"{name}.json")), None)
+    if found is None:
+        raise SystemExit(f"{name!r} is not in {dataset}")
+    op_type = found.parent.name
+    out_def = root / "definitions" / op_type
+    out_def.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(found, out_def / found.name)
+
+    workloads = dataset / "workloads" / op_type / f"{name}.jsonl"
+    if workloads.exists():
+        out_wl = root / "workloads" / op_type
+        out_wl.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(workloads, out_wl / workloads.name)
+    blobs = dataset / "blob" / "workloads" / op_type / name
+    if blobs.is_dir():
+        shutil.copytree(blobs, root / "blob" / "workloads" / op_type / name, dirs_exist_ok=True)
+
+    # Bring the solutions that already exist for it. Without them the tuning candidates are
+    # ranked only against the upstream baselines this script generates, so the report can
+    # conclude "does not beat upstream" while the definition's own best kernel -- which may
+    # beat upstream comfortably -- was never in the field.
+    imported = 0
+    for path in (dataset / "solutions").rglob("*.json"):
+        rel = path.relative_to(dataset / "solutions")
+        if name not in path.stem and name not in rel.parts:
+            continue
+        target_path = root / "solutions" / rel
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, target_path)
+        imported += 1
+    logger.info(f"Imported {name} from {dataset} (op_type={op_type}, {imported} solution(s))")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", default="Qwen/Qwen2.5-0.5B-Instruct")
@@ -263,6 +301,13 @@ def main() -> None:
     parser.add_argument("--prompt", default="Write a short poem about silicon.")
     parser.add_argument("--max-new-tokens", type=int, default=16)
     parser.add_argument("--num-trials", type=int, default=3)
+    parser.add_argument(
+        "--dataset",
+        default="tmp/flashinfer-trace",
+        help="Dataset to take --definition from when the extractor does not emit it. The "
+        "extractor hooks nn.Modules, so fused and inline families never appear in its "
+        "output and could not otherwise be optimized.",
+    )
     parser.add_argument("--skip-profile", action="store_true")
     args = parser.parse_args()
 
@@ -300,8 +345,19 @@ def main() -> None:
     target = args.definition or next(
         (n for n in sorted(trace_set.definitions) if n.startswith("rmsnorm")), None
     )
+    if target is not None and target not in trace_set.definitions:
+        # The extractor hooks nn.Modules, so whole families never appear in its output --
+        # a fused add+norm spans two statements and a gated activation is written inline
+        # inside an MLP's forward. Refusing to optimize those made the loop unable to reach
+        # the families that actually beat the provider. Take the definition from the dataset
+        # instead; everything downstream only needs it present in the working directory.
+        _import_from_dataset(Path(args.dataset), root, target)
+        trace_set = TraceSet.from_path(str(root))
     if target is None or target not in trace_set.definitions:
-        raise SystemExit(f"No optimizable definition found (looked for {target!r})")
+        raise SystemExit(
+            f"No optimizable definition found (looked for {target!r}); it is neither in the "
+            f"extraction output nor in {args.dataset}"
+        )
     definition = trace_set.definitions[target]
     logger.info(f"Optimizing: {target}")
 
