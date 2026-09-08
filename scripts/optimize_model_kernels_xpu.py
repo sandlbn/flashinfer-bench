@@ -178,7 +178,10 @@ def profile_model(
         "enc = tok(text, return_tensors='pt').to('xpu:0')\n"
         "with torch.no_grad():\n"
         f"    m.generate(**enc, max_new_tokens={max_new_tokens}, do_sample=False)\n"
-        "    torch.xpu.synchronize()\n"
+        "    torch.xpu.current_stream().synchronize()\n"  # hooked by unitrace;
+            # torch.xpu.synchronize() maps to zeDeviceSynchronize, which it does not hook,
+            # and the per-kernel records are discarded before the exit flush.
+
     )
     try:
         result = subprocess.run(

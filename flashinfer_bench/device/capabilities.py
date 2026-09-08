@@ -39,8 +39,21 @@ class Capabilities:
         ``"INTEL_ARC_B580"``). Distinct from the raw vendor device name, which varies
         with driver version and is unsuitable as a grouping key.
     supported_dtypes : FrozenSet[str]
-        Definition-schema dtype strings the device can execute. Workloads requiring a
-        dtype outside this set are reported as unsupported rather than crashing.
+        Definition-schema dtype strings the device executes **natively**. Workloads
+        requiring a dtype outside both this set and ``emulated_dtypes`` are reported as
+        unsupported rather than crashing.
+    emulated_dtypes : FrozenSet[str]
+        Dtypes the runtime executes *correctly* but not natively -- the values are right
+        and the throughput is not representative of the format. Battlemage has no FP8
+        DPAS, so `torch._scaled_mm` upconverts to fp16: measured on Arc B580 at
+        4096x4096x4096 it is bit-exact against an fp32-upcast reference and runs at
+        52.7 TFLOP/s against bf16's 108.9, i.e. 0.48x.
+
+        These are kept separate from ``supported_dtypes`` rather than merged into it
+        because the two answer different questions. Excluding them entirely would make an
+        FP8 model impossible to onboard on this part even though it runs correctly;
+        including them silently would let an emulated result be read as a native one. A
+        benchmark may run them, and must label them.
     l2_bytes : int
         Size of the last-level cache to defeat when timing with a cold cache. A
         conservative overestimate costs a little benchmark time; an underestimate
@@ -62,10 +75,18 @@ class Capabilities:
         else specifies a value. Devices that ramp clocks from idle need considerably more
         than the generic default; ``None`` means the generic default is fine.
     preferred_sub_group_size : Optional[int]
-        Sub-group (warp/wavefront) width a kernel should ask for on this device. Intel
-        parts commonly offer several -- Battlemage reports {16, 32} -- and the widest is
-        normally what a group reduction is cheapest over. ``None`` means the device has no
-        preference worth expressing, and a kernel should not pin one.
+        Sub-group (warp/wavefront) width an *elementwise* kernel should ask for on this
+        device. Intel parts commonly offer several -- Battlemage reports {16, 32} -- and
+        the widest is normally what a group reduction is cheapest over. ``None`` means the
+        device has no preference worth expressing, and a kernel should not pin one.
+
+        Matrix kernels are not covered by this field and must pin 16 on every Intel Xe
+        part: DPAS has a fixed execution size of 16, CUTLASS-SYCL hardcodes
+        ``constexpr int sg_size = 16`` with no 32-lane path, and Triton's Intel backend
+        silently overrides the requested width to 16 for any kernel it can lower to DPAS
+        (``TritonAnnotateModule.cpp``, ``setThreadsPerWarp``). Asking for 32 there is not
+        an error -- it is ignored, which is worse, because a sweep over both widths looks
+        like coverage while measuring one width twice.
     vector_bytes : int
         Widest single memory access, in bytes. A memory-bound kernel that reads one
         element per work-item leaves most of the pipe idle: widening RMSNorm's loads from
@@ -84,6 +105,7 @@ class Capabilities:
 
     canonical_id: str
     supported_dtypes: FrozenSet[str] = DEFAULT_DTYPES
+    emulated_dtypes: FrozenSet[str] = frozenset()
     l2_bytes: int = 64 * _MIB
     sycl_target: Optional[str] = None
     supports_graphs: bool = False
@@ -95,12 +117,25 @@ class Capabilities:
     extra: Dict[str, Any] = field(default_factory=dict)
 
     def supports_dtype(self, dtype: str) -> bool:
-        """Whether ``dtype`` (a definition-schema dtype string) can run on this device."""
+        """Whether ``dtype`` can run on this device at all, natively or emulated."""
+        return dtype in self.supported_dtypes or dtype in self.emulated_dtypes
+
+    def is_native_dtype(self, dtype: str) -> bool:
+        """Whether ``dtype`` runs on dedicated hardware rather than through emulation.
+
+        A latency measured on an emulated dtype is a property of the emulation, not of
+        the format, and must not be compared against a native measurement of the same
+        dtype on another part.
+        """
         return dtype in self.supported_dtypes
 
     def unsupported_dtypes(self, dtypes: Any) -> FrozenSet[str]:
-        """Return the subset of ``dtypes`` this device cannot execute."""
-        return frozenset(d for d in dtypes if d not in self.supported_dtypes)
+        """Return the subset of ``dtypes`` this device cannot execute at all."""
+        return frozenset(d for d in dtypes if not self.supports_dtype(d))
+
+    def emulated_required_dtypes(self, dtypes: Any) -> FrozenSet[str]:
+        """Return the subset of ``dtypes`` that run only through emulation here."""
+        return frozenset(d for d in dtypes if d in self.emulated_dtypes)
 
     def vector_width(self, itemsize: int) -> int:
         """Elements of ``itemsize`` bytes that fit in one widest-possible access.

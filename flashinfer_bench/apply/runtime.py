@@ -23,6 +23,31 @@ from .table import ApplyTable
 logger = logging.getLogger(__name__)
 
 
+def _dtypes_match(definition, input_args) -> bool:
+    """Whether the tensors given match the dtypes the definition declares.
+
+    Checked because neither the apply index nor ``use_def_best`` checks it: the index key
+    is built from axes alone, and ``use_def_best`` bypasses the key. A definition's name
+    encodes its shape, not its element type, so two models of the same width and different
+    precision collide on one name.
+    """
+    # `torch_input_dtypes` is a cached_property, not a method. Calling it raises
+    # TypeError, and an `except Exception: return True` around that turns this guard into
+    # a silent no-op -- which is exactly what the first version of it did.
+    expected = getattr(definition, "torch_input_dtypes", None)
+    if callable(expected):  # tolerate a test double that exposes it as a method
+        expected = expected()
+    if not expected:
+        return True  # a definition we cannot introspect is not one we should block
+    if len(expected) != len(input_args):
+        return True  # arity is validated separately, with a better message
+    for want, arg in zip(expected, input_args):
+        got = getattr(arg, "dtype", None)
+        if got is not None and got != want:
+            return False
+    return True
+
+
 class ApplyRuntime:
     """Runtime system for dispatching optimized implementations based on trace data.
 
@@ -99,6 +124,8 @@ class ApplyRuntime:
             self._config_registry = apply_config
 
         self._table = ApplyTable.load_or_build(self._trace_set, self._config_registry)
+        self._unbuildable: set = set()
+        """Solutions already known not to build here, so each is reported once."""
 
         # def_name -> callable: (runtime_kwargs) -> ApplyKey
         self._key_builders: Dict[str, ApplyKeyBuilder] = {}
@@ -194,13 +221,33 @@ class ApplyRuntime:
             self._key_builders[definition.name] = builder
         key = builder.build_from_args(input_args)
 
+        if not _dtypes_match(definition, input_args):
+            # A definition is named for its shape (`rmsnorm_h1024`), not its dtype, and the
+            # lookup key carries axes only. So nothing upstream of here distinguishes an
+            # fp16 definition from a bf16 one of the same width, and `use_def_best` skips
+            # the key entirely. Dispatching across that difference is not a slow kernel but
+            # a wrong one: an fp16 RMSNorm solution selected for a bf16 model returned fp16
+            # activations into vLLM and killed the engine on the next matmul. Fall back.
+            if fallback is None:
+                raise RuntimeError(
+                    f"Solution for '{def_name}' expects {definition.torch_input_dtypes}, "
+                    f"got {[getattr(a, 'dtype', None) for a in input_args]}, no fallback"
+                )
+            logger.debug(
+                "Skipping '%s': definition declares %s, called with %s.",
+                def_name,
+                definition.torch_input_dtypes,
+                [getattr(a, "dtype", None) for a in input_args],
+            )
+            return fallback(*args, **kwargs)
+
         # Lookup solution
         sol_name = self._table.match_solution(def_name, key)
         runnable = None
         if sol_name:
             solution = self._trace_set.get_solution(sol_name)
             if solution:
-                runnable = BuilderRegistry.get_instance().build(definition, solution)
+                runnable = self._try_build(definition, solution)
 
         # Miss policy
         if runnable is None:
@@ -208,7 +255,7 @@ class ApplyRuntime:
                 best_sol_name = self._table.def_best.get(def_name)
                 solution = self._trace_set.get_solution(best_sol_name)
                 if definition and solution:
-                    runnable = BuilderRegistry.get_instance().build(definition, solution)
+                    runnable = self._try_build(definition, solution)
 
         if runnable is None:
             if fallback is None:
@@ -221,6 +268,34 @@ class ApplyRuntime:
             return None
         else:
             return runnable.call_value_returning(*input_args)
+
+    def _try_build(self, definition, solution):
+        """Build ``solution``, or return ``None`` if it cannot be built here.
+
+        A dataset is shared across hardware, so most of its solutions target something
+        else: on an Intel GPU every CUDA solution fails to build, and some fail on a
+        missing dependency rather than a missing device. Letting that escape defeats the
+        point of ``fallback`` -- the caller asked for the best kernel *or* its own
+        implementation, and "this kernel does not compile here" is exactly the case the
+        fallback exists for. Before this, one unbuildable solution took down a vLLM
+        EngineCore at startup.
+
+        Failures are logged once per solution; a solution that cannot build will be
+        retried on every call otherwise, and the log would drown the process.
+        """
+        try:
+            return BuilderRegistry.get_instance().build(definition, solution)
+        except Exception as e:
+            if solution.name not in self._unbuildable:
+                self._unbuildable.add(solution.name)
+                logger.warning(
+                    "Solution '%s' for '%s' cannot be built here (%s: %s); falling back.",
+                    solution.name,
+                    definition.name,
+                    type(e).__name__,
+                    str(e)[:200],
+                )
+            return None
 
     def start(self) -> None:
         """Activate this runtime instance.

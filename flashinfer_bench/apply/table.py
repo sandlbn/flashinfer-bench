@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,6 +27,67 @@ def _apply_table_dir() -> Path:
         The apply table cache directory path.
     """
     return get_fib_cache_path() / "apply_table"
+
+
+logger = logging.getLogger(__name__)
+
+
+def _targets_this_machine(solution) -> bool:
+    """Whether this solution declares the backend we are actually running on.
+
+    Asked before building rather than discovered by building, because building the wrong
+    one is not merely wasted work: `torch.utils.cpp_extension.load` guards its build
+    directory with a `FileBaton`, and `FileBaton.wait` polls for a lock file with no
+    timeout. A process killed mid-build leaves that file behind, and the next process to
+    want the same extension waits on it forever -- which no exception handler can catch.
+    A vLLM EngineCore hung exactly that way for ten minutes, warming a CUDA `kernel.cu`
+    on an Intel GPU against a baton left by a run killed hours earlier.
+
+    The check is deliberately strict: warm-up is an optimization, so skipping a solution
+    that would in fact have built costs one lazy build later, which `ApplyRuntime` already
+    handles. Building one that cannot costs a hang.
+    """
+    from flashinfer_bench.device import default_device_type
+
+    try:
+        backend = default_device_type()
+    except Exception:
+        return False
+    targets = getattr(solution.spec, "target_hardware", None) or []
+    return any(str(t).lower() == backend.lower() for t in targets)
+
+
+def _warm(registry, definition, solution) -> None:
+    """Pre-build a solution, tolerating one that cannot be built on this machine.
+
+    Warm-up is an optimization: it moves compilation off the first call. Nothing about it
+    should be able to stop the process, and a shared dataset guarantees it will meet
+    solutions for other hardware -- every CUDA solution on an Intel GPU, and some that
+    fail on a missing Python dependency rather than a missing device.
+
+    Before this, warming a `cublaslt_fp4_e2m1_scaled_mm` solution that needs `torchao`
+    raised out of table construction and killed a vLLM EngineCore at startup. A solution
+    that cannot be pre-built is simply not pre-built; if it is ever selected, the runtime
+    tries again and falls back there.
+    """
+    if not _targets_this_machine(solution):
+        logger.debug(
+            "Skipping warm-up of '%s' for '%s': targets %s, not this machine.",
+            solution.name,
+            definition.name,
+            getattr(solution.spec, "target_hardware", None),
+        )
+        return
+    try:
+        registry.build(definition, solution)
+    except Exception as e:
+        logger.debug(
+            "Skipping warm-up of '%s' for '%s': %s: %s",
+            solution.name,
+            definition.name,
+            type(e).__name__,
+            str(e)[:200],
+        )
 
 
 @dataclass
@@ -275,7 +337,7 @@ class ApplyTable:
             for sol_name, _ in ranked[:cutoff]:
                 solution = trace_set.get_solution(sol_name)
                 if solution:
-                    reg.build(definition, solution)
+                    _warm(reg, definition, solution)
 
         # Build def_best for definitions with on_miss_policy == "use_def_best"
         for def_name, sol_name in table.def_best.items():
@@ -286,7 +348,7 @@ class ApplyTable:
                 definition = trace_set.definitions.get(def_name)
                 solution = trace_set.get_solution(sol_name)
                 if definition and solution:
-                    reg.build(definition, solution)
+                    _warm(reg, definition, solution)
 
     @classmethod
     def _digest(cls, trace_set: TraceSet, config_registry: ApplyConfigRegistry) -> str:

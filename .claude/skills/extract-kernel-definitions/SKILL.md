@@ -1,597 +1,230 @@
 ---
 name: extract-kernel-definitions
-description: Generate Definition JSON files for the flashinfer-trace HuggingFace dataset by harvesting them from a short SGLang inference pass (FlashInfer's @flashinfer_api(trace=...) dumper) — or, as a fallback, by manually transcribing the schema from SGLang sources when FlashInfer doesn't yet have a trace template. Use when adding a new model, extracting GPU kernels (MLA, MoE, GQA, RMSNorm, GEMM, GDN, RoPE, sampling), or filling gaps in the dataset.
+description: Generate Definition JSON for the flashinfer-trace dataset — by harvesting a short SGLang pass with FlashInfer's trace dumper (CUDA), by transcribing the schema from model sources and config.json, or by module hooks on Intel. Owns the definition naming and axis rules. Use when adding a model or filling gaps in the dataset.
 ---
 
-# Extract Kernel Definitions
+# Extract kernel definitions
 
-Produce per-(op, shape) Definition JSONs and stage them in the HuggingFace dataset clone at
-`tmp/flashinfer-trace/definitions/{op_type}/`. PR submission is **out of scope** here — see
-[`submit-onboarding-prs`](../submit-onboarding-prs/SKILL.md) (Phase 4 of `/onboard-model`).
+Produce `definitions/{op_type}/{name}.json` for every kernel a model needs. Definitions are
+hardware-agnostic — one that already exists is reused unchanged, never re-derived.
 
-## Two paths
+| Path | How | When |
+| --- | --- | --- |
+| **A** | Trace-dump from a short SGLang run | An NVIDIA box is available and FlashInfer has a trace template for the op |
+| **B** | Transcribe from model sources + `config.json` | No trace template, or TP/EP variants Path A cannot reach |
+| **C** | Module hooks on a `transformers` run | Intel-only box — see `/onboard-model-intel` Phase 2 |
 
-| Path | When to use | What you do |
-|------|-------------|-------------|
-| **A. Trace-dump (primary)** | Kernel is `fi_supported` per `/discover-models` — i.e. the FlashInfer API used by SGLang carries a `@flashinfer_api(trace=...)` template (see [coverage list](#flashinfer-trace-coverage)). | Run a short SGLang inference pass with `FLASHINFER_TRACE_DUMP=1`. The dumper writes one JSON per unique (op, shape) before the kernel runs (crash-safe, deduplicated). |
-| **B. Manual extraction (fallback)** | Kernel is `fi_missing`, **or** the relevant FlashInfer API is not yet trace-instrumented. | Read the SGLang model source + sgl-cookbook serving config + HF model config; write the Definition JSON by hand using the [schema reference](#schema-reference). |
-
-The trace-dump path is the default — it eliminates manual axis derivation and produces
-JSONs that already carry `axes`, `inputs`, `outputs`, `tags` (`fi_api:*`,
-`status:verified`), and a `reference` implementation.
-
-> Background: the trace dumper was added in
-> [flashinfer-ai/flashinfer#2931](https://github.com/flashinfer-ai/flashinfer/pull/2931).
-> Schema and full env-var docs live at
-> [`docs/fi_trace.rst`](https://github.com/flashinfer-ai/flashinfer/blob/main/docs/fi_trace.rst)
-> in the FlashInfer repo. SGLang harness reference:
-> [`tests/trace/example_sglang.py`](https://github.com/flashinfer-ai/flashinfer/blob/main/tests/trace/example_sglang.py).
-
-## Usage
-
-```bash
-# Path A — auto-dump every fi_supported definition for a model in one inference pass
-/extract-kernel-definitions --model-name llama-3.2-3b --hf-repo-id meta-llama/Llama-3.2-3B-Instruct
-
-# Path A — multi-config: one short run per (TP, EP) listed in sgl-cookbook
-/extract-kernel-definitions --model-name qwen3-next --tp-list 2,4
-
-# Path B — manual fallback for fi_missing kernels (or names that didn't appear in the dump)
-/extract-kernel-definitions --model-name kimi-k2 --manual --op-types new_op_type
-```
-
-## Parameters
-
-- `--model-name` (required): Model slug (e.g. `llama`, `deepseek-v3`, `qwen3-next`). Used to
-  look up the SGLang model file and the sgl-cookbook YAML.
-- `--hf-repo-id` (optional): HuggingFace repo override; inferred from `--model-name` if omitted.
-- `--tp-list` (optional): Comma-separated TP values to run for; default reads
-  sgl-cookbook YAML.
-- `--ep-list` (optional): Comma-separated EP values for MoE models.
-- `--manual` (optional): Force Path B (manual extraction) even for fi_supported ops.
-- `--op-types` (optional): Comma-separated `op_type` filter when using `--manual` or for
-  `--dry-run` reporting.
-- `--dry-run` (optional): Report what would be dumped/written without running anything.
-- `--skip-existing` (optional, default `true`): Skip any definition whose name already
-  exists under `tmp/flashinfer-trace/definitions/`.
+Path B owns the naming and axis rules that all three paths must agree on.
 
 ## Prerequisites
 
-- `/clone-repos` has been run, so `tmp/sglang/`, `tmp/flashinfer/`, `tmp/sgl-cookbook/`,
-  and `tmp/flashinfer-trace/` are present and current. The HF dataset clone at
-  `tmp/flashinfer-trace/` is the only home for definitions — the in-repo
-  `flashinfer_trace/` directory was removed in the trace-dataset refactor.
-- For Path A: a working CUDA-enabled environment, GPU memory sufficient for the chosen
-  model + TP, and `attention_backend="flashinfer"` available in the installed SGLang.
-- For Path B: HuggingFace `config.json` access for the target model.
-
----
+`/clone-repos` for `tmp/sglang`, `tmp/flashinfer`, `tmp/sgl-cookbook`, `tmp/flashinfer-trace`.
 
 ## Path A: trace-dump from a short SGLang pass
 
-The dumper fires inside FlashInfer when both env vars are set **before** the FlashInfer
-import. SGLang routes through `@flashinfer_api(trace=...)`-decorated APIs whenever
-`attention_backend="flashinfer"` is selected, so a single short prefill+decode pass
-exercises most ops at once.
+### A1. Pick the serving config
 
-### A1. Pick the serving config(s)
-
-Open the sgl-cookbook YAML for the target model and list the unique TP/EP values — one
-trace-dump pass per unique combination is enough to cover every shape variant.
+One pass per unique (TP, EP) combination covers every shape variant.
 
 ```bash
-ls tmp/sgl-cookbook/data/models/generated/v0.5.6/ | grep -i {model_name}
-cat tmp/sgl-cookbook/data/models/generated/v0.5.6/{model_yaml}
+COOKBOOK=$(ls -d tmp/sgl-cookbook/data/models/generated/* | sort -V | tail -1)
+ls "$COOKBOOK" | grep -i <model_name>
+cat "$COOKBOOK"/<model_yaml>
 ```
 
-If the model has no cookbook entry, default to TP=1 (single-GPU baseline) and skip EP.
+No cookbook entry → default to TP=1 and skip EP.
 
-### A2. Run the trace-dump pass
-
-Use `tools/gpu-lock` so `CUDA_VISIBLE_DEVICES` is set correctly. The script below mirrors
-[`tests/trace/example_sglang.py`](https://github.com/flashinfer-ai/flashinfer/blob/main/tests/trace/example_sglang.py)
-in the FlashInfer repo — adapt the `model_path`, `tp_size`, and `attention_backend`:
+### A2. Run the dump
 
 ```bash
-DUMP_DIR=tmp/dumps/fi_trace_{model_slug}_tp{TP}_ep{EP}
+export DUMP_DIR=tmp/dumps/fi_trace_<model_slug>_tp<TP>
 
-tools/gpu-lock --gpus {TP} --exec-timeout 1800 -- python - <<EOF
+tools/gpu-lock --gpus <TP> --exec-timeout 1800 -- python - <<'PY'
 import os, shutil
 from pathlib import Path
 
-# Must be set BEFORE flashinfer / sglang import.
 os.environ["FLASHINFER_TRACE_DUMP"] = "1"
-os.environ["FLASHINFER_TRACE_DUMP_DIR"] = "$DUMP_DIR"
+os.environ["FLASHINFER_TRACE_DUMP_DIR"] = os.environ["DUMP_DIR"]
 os.environ.setdefault("SGLANG_SKIP_CUBIN_DOWNLOAD", "1")
 
-dump = Path("$DUMP_DIR")
+dump = Path(os.environ["DUMP_DIR"])
 if dump.exists():
     shutil.rmtree(dump)
 
 from sglang.srt.entrypoints.engine import Engine
 engine = Engine(
-    model_path="{hf_repo_id}",
-    attention_backend="flashinfer",
-    disable_cuda_graph=True,         # keep first call on the Python path
-    mem_fraction_static=0.5,
-    tp_size={TP},
+    model_path="<hf_repo_id>",
+    attention_backend="flashinfer",   # other backends bypass the dumper entirely
+    disable_cuda_graph=True,          # cached graphs skip the Python path
     disable_radix_cache=True,
+    mem_fraction_static=0.5,
+    tp_size=<TP>,
     log_level="warning",
 )
-engine.generate(
-    ["The capital of France is"],
-    {"temperature": 0.0, "max_new_tokens": 4, "top_k": 50, "top_p": 0.9},
-)
+engine.generate(["The capital of France is"],
+                {"temperature": 0.0, "max_new_tokens": 4, "top_k": 50, "top_p": 0.9})
 engine.shutdown()
-EOF
+PY
 ```
 
-A few non-obvious requirements:
+Requirements that are not obvious and each cost a silent empty dump:
 
-- **Set the env vars before import.** `FLASHINFER_TRACE_DUMP` and
-  `FLASHINFER_TRACE_DUMP_DIR` are read at call time, but the `@flashinfer_api` decorator
-  binding happens at import — set them in the shell or at the top of the entry script
-  *before* any `import flashinfer` / `import sglang` runs.
-- **Use `attention_backend="flashinfer"`.** Other SGLang backends bypass the FlashInfer
-  APIs and produce no dumps.
-- **Disable CUDA graphs (`disable_cuda_graph=True`)** for the trace pass. Cached graphs
-  skip the Python path and therefore the dumper.
-- **Page-size variants need separate runs.** SGLang's page size is fixed per server, so
-  to capture both `_ps16` and `_ps64` shapes (for example) you must run twice with
-  different `--page-size`. Enumerate the page sizes used by the target model.
-- **MoE routing methods.** Each `routing_method_type` (Default, Renormalize, DeepSeekV3,
-  Llama4, RenormalizeNaive, TopK) emits its own template; only the routing actually
-  exercised by the model in your prompts will dump. For DeepSeek-V3 use a real DSv3 model
-  to capture the `ds_routing` variant.
-- **Quantized variants** (fp8/mxfp8/fp4 GEMM, fp8/fp4 block-scale MoE) require the model
-  to actually use that quant config — load with the matching `--quantization` flag.
+- **Env vars must be set before `import flashinfer` / `import sglang`.** The
+  `@flashinfer_api` decorator binds at import.
+- **`attention_backend="flashinfer"`** — other backends produce no dumps.
+- **`disable_cuda_graph=True`** — cached graphs skip the dumper.
+- **Page-size variants need separate runs.** Page size is fixed per server. Enumerate the
+  ones the dataset already uses:
+  `ls tmp/flashinfer-trace/definitions/gqa_paged | sed -n 's/.*_ps\([0-9]*\)\.json/\1/p' | sort -u`
+- **MoE routing** — only the routing your prompts exercise will dump.
+- **Quantized variants** require the model to actually load with that `--quantization`.
 
-### A3. Dedupe and stage into the dataset
+### A3. Stage into the dataset
+
+The `op_type` field inside each JSON decides its subdirectory.
 
 ```bash
-# 1. List what was dumped
 ls "$DUMP_DIR"
 
-# 2. For each {name}.json: sort it under the right op_type subdirectory.
-#    The op_type field inside the JSON is the source of truth for the subfolder.
-python - <<'EOF'
-import json, shutil
+DUMP_DIR="$DUMP_DIR" python - <<'PY'
+import json, os, shutil
 from pathlib import Path
-src = Path("$DUMP_DIR")
-dst_root = Path("tmp/flashinfer-trace/definitions")
-for p in src.glob("*.json"):
+
+src = Path(os.environ["DUMP_DIR"])           # read from the environment, not by
+dst_root = Path("tmp/flashinfer-trace/definitions")   # shell interpolation
+for p in sorted(src.glob("*.json")):
     op_type = json.loads(p.read_text())["op_type"]
-    dst = dst_root / op_type / p.name
-    if dst.exists():
-        print(f"skip (exists): {dst.relative_to(dst_root)}")
+    out = dst_root / op_type
+    out.mkdir(parents=True, exist_ok=True)
+    if (out / p.name).exists():
+        print(f"exists, skipping: {op_type}/{p.name}")
         continue
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(p, dst)
-    print(f"added: {dst.relative_to(dst_root)}")
-EOF
+    shutil.copy2(p, out / p.name)
+    print(f"staged: {op_type}/{p.name}")
+PY
 ```
 
-### A3b. Normalize the staged JSONs for `flashinfer-bench validate`
+A quoted heredoc (`<<'PY'`) does **not** interpolate `$DUMP_DIR`; pass it through the
+environment as above, or the script silently looks for a directory literally named
+`$DUMP_DIR`.
 
-The trace dumper's output has three known mismatches with `flashinfer-bench`'s
-`Definition` schema (all originate in the trace templates shipped with
-[flashinfer-ai/flashinfer#2931](https://github.com/flashinfer-ai/flashinfer/pull/2931)):
+### A4. Normalize and tag
 
-1. `reference` declares the function as `def _<name>_reference(...)`, but
-   `flashinfer-bench` requires a top-level `def run(...)`.
-2. Plan-time index tensors (`kv_indptr`, `kv_indices`, `qo_indptr`) come back
-   with `dtype: "unknown"` because the dumper inspects only `run()`'s kwargs,
-   not the wrapper state set during `plan()`. The validator only accepts
-   concrete dtypes from its enum.
-3. In-place ops (e.g. `fused_add_rmsnorm`'s residual) declare the same name
-   in both `inputs` and `outputs`. `flashinfer-bench` rejects overlapping
-   I/O names; the dumper's `reference` function only returns the non-overlap
-   outputs anyway, so it's safe to drop the duplicates from `outputs`.
+The dumper does not emit every field the dataset requires. Add the `model:`, `tp:`/`ep:` and
+`status:` tags, and reconcile field names against the schema, before validating.
 
-Run this once per staging pass to make the JSONs validate:
-
-```bash
-python - <<'EOF'
-import json, re
-from pathlib import Path
-INDEX_TENSOR_DTYPE = "int32"
-KNOWN_INDEX_TENSORS = {
-    "kv_indptr", "kv_indices", "qo_indptr",
-    "paged_kv_indptr", "paged_kv_indices", "kv_last_page_len",
-}
-REF_RE = re.compile(r"^def\s+_[A-Za-z0-9_]+_reference\b", re.MULTILINE)
-for p in Path("tmp/flashinfer-trace/definitions").rglob("*.json"):
-    d = json.loads(p.read_text()); changed = False
-    ref = d.get("reference", "")
-    if ref and "def run(" not in ref:
-        new_ref, n = REF_RE.subn("def run", ref, count=1)
-        if n == 1: d["reference"], changed = new_ref, True
-    for name, spec in d.get("inputs", {}).items():
-        if isinstance(spec, dict) and spec.get("dtype") == "unknown" and name in KNOWN_INDEX_TENSORS:
-            spec["dtype"], changed = INDEX_TENSOR_DTYPE, True
-    overlap = set(d.get("inputs", {})) & set(d.get("outputs", {}))
-    for name in overlap:
-        d["outputs"].pop(name, None)
-        changed = True
-    if changed:
-        p.write_text(json.dumps(d, indent=2) + "\n")
-        print(f"normalized: {p}")
-EOF
-```
-
-These three patches are mechanical — file a follow-up issue against
-`flashinfer-ai/flashinfer` to emit `def run(...)`, resolve plan-time dtypes,
-and drop in-place outputs (or rename them) inside the dumper itself, after
-which A3b becomes a no-op.
-
-### A3c. Validate
+### A5. Validate
 
 ```bash
 flashinfer-bench validate --dataset tmp/flashinfer-trace --disable-gpu
 ```
 
-Newly staged definitions should report `[WARNING]` (missing descriptions on
-axes/inputs/outputs are advisory) and not `[ERROR]`. Any `[ERROR]` on a
-definition you just staged means A3b didn't normalize a new failure mode —
-inspect the report (`tmp/flashinfer-trace/reports/report-*.txt`) and extend
-the snippet.
+Fix everything it reports as `[ERROR]` before moving on.
 
-That's it for Path A — once normalized, the staged JSONs carry `axes`,
-`inputs`, `outputs`, `tags` (`fi_api:*`, `status:verified`), and a
-`reference` implementation, so they're ready for the rest of the onboarding
-pipeline (workloads → baseline → eval → Phase 4 PRs).
-
-### Trade-off vs. tag enrichment
-
-The dumper does **not** auto-emit `tp:N`, `ep:N`, `model:*`, or `quantization:*` tags —
-those are workflow-level metadata, not kernel-shape metadata. After staging, append the
-appropriate tags to the JSONs you just produced:
+### A6. Gap check — what still needs Path B
 
 ```bash
-python - <<'EOF'
-import json
-from pathlib import Path
-extra_tags = ["model:{model_slug}", "tp:{TP}"]   # add ep:{EP} for MoE
-for p in Path("tmp/flashinfer-trace/definitions").rglob("*.json"):
-    if p.stat().st_mtime < {dump_run_start_epoch}:
-        continue
-    j = json.loads(p.read_text())
-    j["tags"] = sorted(set(j.get("tags", []) + extra_tags))
-    p.write_text(json.dumps(j, indent=2) + "\n")
-EOF
+comm -23 <(printf '%s\n' <expected_names> | sort) \
+         <(ls "$DUMP_DIR" | sed 's/\.json$//' | sort)
 ```
 
-### FlashInfer trace coverage
+Anything left did not dump. If FlashInfer has no trace template for it, that is B4.
 
-Per
-[`docs/fi_trace.rst`](https://github.com/flashinfer-ai/flashinfer/blob/main/docs/fi_trace.rst),
-the trace registry currently covers:
+## Path B: transcribe from sources
 
-| FlashInfer module | API(s) | `op_type` |
-|-------------------|--------|-----------|
-| `flashinfer.norm` | `rmsnorm`, `fused_add_rmsnorm` (and gemma / quant variants) | `rmsnorm` |
-| `flashinfer.sampling` | `top_k_sampling_from_probs`, `top_p_sampling_from_probs`, `top_k_top_p_sampling_from_probs`, `min_p_sampling_from_probs`, `chain_speculative_sampling` | `sampling` |
-| `flashinfer.gemm` | `mm_bf16`, `mm_fp8`, `mm_mxfp8`, `mm_fp4` | `gemm_bf16` / `gemm_fp8` / `gemm_mxfp8` / `gemm_fp4` |
-| `flashinfer.decode` | `BatchDecodeWithPagedKVCacheWrapper.run` | `gqa_paged` |
-| `flashinfer.prefill` | `BatchPrefillWithPagedKVCacheWrapper.run`, `BatchPrefillWithRaggedKVCacheWrapper.run` | `gqa_paged` / `gqa_ragged` |
-| `flashinfer.mla` | `BatchMLAPagedAttentionWrapper.run` | `mla_paged` |
-| `flashinfer.gdn_decode` | `gated_delta_rule_decode`, `gated_delta_rule_mtp` | `gdn` |
-| `flashinfer.gdn_prefill` | `chunk_gated_delta_rule` | `gdn` |
-| `flashinfer.fused_moe` | `trtllm_fp8_block_scale_moe` × 6 routings, `trtllm_fp4_block_scale_moe` × 6 routings | `moe` |
-| `flashinfer.rope` | `apply_rope_*` family | `rope` |
-| `flashinfer.cascade` | `merge_state*` | `cascade` |
-| `flashinfer.activation` | `silu_and_mul`, `gelu_and_mul`, `gelu_tanh_and_mul` | `activation` |
-| `flashinfer.quantization` | `fp4_quantize` | `quantize` |
-| `flashinfer.page` | `append_paged_kv_cache` | `page` |
+### B1. Read the model and serving config
 
-Anything outside this list falls through to Path B. To check up-to-date coverage:
+The HuggingFace modeling file is the ground truth for what the op computes; `config.json`
+gives the constants; the cookbook YAML gives TP/EP.
 
-```bash
-grep -rn "@flashinfer_api(trace=" tmp/flashinfer/flashinfer/
-```
+### B2. Naming and axis rules
 
----
+**This table is the single owner of definition naming.** Other skills point here.
 
-## Path B: manual extraction (fallback)
-
-Use this when:
-- The kernel is `fi_missing` (no FlashInfer kernel exists yet — definition JSON will carry
-  `status:unverified` plus a link to the kernel-request issue), or
-- The kernel exists in FlashInfer but the API does not yet have a `@flashinfer_api(trace=...)`
-  template (rare; check coverage list above).
-
-### B1. Read the model + serving config
-
-1. Locate the SGLang model file:
-   ```bash
-   ls tmp/sglang/python/sglang/srt/models/ | grep -i {model_name}
-   ```
-2. Find sgl-cookbook YAML and parse unique `tp` / `ep` values.
-3. Pull `config.json` from HuggingFace (`hidden_size`, `num_attention_heads`,
-   `num_key_value_heads`, `head_dim`, `intermediate_size`, `num_experts`, `num_experts_per_tok`,
-   `vocab_size`, etc.). See `track-models` SKILL.md for the full field-to-axis mapping.
-
-### B2. Compute kernel parameters per (TP, EP)
-
-Apply the parallelism rules (TP/EP-affected kernels split head/expert counts; norm / GEMM
-/ RoPE / sampling are parallelism-agnostic):
+Some kernel types produce separate definitions per parallelism setting because parallelism
+changes constant axis values; the rest are parallelism-agnostic.
 
 | op_type | TP affects | EP affects | Naming pattern |
-|---------|-----------|-----------|---------------|
+|---|---|---|---|
 | `gqa_paged` | `q_heads/=TP`, `kv_heads/=TP` | — | `gqa_paged_{decode,prefill}_h{q}_kv{kv}_d{d}_ps{P}` |
-| `gqa_ragged` | same as gqa_paged | — | `gqa_ragged_{prefill}_h{q}_kv{kv}_d{d}` |
-| `mla_paged` | `q_heads/=TP` | — | `mla_paged_{decode,prefill}_h{q}_ckv{ckv}_kpe{kpe}_ps{P}` |
+| `gqa_ragged` | same as `gqa_paged` | — | `gqa_ragged_prefill_causal_h{q}_kv{kv}_d{d}` |
+| `mla_paged` | `q_heads/=TP` | — | `mla_paged_decode_h{q}_ckv{ckv}_kpe{kpe}_ps{P}`, `mla_paged_prefill_causal_…` |
+| `mla_ragged` | `q_heads/=TP` | — | `mla_ragged_prefill_causal_h{q}_qk{qk}_vo{vo}` |
+| `dsa_paged` | `q_heads/=TP` | — | `dsa_sparse_attention_h{q}_ckv{ckv}_kpe{kpe}_topk{k}_ps{P}`, `dsa_topk_indexer_{quant}_h{q}_d{d}_topk{k}_ps{P}` |
 | `gdn` | `q_heads/=TP`, `v_heads/=TP` | — | `gdn_{decode,mtp,prefill}_qk{q}_v{v}_d{d}_k_last` |
 | `mamba_ssu` | `nheads/=TP`, `ngroups/=TP` | — | `mamba_ssu_decode_h{n}_d{d}_s{s}_ng{g}` |
-| `moe` | — | `num_experts/=EP` | `moe_{quant}_{routing}_topk{k}_e{local_e}_h{H}_i{I}` |
+| `moe` | — | `num_experts/=EP` | `moe_{quant}_{routing}_topk{k}_ng{g}_kg{kg}_e{local_e}_h{H}_i{I}`; TensorRT-LLM paths are named `trtllm_{quant}_[routed_]moe_topk{k}_…` instead |
 | `rmsnorm` | — | — | `rmsnorm_h{H}` / `fused_add_rmsnorm_h{H}` |
-| `gemm` | — | — | `gemm_n{N}_k{K}` (or `gemm_{quant}_N{N}_K{K}`) |
+| `gemm` | — | — | `gemm_n{N}_k{K}`, `gemm_{quant}_n{N}_k{K}` (lowercase `n`/`k`); grouped and sparse forms prefix the family: `grouped_gemm_{quant}_{layout}_g{G}_…`, `sparse_gemm_{quant}_…` |
 | `rope` | — | — | `rope_with_cos_sin_cache_{neox,gptj}_style_d{d}_rd{rd}` |
-| `sampling` | — | — | `{topk,topp,topk_topp}_sampling_from_probs_v{vocab}` |
+| `sampling` | — | — | `top_k_…`, `top_p_…`, `top_k_top_p_sampling_from_probs_v{vocab}` — each word is its own segment, not `topk` |
+| `activation` | — | — | `{silu,gelu,gelu_tanh}_and_mul_d{d}` |
 
-Where `ckv = kv_lora_rank + qk_rope_head_dim` and `kpe = qk_rope_head_dim` for MLA.
+For MLA, `ckv = kv_lora_rank + qk_rope_head_dim` and `kpe = qk_rope_head_dim`.
 
-### B3. Write Definition JSON
+These patterns are descriptive, not normative: the dataset is the authority. Before naming
+anything, list the op_type's directory in `tmp/flashinfer-trace/definitions/` and match what
+is already there. A near-miss name creates a duplicate definition rather than an error.
 
-Hand-write the JSON under `tmp/flashinfer-trace/definitions/{op_type}/{name}.json`. Use
-the canonical schema below. For `fi_missing` definitions add the status tag and the
-issue back-pointer in the `description`.
+A name encodes **shape, not dtype**. Two models of the same width but different precision
+collide on one name — extract in the dtype the model is actually served in.
 
-For the `reference` field: write a plain-PyTorch `run(...)` implementation. Source it from
-SGLang's vanilla forward (`tmp/sglang/python/sglang/srt/layers/...`) when FlashInfer
-doesn't have it, otherwise mirror FlashInfer's own test harness. See `add-reference-tests`
-for validation flow.
+### B3. Write the JSON
 
-### B4. File a "missing trace template" issue against FlashInfer
-
-Path B is friction we want to remove. Whenever you fall through to manual extraction
-because **FlashInfer has the kernel but the API isn't decorated yet** (the
-"decorator-gap" case — `fi_status=fi_supported` and `fi_trace_template=false` in the
-manifest), file a follow-up issue in `flashinfer-ai/flashinfer` so the next onboarding
-of the same op_type can use Path A. Skip this step for `fi_missing` kernels — those
-already have a kernel-request issue from `/onboard-model` Phase 2a, and the trace
-template will be added together with the kernel implementation.
+Never start from a blank schema. Copy the nearest sibling and change the constants:
 
 ```bash
-gh issue create \
-  --repo flashinfer-ai/flashinfer \
-  --title "trace: add @flashinfer_api(trace=...) for {fi_api}" \
-  --label "enhancement,flashinfer-trace" \
-  --body "$(cat <<'EOF'
-## Missing trace template
-
-`{fi_api}` already has a working FlashInfer kernel but no `@flashinfer_api(trace=...)`
-template, so flashinfer-bench cannot auto-dump its Definition JSON during a
-`FLASHINFER_TRACE_DUMP=1` run. We had to fall back to manual extraction for
-`{model_display_name}`.
-
-### What we need
-
-A `TraceTemplate` (see `flashinfer/trace/template.py` and the existing per-family
-modules under `flashinfer/trace/templates/`) attached to the existing `@flashinfer_api`
-decorator on `{fi_api}`. The template should declare the full set of axes / inputs /
-outputs so `tests/trace/test_fi_trace_template_consistency.py` passes.
-
-### Reference (manual extraction)
-
-The Definition JSON we hand-wrote for this op while waiting for the trace template:
-- `tmp/flashinfer-trace/definitions/{op_type}/{definition_name}.json` (will land in the
-  next flashinfer-trace dataset PR — link from this comment once open).
-- Used by: {model_display_name} ({hf_repo_id}).
-
-### Acceptance
-
-- [ ] `@flashinfer_api(trace=...)` attached to `{fi_api}`.
-- [ ] Running `FLASHINFER_TRACE_DUMP=1 python tests/trace/example_sglang.py` (or the
-      relevant model harness) emits a JSON for this op with the same `axes` /
-      `inputs` / `outputs` / `name` we wrote by hand.
-- [ ] `pytest tests/trace/ -v` passes.
-
-### Related
-
-- flashinfer-bench onboarding skill: `.claude/skills/extract-kernel-definitions/SKILL.md`
-  Path B → step B4 (this issue is filed by that step).
-EOF
-)"
+ls tmp/flashinfer-trace/definitions/{op_type}/
+cp tmp/flashinfer-trace/definitions/{op_type}/{nearest}.json \
+   tmp/flashinfer-trace/definitions/{op_type}/{new_name}.json
 ```
 
-Record the issue URL on the manifest entry as `fi_trace_template_request_url` so
-reviewers of the dataset PR can see the follow-up is in flight.
+Then edit: `name`, the const axis values, the `assert` in the `reference`, and the tags.
 
----
-
-## Schema reference
-
-This applies to both paths — it's the format the trace dumper produces (Path A) and the
-format your hand-written JSON must match (Path B).
-
-```json
-{
-  "name": "rmsnorm_h7168",
-  "description": "Root Mean Square Normalization. Epsilon is fixed at 1e-6.",
-  "op_type": "rmsnorm",
-  "tags": [
-    "fi_api:flashinfer.norm.rmsnorm",
-    "status:verified",
-    "model:{model_slug}",
-    "tp:{N}"
-  ],
-  "axes": {
-    "batch_size":  {"type": "var"},
-    "hidden_size": {"type": "const", "value": 7168}
-  },
-  "constraints": ["..."],
-  "inputs": {
-    "hidden_states": {"shape": ["batch_size", "hidden_size"], "dtype": "bfloat16"},
-    "weight":        {"shape": ["hidden_size"],               "dtype": "bfloat16"}
-  },
-  "outputs": {
-    "output": {"shape": ["batch_size", "hidden_size"], "dtype": "bfloat16"}
-  },
-  "reference": "import torch\n\ndef run(...):\n    ..."
-}
-```
-
-Field rules:
-
-- **`name`** — Path A: auto-generated by the trace dumper from `op_type` / `name_prefix` +
-  const-axis values. Path B: assemble per the [naming patterns](#b2-compute-kernel-parameters-per-tp-ep).
-- **`op_type`** — selects the subdirectory under `definitions/` (`rmsnorm`, `gqa_paged`,
-  `mla_paged`, `gdn`, `moe`, `gemm`, `gemm_fp8`, `sampling`, `rope`, …).
-- **`tags`** — always include `fi_api:<qualified.name>` (e.g. `fi_api:flashinfer.norm.rmsnorm`)
-  and `status:verified` (use `status:unverified` for fi_missing). Add `model:*`, `tp:N`,
-  `ep:N`, `quantization:*` as applicable. Path A emits the first two automatically; the
-  rest are workflow metadata you append after staging.
-- **`axes`** — `var` axes vary at runtime (batch, sequence length, num_pages); `const` axes
-  are model constants and carry a `"value"`. Const-axis values plus `name_prefix` produce
-  the file name.
-- **`constraints`** (optional) — string expressions like `"len_indptr == batch_size + 1"`,
-  evaluated against axis values when validating workloads.
-- **`inputs` / `outputs`** — each entry has `shape` (list of axis names) and `dtype`.
-  Optional inputs: `"optional": true`. Output dtype may be inherited from an input via
-  `"dtype_from": "{input_name}"` in trace templates (the dumper resolves it before
-  writing).
-- **`reference`** — pure-PyTorch `run()` for correctness checking. Required for
-  `status:verified`. Path A emits this when the trace template includes one; Path B writes
-  it by hand.
-
-Examples of fully populated definitions live in
-[`tests/trace/fi_trace_out/`](https://github.com/flashinfer-ai/flashinfer/tree/main/tests/trace/fi_trace_out)
-in the FlashInfer repo — read these as canonical templates rather than re-deriving the
-schema by hand.
-
----
-
-## After staging
-
-1. Validate: `flashinfer-bench validate --dataset tmp/flashinfer-trace --disable-gpu`.
-2. Add reference tests for any newly staged definitions:
-   `/add-reference-tests --definition-name {name}` (or `--op-type {op_type}`).
-3. Move on to workload collection: `/collect-workloads --definition-names {names}`.
-   Tip: `/collect-workloads` can also dump definitions in the same SGLang run by setting
-   the trace env vars — useful for picking up shapes you missed in step A2.
-4. PR submission is handled separately by `/submit-onboarding-prs` (Phase 4 of
-   `/onboard-model`). Do **not** add definition JSONs to a `flashinfer_trace/...` path
-   inside `flashinfer-bench` — that directory was removed in the refactor.
-
----
-
-## Error handling
-
-- **No JSONs appeared in the dump dir.** Either the env vars were set after the FlashInfer
-  import, the SGLang attention backend isn't `flashinfer`, CUDA graphs were enabled, or the
-  inference path didn't reach a decorated API. Re-check the env-var ordering, ensure
-  `attention_backend="flashinfer"` and `disable_cuda_graph=True`, and add
-  `print(flashinfer.norm.rmsnorm.fi_trace.__doc__)` to confirm the decorator is bound.
-- **Names collide with existing definitions.** Path A is content-deterministic — if a
-  staged file with the same name already exists and differs, the dump captured a different
-  shape under the same const-axis values. Compare the JSONs; the existing one usually wins
-  unless the new shape is the intended target (then update tags / file an issue rather
-  than overwriting silently).
-- **MoE routing variants didn't all dump.** Each `routing_method_type` is its own
-  template; only the routings the model actually invokes will fire. Run a model with the
-  required routing (e.g. real DeepSeek-V3 for `ds_routing`).
-- **GPU OOM.** Reduce `mem_fraction_static`, increase `tp_size`, or use a smaller variant
-  of the model — the trace pass needs only a couple of generated tokens.
-
-## See also
-
-- [discover-models](../discover-models/SKILL.md) — Phase 1 classifier; tells you which
-  kernels are `fi_supported` (Path A) vs `fi_missing` (Path B).
-- [add-reference-tests](../add-reference-tests/SKILL.md) — pytest validation against
-  FlashInfer / SGLang ground truth.
-- [collect-workloads](../collect-workloads/SKILL.md) — runs another SGLang pass and can
-  dump definitions in the same run.
-- [submit-onboarding-prs](../submit-onboarding-prs/SKILL.md) — Phase 4 PR flow.
-- FlashInfer trace docs:
-  [`docs/fi_trace.rst`](https://github.com/flashinfer-ai/flashinfer/blob/main/docs/fi_trace.rst).
-- Reference SGLang harness:
-  [`tests/trace/example_sglang.py`](https://github.com/flashinfer-ai/flashinfer/blob/main/tests/trace/example_sglang.py).
-
-
-## Path C: hooks on a live HuggingFace model
-
-Path A needs SGLang with the FlashInfer backend, which is CUDA-only. Path B reads a
-`config.json` and gives you a schema but no real shapes. Path C sits between them: run the
-model itself under module hooks on whatever accelerator you have, and emit definitions for
-the operations that actually executed, with workloads at the shapes they actually ran at.
+The `reference` is plain PyTorch with float32 accumulation. Source it from SGLang's vanilla
+forward (`tmp/sglang/python/sglang/srt/layers/...`) when FlashInfer does not have the op,
+otherwise mirror FlashInfer's own test:
 
 ```bash
-python scripts/extract_model_kernels_xpu.py \
-    --model Qwen/Qwen2.5-0.5B-Instruct \
-    --output ./qwen-intel-trace \
-    --max-new-tokens 32
+grep -rl "{fi_api_symbol}" tmp/flashinfer/tests/
 ```
 
-Example output for Qwen2.5-0.5B — 1176 RMSNorm and 2328 linear calls observed in one short
-generation:
+Schema reference: `docs/flashinfer-trace/definition.mdx`. Validation flow:
+`/add-reference-tests`.
 
-```
-rmsnorm_h896_float16          2 workload(s)
-linear_k896_n896_float16      1 workload(s)     # qkv / o projections
-linear_k896_n4864_float16     1 workload(s)     # gate / up
-linear_k4864_n896_float16     1 workload(s)     # down
-```
+### B4. File a missing trace template
 
-**What Path C sees and does not see.** It hooks `nn.Module` boundaries, so it captures
-norms, linear projections and anything else that is a module. It does *not* see inside
-fused attention kernels or ops called as bare functions — for those, Path A's trace dump or
-Path B's manual transcription is still the answer. Use Path C to get real shapes for the
-module-level operations quickly, on hardware where Path A cannot run.
-
-Definitions it produces are ordinary hardware-agnostic definitions. Nothing about them is
-Intel-specific; only the route to obtaining them is.
-
-### Attributing time with unitrace
-
-Module hooks tell you which shapes ran, not where the time went. On Intel, `unitrace`
-(intel/pti-gpu) is the Nsight Compute counterpart — per-kernel device time through Level
-Zero and PTI:
+When FlashInfer has no `@flashinfer_api(trace=...)` template for an op, Path A can never
+harvest it. Check first:
 
 ```bash
-git clone https://github.com/intel/pti-gpu.git
-cd pti-gpu/tools/unitrace && mkdir build && cd build
-cmake -DCMAKE_BUILD_TYPE=Release .. && cmake --build . -j2
+grep -rn "@flashinfer_api(trace=" tmp/flashinfer/flashinfer/ | grep -i <op>
 ```
 
-Then either run it directly over a script, or profile one solution on one workload through
-`flashinfer_bench.agents.flashinfer_bench_run_unitrace`, which mirrors the NCU tool and
-runs the same solution runner the benchmark uses.
+Then open an issue against `flashinfer-ai/flashinfer` giving the op, the wrapper, the
+definition name you had to hand-write, and the model that needs it. Keep the issue body in a
+file and pass `--body-file` rather than inlining it.
 
-Use it to rank the backlog. On Qwen2.5-0.5B, `torch.profiler` attribution put GEMM
-(`gemm_kernel` + `aten::mm`) at ~83% of device time, with norms and elementwise ops making
-up most of the rest — so linear projections are where the time is, and oneDNN/oneMKL is the
-first thing to try there rather than a hand-written kernel.
+## Path C: Intel
 
-## Intel GPUs
+`scripts/extract_model_kernels_xpu.py` records shapes from module hooks on a live
+`transformers` run — no CUDA, no SGLang. Its output names are **not** dataset names and must
+be transcribed through the B2 table before anything downstream matches. Procedure:
+`/onboard-model-intel` Phase 2.
 
-**Definitions are hardware-agnostic and do not need to be re-extracted for Intel.** A
-Definition describes an operation's interface — axes, dtypes, and a plain PyTorch
-reference. Nothing in it is NVIDIA-specific, so a definition harvested from an SGLang run
-on an H100 is exactly the definition an Intel GPU implements.
+## Failure table
 
-That matters practically in both directions. **If the definition already exists in the
-dataset, reuse it — never re-extract it because you happen to be on Intel.** But when it
-does *not* exist, an Intel-only machine can produce it: Path A is CUDA-only, so Path C
-(module hooks on `xpu:0`) is the primary route there, with Path B filling in whatever the
-hooks cannot see. A definition harvested on a B580 goes into the dataset exactly like one
-harvested on an H100.
+| Symptom | Cause | Action |
+| --- | --- | --- |
+| Dump directory empty | Env vars set after import, or wrong attention backend | A2 requirements |
+| Only some definitions dumped | CUDA graphs, or that routing/quant path never ran | A2; the rest go to Path B |
+| Staging script finds nothing | Quoted heredoc did not expand `$DUMP_DIR` | A3 — pass via the environment |
+| `validate` reports axis errors | Const axis disagrees with the real tensors | The dump is ground truth; fix the definition |
+| A name already exists | Definition is already in the dataset | Reuse it; never re-derive or rename |
 
-[`onboard-model-intel`](../onboard-model-intel/SKILL.md) Phase 2 is the full Intel-native
-acquisition procedure, including deriving const axes from `config.json` plus the TP/EP
-setting without any GPU.
+## Sources
 
-What *is* Intel-specific comes later, and lives elsewhere:
-
-- **Solutions** — a definition can have CUDA, Triton, and SYCL implementations side by
-  side, distinguished by `spec.language` and `spec.target_hardware`. See
-  `examples/sycl/README.md`.
-- **Traces** — record the hardware they ran on (`environment.hardware_id`) and are grouped
-  by it, never ranked across devices.
-
-Before benchmarking any definition on a new Intel device, cross-validate its reference
-there:
-
-```bash
-flashinfer-bench validate-references --local tmp/flashinfer-trace --device xpu:0
-```
+- `tmp/flashinfer/docs/fi_trace.rst` — the trace-dump mechanism
+- `tmp/flashinfer/tests/trace/example_sglang.py` — the harness A2 mirrors
+- `docs/flashinfer-trace/definition.mdx` — the full schema
+- `tmp/sgl-cookbook/data/models/generated/` — serving configs per model

@@ -164,6 +164,7 @@ class BenchmarkConfig(BaseModel):
         merged: Dict[str, Any] = {"profile_baseline": self.profile_baseline, "extra": {}}
 
         layers = [
+            _evaluator_eval_defaults(definition),
             device_defaults,
             self.op_type_config.get(definition.op_type),
             self.definition_config.get(definition.name),
@@ -196,6 +197,25 @@ class BenchmarkConfig(BaseModel):
         merged["extra"].update({k: v for k, v in extra_overrides.items() if v is not None})
 
         return ResolvedEvalConfig(**merged)
+
+
+def _evaluator_eval_defaults(definition: Any) -> Optional[EvalConfig]:
+    """Eval parameters the evaluator for this definition recommends for itself.
+
+    Applied at the lowest priority, below the device's own recommendation, so any config
+    layer or CLI flag still wins. This is the only layer that sees what *kind* of
+    operation is being evaluated, which is where a dtype-dependent tolerance has to come
+    from: ``ResolvedEvalConfig`` has already collapsed ``rtol``/``atol`` to concrete
+    numbers by the time an evaluator runs, so an evaluator cannot tell "the user asked for
+    1e-2" from "nobody said anything" and cannot safely substitute its own.
+    """
+    try:
+        from flashinfer_bench.bench.evaluators import resolve_evaluator
+
+        return resolve_evaluator(definition).eval_defaults()
+    except Exception:
+        # Never let a defaults lookup break a benchmark; the generic defaults are valid.
+        return None
 
 
 def device_eval_defaults(device: str) -> Optional[EvalConfig]:

@@ -1,250 +1,148 @@
 ---
 name: clone-repos
-description: Clone SGLang, FlashInfer, sgl-cookbook, and flashinfer-trace repositories to tmp/. Use when setting up the project, preparing for kernel extraction, or when the user needs the source repositories.
+description: Clone or update the upstream repositories the other skills read — SGLang, FlashInfer, sgl-cookbook, the flashinfer-trace HuggingFace dataset, and optionally the Intel kernel repos — into tmp/, and record their SHAs. Use when setting up, or before any skill that greps upstream sources.
 ---
 
-# Clone Repositories
+# Clone repositories
 
-Clone SGLang, FlashInfer, sgl-cookbook, and flashinfer-trace repositories to the `tmp/` directory.
+Every other skill greps `tmp/`. This puts it there and records what was checked out.
 
-## Description
+## Clone or update
 
-This skill sets up the required repositories for kernel extraction, testing, and workload collection workflows. It:
-1. Clones SGLang, FlashInfer, sgl-cookbook, and flashinfer-trace repositories to `tmp/` directory (if not already present) with all submodules
-2. Updates repositories by pulling latest changes from remote and updating submodules (if repos already exist)
-3. Checks out the `main` branch by default (or specified branch)
-4. Installs SGLang and FlashInfer packages from source in the current environment
-
-**Repositories:**
-- **SGLang**: Inference engine with model implementations and kernel calls
-- **FlashInfer**: GPU kernel library with optimized implementations (ground truth)
-- **sgl-cookbook**: Best serving configurations for each architecture and model (TP, EP flags)
-- **flashinfer-trace**: Workload dataset and kernel definitions — cloned to `tmp/flashinfer-trace`
-
-## Usage
+One loop, not one block per repo. Re-running is safe: existing checkouts are hard-reset to
+the branch, missing ones are cloned.
 
 ```bash
-# Clone all repos to ./tmp directory, update if exists, and install from source
-/clone-repos
+mkdir -p tmp
 
-# Clone specific branches
-/clone-repos --sglang-branch v0.4.0 --flashinfer-branch v0.2.0
+# name             url                                                        branch  submodules
+read -r -d '' REPOS <<'LIST'
+sglang             https://github.com/sgl-project/sglang.git                  main    yes
+flashinfer         https://github.com/flashinfer-ai/flashinfer.git            main    yes
+sgl-cookbook       https://github.com/sgl-project/sgl-cookbook.git            main    no
+LIST
+
+while read -r name url branch subs; do
+  [ -z "$name" ] && continue
+  if [ -d "tmp/$name/.git" ]; then
+    echo "updating $name"
+    ( cd "tmp/$name" && git fetch origin && git checkout "$branch" \
+      && git reset --hard "origin/$branch" \
+      && { [ "$subs" = yes ] && git submodule update --init --recursive || true; } )
+  else
+    echo "cloning $name"
+    if [ "$subs" = yes ]; then
+      git clone --recurse-submodules -b "$branch" "$url" "tmp/$name"
+    else
+      git clone -b "$branch" "$url" "tmp/$name"
+    fi
+  fi
+done <<< "$REPOS"
 ```
 
-## Parameters
-
-- `sglang_branch` (optional): SGLang branch to checkout (default: "main")
-- `flashinfer_branch` (optional): FlashInfer branch to checkout (default: "main")
-- `cookbook_branch` (optional): sgl-cookbook branch to checkout (default: "main")
-
-## Implementation Steps
-
-When executing this skill:
-
-1. **Create tmp directory if needed**:
-   ```bash
-   mkdir -p tmp
-   ```
-
-2. **Handle SGLang repository**:
-   ```bash
-   # Check if repo exists
-   if [ -d "tmp/sglang/.git" ]; then
-       echo "SGLang exists, pulling latest changes..."
-       (cd tmp/sglang && git fetch origin && git checkout "${sglang_branch:-main}" && git reset --hard "origin/${sglang_branch:-main}" && git submodule update --init --recursive)
-   else
-       echo "Cloning SGLang with submodules..."
-       git clone --recurse-submodules https://github.com/sgl-project/sglang.git tmp/sglang
-       (cd tmp/sglang && git checkout "${sglang_branch:-main}")
-   fi
-   ```
-
-   **Note**: Using `(cd ...)` subshell syntax ensures directory changes are isolated and don't affect subsequent commands.
-
-3. **Handle FlashInfer repository**:
-   ```bash
-   # Check if repo exists
-   if [ -d "tmp/flashinfer/.git" ]; then
-       echo "FlashInfer exists, pulling latest changes..."
-       (cd tmp/flashinfer && git fetch origin && git checkout "${flashinfer_branch:-main}" && git reset --hard "origin/${flashinfer_branch:-main}" && git submodule update --init --recursive)
-   else
-       echo "Cloning FlashInfer with submodules..."
-       git clone --recurse-submodules https://github.com/flashinfer-ai/flashinfer.git tmp/flashinfer
-       (cd tmp/flashinfer && git checkout "${flashinfer_branch:-main}")
-   fi
-   ```
-
-   **Note**: Using `(cd ...)` subshell syntax ensures directory changes are isolated and don't affect subsequent commands.
-
-4. **Handle sgl-cookbook repository**:
-   ```bash
-   # Check if repo exists
-   if [ -d "tmp/sgl-cookbook/.git" ]; then
-       echo "sgl-cookbook exists, pulling latest changes..."
-       (cd tmp/sgl-cookbook && git fetch origin && git checkout "${cookbook_branch:-main}" && git reset --hard "origin/${cookbook_branch:-main}")
-   else
-       echo "Cloning sgl-cookbook..."
-       git clone https://github.com/sgl-project/sgl-cookbook.git tmp/sgl-cookbook
-       (cd tmp/sgl-cookbook && git checkout "${cookbook_branch:-main}")
-   fi
-   ```
-
-   **Note**: sgl-cookbook doesn't require submodules or installation. It contains serving configuration files only.
-
-5. **Handle flashinfer-trace repository**:
-   ```bash
-   # Check if repo exists
-   if [ -d "tmp/flashinfer-trace/.git" ]; then
-       echo "flashinfer-trace exists, pulling latest changes..."
-       (cd tmp/flashinfer-trace && git fetch origin && git checkout main && git reset --hard origin/main)
-   else
-       echo "Cloning flashinfer-trace..."
-       git clone https://huggingface.co/datasets/flashinfer-ai/flashinfer-trace tmp/flashinfer-trace
-   fi
-   ```
-
-   **Note**: flashinfer-trace is a HuggingFace dataset repo (not GitHub). It contains kernel definitions, workloads, and blob safetensors. All workload collection writes to this directory.
-
-6. **Install packages from source**:
-
-   ```bash
-   # Upgrade pip once
-   pip install --upgrade pip
-
-   # Install FlashInfer (pyproject.toml in repo root)
-   (cd tmp/flashinfer && python -m pip install --no-build-isolation -e . -v)
-
-   # Install SGLang (pyproject.toml in python/ subdirectory)
-   (cd tmp/sglang && pip install -e "python")
-   ```
-
-   **Note**: Subshell syntax `(cd ... && command)` keeps working directory unchanged.
-
-7. **Verify installations**:
-   ```bash
-   # Test imports
-   python -c "import sglang; print(f'SGLang: {sglang.__version__}')"
-   python -c "import flashinfer; print(f'FlashInfer: {flashinfer.__version__}')"
-
-   # Verify directory structure
-   ls tmp/sglang/python/sglang/srt/models/
-   ls tmp/flashinfer/flashinfer/
-   ls tmp/flashinfer/tests/
-   ls tmp/sgl-cookbook/
-   ls tmp/flashinfer-trace/definitions/
-   ```
-
-## Output Directory Structure
-
-```
-flashinfer-bench/
-└── tmp/                              # Cloned repositories (auto-updated)
-    ├── sglang/                       # SGLang repository (installed in current env)
-    │   └── python/sglang/srt/
-    │       ├── models/               # Model implementations
-    │       │   ├── llama.py
-    │       │   ├── deepseek_v3.py
-    │       │   ├── qwen2_moe.py
-    │       │   └── ...
-    │       └── layers/               # Layer implementations
-    │           ├── attention/
-    │           ├── moe/
-    │           └── layernorm.py
-    ├── flashinfer/                   # FlashInfer repository (installed in current env)
-    │   ├── flashinfer/               # Python package in root (not python/ subdir!)
-    │   │   ├── attention.py
-    │   │   ├── norm.py
-    │   │   ├── moe.py
-    │   │   └── ...
-    │   ├── tests/                    # Reference tests with vanilla implementations
-    │   ├── csrc/                     # CUDA source files
-    │   └── include/                  # C++ headers with kernel implementations
-    ├── sgl-cookbook/                 # Serving configuration repository (NOT installed)
-    └── flashinfer-trace/             # HuggingFace dataset clone — single source of truth
-        │                             # for definitions, ref tests, baselines, workloads,
-        │                             # blobs, and eval traces. All trace edits commit here.
-        ├── definitions/{op_type}/    # Kernel definition JSONs
-        ├── tests/references/         # Reference tests (pytest)
-        ├── solutions/baseline/       # FlashInfer-wrapper baseline solutions
-        ├── workloads/{op_type}/      # Sanitized workload JSONLs
-        ├── blob/workloads/{op_type}/ # Safetensors blobs referenced by JSONLs
-        └── traces/{op_type}/         # Eval traces (one entry per workload)
-```
-
-## Requirements
-
-- Git (with submodule support)
-- Network access to GitHub (for sglang, flashinfer, sgl-cookbook, and their submodules)
-- Sufficient disk space (~6GB total including submodules and serving configs)
-- Python development environment for building from source
-- CUDA toolkit (for FlashInfer CUDA kernels)
-
-## Common Issues
-
-- **Network errors**: Check GitHub connectivity; repositories with submodules require stable connection
-- **Submodule failures**: Retry `git submodule update --init --recursive`
-- **Disk space**: Requires ~6GB total for all repositories with submodules
-- **Installation failures**: Verify Python ≥3.8, CUDA toolkit installed, and submodules initialized
-- **sgl-cookbook not found**: Ensure you have network access to github.com/sgl-project/sgl-cookbook
-
-## Integration with Other Skills
-
-This skill provides the foundation for:
-
-1. **extract-kernel-definitions**: Uses SGLang model files to extract kernels, sgl-cookbook to find serving configurations (TP/EP flags), outputs to `tmp/flashinfer-trace/definitions/` (the HuggingFace dataset clone)
-2. **add-reference-tests**: Uses FlashInfer for ground truth, outputs tests to `tmp/flashinfer-trace/tests/references/`
-3. **collect-workloads**: Uses `tmp/flashinfer-trace` (HuggingFace dataset clone) as the target for workload JSONL + safetensors blobs, then submits a PR
-4. **onboard-model**: End-to-end pipeline that calls this skill first (Phase 0) to ensure all repos are current before model discovery, definition generation, and workload collection.
-
-Example workflow:
+The trace dataset is a **HuggingFace dataset repo**, not GitHub, and needs LFS for the
+workload blobs:
 
 ```bash
-# Step 1: Clone SGLang, FlashInfer, and sgl-cookbook repositories
-/clone-repos
-
-# Step 2: Extract kernel definitions from a model (uses sgl-cookbook for TP/EP configs)
-/extract-kernel-definitions --model-name deepseek_v3
-
-# Step 3: Add reference tests
-/add-reference-tests --op-type mla_paged
-
-# Or run the full end-to-end pipeline
-/onboard-model --model-name qwen3-235b-a22b
+git lfs install
+[ -d tmp/flashinfer-trace/.git ] \
+  && git -C tmp/flashinfer-trace pull \
+  || git clone https://huggingface.co/datasets/flashinfer-ai/flashinfer-trace tmp/flashinfer-trace
+git -C tmp/flashinfer-trace lfs pull
 ```
 
-## Notes
+Everything written by workload collection goes into this clone.
 
-- Updates existing repos or performs full clones with submodules
-- Editable installs (`pip install -e`) for development
-- FlashInfer package location: `tmp/flashinfer/flashinfer/` (not in `python/` subdirectory)
-- sgl-cookbook is NOT installed (configuration files only, no Python package)
+## Intel repositories (optional)
 
-## Maintaining This Document
-
-Update this file when changing repository URLs, directory structure, or adding new repositories.
-
-## See Also
-
-- [extract-kernel-definitions](../extract-kernel-definitions/SKILL.md)
-- [add-reference-tests](../add-reference-tests/SKILL.md)
-
-
-## Intel kernel repositories
-
-Two upstream projects hold the SYCL kernels that Intel serving actually uses. Clone them
-when working on Intel kernel optimization (see the `optimize-intel-kernels` skill); they
-are not needed for model onboarding.
+Needed only for Intel work. These are **sources to read** — installing the providers is
+`/setup-intel-env`, which uses `flashinfer-bench providers install`. Xe-Fuse and sycl-tla are
+the exception: they are consumed as checkouts, so the builder needs their paths.
 
 ```bash
-git clone --depth 1 https://github.com/sgl-project/sgl-kernel-xpu.git tmp/sgl-kernel-xpu
+git clone --depth 1 https://github.com/sgl-project/sgl-kernel-xpu.git    tmp/sgl-kernel-xpu
 git clone --depth 1 https://github.com/vllm-project/vllm-xpu-kernels.git tmp/vllm-xpu-kernels
+git clone --depth 1 https://github.com/IntelLabs/Xe-Fuse.git             tmp/Xe-Fuse
+git clone --depth 1 https://github.com/intel/sycl-tla.git                tmp/sycl-tla
+
+# Xe-Fuse kernels are compiled from these checkouts, so the builder must be told where:
+export FIB_XE_FUSE_DIR=$PWD/tmp/Xe-Fuse
+export FIB_SYCL_TLA_DIR=$PWD/tmp/sycl-tla
 ```
 
-- **sgl-kernel-xpu** — SGLang's Intel kernels: FMHA, MLA (incl. sparse), GroupGEMM,
-  LoRA SGEMM, GDN attention. Built per-architecture for `bmg` (Battlemage, device IP 20) or
-  `cri` (Crescent Island, IP 35); no other Intel GPU is a supported target.
-- **vllm-xpu-kernels** — vLLM's Intel kernels: norms, RoPE, activations, the fp8/mxfp4
-  quantization family, and KV-cache ops.
+| Repo | Read it for | Skill |
+| --- | --- | --- |
+| `sgl-kernel-xpu` | the ~100 registered ops and their C++ signatures | `onboard-model-intel/providers.md` |
+| `vllm-xpu-kernels` | torch custom-op schemas | `onboard-model-intel/providers.md` |
+| `Xe-Fuse` | `autotune/generate_kernel.py`, presets, EVT vocabulary | `optimize-intel-kernels/xe-fuse.md` |
+| `sycl-tla` | CUTLASS-SYCL headers Xe-Fuse compiles against | `optimize-intel-kernels/xe-fuse.md` |
+| `oneDNN` | dispatch gates, below | `/optimize-onednn` |
 
-Together they are the backlog of kernels worth optimizing on Intel, and the baselines any
-new solution has to beat.
+## oneDNN source (optional, for diagnosis)
+
+Needed only to resolve a dispatch rejection to the gate that caused it. **Pin it to the
+version you are actually running** — a gate moves between releases, so source from a
+different version points at the wrong line.
+
+```bash
+V=$(ONEDNN_VERBOSE=1 python -c "
+import torch
+a=torch.randn(8,64,dtype=torch.bfloat16,device='xpu:0')
+torch.matmul(a, a.T[:64]); torch.xpu.synchronize()" 2>&1 |
+    grep -oE 'oneDNN v[0-9.]+' | head -1 | sed 's/oneDNN v//')
+git clone --depth 1 --branch "v$V" https://github.com/uxlfoundation/oneDNN.git tmp/oneDNN
+```
+
+~99 MB. This is for reading, never for building — the runtime comes from oneAPI. Optimizing
+oneDNN's GEMM itself is not worth it: measured on Arc B580 it reaches ~100 TFLOP/s bf16,
+about 90% of the part's XMX peak. The wins are in how it is *called*
+(`/optimize-onednn`), not in its kernels.
+
+## Install from source — only on CUDA
+
+**Skip this section on an Intel-only box.** Building FlashInfer from source requires `nvcc`;
+the clone is still useful, because the Intel skills only *read* these trees (to grep
+signatures and reference implementations) and never import them.
+
+```bash
+( cd tmp/flashinfer && python -m pip install --no-build-isolation -e . -v )
+( cd tmp/sglang    && python -m pip install -e python )
+```
+
+Subshells keep the working directory unchanged. In a `uv`-managed venv use
+`uv pip install` — `python -m pip` is not present, and `pip show` will report installed
+packages as missing.
+
+## Record the SHAs
+
+`/discover-models` and the PR provenance fields expect these:
+
+```bash
+for r in sglang flashinfer sgl-cookbook flashinfer-trace \
+         sgl-kernel-xpu vllm-xpu-kernels Xe-Fuse sycl-tla oneDNN; do
+  printf "%-18s %s\n" "$r" "$(git -C tmp/$r rev-parse --short HEAD 2>/dev/null || echo missing)"
+done
+```
+
+## Verify
+
+```bash
+ls tmp/sglang/python/sglang/srt/models/     # model implementations
+ls tmp/flashinfer/flashinfer/               # package is at repo root, not python/
+ls tmp/flashinfer/tests/                    # how each wrapper is really called
+ls tmp/sgl-cookbook/data/models/generated/  # serving configs, newest dir wins
+ls tmp/flashinfer-trace/definitions/        # the dataset
+
+# CUDA only:
+python -c "import sglang, flashinfer; print(sglang.__version__, flashinfer.__version__)"
+```
+
+## Failure table
+
+| Symptom | Cause | Action |
+| --- | --- | --- |
+| Submodule checkout incomplete | Interrupted clone | `git -C tmp/<name> submodule update --init --recursive` |
+| Blobs are text pointers, not tensors | LFS not pulled | `git -C tmp/flashinfer-trace lfs pull` |
+| HF clone asks for credentials | Not logged in | `hf auth login` |
+| FlashInfer build fails on `nvcc` | Intel-only box | Expected — skip the install step; the clone is enough |
+| `python -m pip: No module named pip` | uv-managed venv | Use `uv pip install` |

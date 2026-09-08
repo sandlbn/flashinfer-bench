@@ -120,7 +120,21 @@ class TestProvenance:
     def test_provenance_reports_only_what_is_present(self):
         recorded = prov.provider_provenance()
         for name in recorded:
+            if name.startswith("env:"):
+                continue  # environment facts, not a claim that a provider is installed
             assert prov.is_installed(prov.get_spec(name))
+
+    def test_environment_keys_are_namespaced(self):
+        """Provenance carries two kinds of fact and they must not be confusable.
+
+        A provider entry asserts "this library is installed at this version". An `env:` entry
+        records something about the machine -- e.g. that torch runs a different oneDNN than
+        solutions link against. Reading the second as the first would have a consumer
+        conclude a provider named `onednn_runtime` exists.
+        """
+        for name in prov.provider_provenance():
+            if not name.startswith("env:"):
+                prov.get_spec(name)  # must resolve; raises otherwise
 
     def test_version_comes_from_distribution_metadata(self):
         """vllm_xpu_kernels ships no __version__, so metadata is the only source."""

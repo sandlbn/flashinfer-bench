@@ -225,7 +225,18 @@ class TestNearMissDiagnostics:
         assert reasons and any("inputs differ" in r for r in reasons)
 
     def test_a_different_op_type_is_not_a_near_miss(self, all_providers):
-        definition = _rmsnorm_definition().model_copy(update={"op_type": "gemm"})
+        """No kernel implements this op_type, so there is nothing to report.
+
+        The op_type is derived from the registry rather than written down. Naming one --
+        this test used to say `"gemm"` -- makes the test assert that the registry has no
+        entry for it, which is not what it is checking, and it breaks the day someone adds
+        one (a vLLM block-scaled FP8 GEMM, as it happened).
+        """
+        absent = next(
+            t for t in ("mla_paged", "gdn", "mamba_ssu", "dsa_paged")
+            if all(k.op_type != t for k in xk.REGISTRY)
+        )
+        definition = _rmsnorm_definition().model_copy(update={"op_type": absent})
         assert xk.explain_no_match(definition) == []
 
     def test_a_match_has_nothing_to_explain(self, all_providers):

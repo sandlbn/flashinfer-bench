@@ -168,6 +168,71 @@ def is_sampling_operation(definition: Definition) -> bool:
     return getattr(definition, "op_type", None) == "sampling"
 
 
+_PACKED_SUFFIXES = ("_packed", "_zeros", "_zp", "_qweight", "_qzeros")
+_PACKED_NAMES = frozenset({"qweight", "qzeros", "packed_weight"})
+
+
+def is_packed_quantized(definition: Definition, name: str) -> bool:
+    """Whether integer input ``name`` holds packed sub-byte values rather than a number.
+
+    A 4-bit weight tensor is int32 storage carrying eight independent nibbles, so every
+    bit is payload. The generic integer generator draws from [-1024, 1024), which leaves
+    the top five nibbles of each word at 0 (or 0xF for negatives): the resulting weight
+    matrix is mostly zeros, the K-sum is dominated by the constant `-zero * scale` term,
+    and the cancellation that produces makes a correct kernel look wrong. Measured on
+    `gemm_int4_w4a16_g128_n4096_k2560`, the vLLM XPU kernel matched 94.7% of elements
+    against a 95% gate with such data, and passes comfortably with full-width bits.
+
+    Packed tensors want uniform random *bits*. Recognised by name, and only inside a
+    definition that declares a quantization tag, so an int32 index tensor -- `m_indptr`,
+    `masked_m` in the grouped-GEMM definitions -- keeps its small, meaningful range.
+    """
+    if not any(str(t).startswith("quantization:") for t in getattr(definition, "tags", ())):
+        return False
+    lowered = name.lower()
+    return lowered in _PACKED_NAMES or lowered.endswith(_PACKED_SUFFIXES)
+
+
+def is_quantization_scale(definition: Definition, name: str) -> bool:
+    """Whether input ``name`` is a per-block/per-tensor quantization scale.
+
+    A scale is a magnitude: a dequantised weight is ``packed * scale``, and every producer
+    of one -- FP8 block scales, MXFP4 exponents, AWQ scales -- emits non-negative values.
+    Drawing it from a standard normal instead is not merely unrepresentative, it makes the
+    definition untestable. Signed scales flip the sign of whole weight blocks, so a K=2560
+    accumulation cancels almost completely and the result sits near zero; pointwise
+    relative error against it then reaches the hundreds for *any* implementation.
+
+    Measured on Arc B580 with signed scales at M=512, N=4096, K=2560, against the fp32
+    reference: pre-scaling in bf16 gave max_rel 2066, dequantising in fp32 then casting
+    gave 927, and per-K-block accumulation in fp32 -- the most accurate formulation there
+    is -- still gave 754. The spread says the comparison is measuring cancellation, not
+    the kernel. With non-negative scales the same kernels agree to ~4e-3, a bf16 ULP.
+
+    Magnitude alone is not enough: the spread has to be realistic too. A per-group scale
+    in a checkpoint is ``max|w_group| / (2**(bits-1) - 1)``, so scales differ from one
+    another by a few times. Half-normal magnitudes instead span orders of magnitude and
+    put substantial mass near zero -- over a [20, 4096] scale tensor the smallest came out
+    at 9.7e-06 against a largest of 3.9. Groups whose scale is ~0 then contribute nothing
+    while a few dominate, the K-sum cancels, and relative error against those near-zero
+    results explodes for any implementation. Measured on
+    ``gemm_int4_w4a16_g128_n4096_k2560``: Intel's W4A16 kernel matched 94.3% of elements
+    with half-normal scales and 99.4% with a realistic spread, against a 95% gate.
+
+    So these are drawn uniformly from ``[0.5, 1.5]`` -- positive, and a three-fold spread
+    rather than a millionfold one.
+
+    Recognised by name because that is what the dataset's definitions already encode
+    (``a_scale``, ``b_scale``, ``B_scale_inv``, ``weight_scale_inv``), and narrowed to
+    definitions that declare a quantization tag so an unrelated input called ``scale`` --
+    an attention softmax scale, say, which is signed and arbitrary -- is untouched.
+    """
+    if not any(str(t).startswith("quantization:") for t in getattr(definition, "tags", ())):
+        return False
+    lowered = name.lower()
+    return lowered.endswith("_scale") or lowered.endswith("_scale_inv") or lowered == "scale"
+
+
 def compute_frequency_distribution(
     runnable: Any,
     inputs: List[Dict[str, Any]],
@@ -344,6 +409,23 @@ def gen_inputs(
 
                 if is_sampling_operation(definition) and name == "probs":
                     value = torch.softmax(value, dim=-1)  # convert logits to probs for sampling
+                elif is_quantization_scale(definition, name):
+                    # A positive magnitude with a realistic spread. Neither a sign nor a
+                    # near-zero scale occurs in a checkpoint, and both make a correct
+                    # kernel look wrong. See is_quantization_scale.
+                    value = torch.rand(
+                        value.shape, dtype=torch.float32, device="cpu", generator=generator
+                    ).add_(0.5).to(device=value.device, dtype=value.dtype)
+                elif is_packed_quantized(definition, name) and not value.dtype.is_floating_point:
+                    # Every bit is payload. See is_packed_quantized.
+                    value = torch.randint(
+                        torch.iinfo(value.dtype).min,
+                        torch.iinfo(value.dtype).max,
+                        value.shape,
+                        dtype=value.dtype,
+                        device="cpu",
+                        generator=generator,
+                    ).to(value.device)
 
             out.append(value)
     return out

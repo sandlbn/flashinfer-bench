@@ -67,7 +67,7 @@ tmp/flashinfer-trace/                  # local clone of the HuggingFace dataset
 ├── solutions/baseline/{op_type}/{definition_name}/...
 ├── workloads/{op_type}/{definition_name}.jsonl
 ├── blob/workloads/{op_type}/{definition_name}/*.safetensors
-└── traces/{op_type}/{definition_name}.jsonl
+└── traces/{author}/{op_type}/{definition_name}.jsonl
 ```
 
 Browse `tmp/flashinfer-trace/definitions/` to see the current set of supported op_types
@@ -200,10 +200,9 @@ Start with `.claude/skills/`. Each subdirectory contains a `SKILL.md` with full 
   (repo updates, model discovery, definition generation, workload collection, PR submission)
 - **extract-kernel-definitions**: Extract kernel schemas from SGLang model implementations
   with deduplication, generate Definition JSON files
-- **collect-workloads**: Collect real workloads from SGLang inference runs using FlashInfer
-  logging API, sanitize and submit to flashinfer-trace
-- **collect-workloads-bench**: Collect workloads using `bench_serving.py` with model-specific
-  server configs from `model_configs.json`
+- **collect-workloads**: Collect real workloads for a definition from an SGLang inference
+  run (FlashInfer Level-10 dump), sanitize into flashinfer-trace, and verify they are not
+  synthetic. Requires NVIDIA; on Intel, workloads come from `onboard-model-intel` Path C
 - **add-reference-tests**: Add pytest tests to validate reference implementations against
   FlashInfer or SGLang ground truth (see its Intel GPUs section for cross-validation)
 - **track-models**: Track open-source LLMs and update `docs/model_coverage.mdx` with kernel
@@ -214,6 +213,21 @@ Start with `.claude/skills/`. Each subdirectory contains a `SKILL.md` with full 
   record (`architectures.md`). Per-part *values* live in `Capabilities` and are queried,
   not tabulated; that file carries only the traps and the measurements, each named with
   the hardware it came from
+- **setup-intel-env**: Bring an Intel GPU box up — driver, PyTorch XPU, oneAPI DPC++,
+  kernel providers, unitrace — with what each package offers, where it lives, and what it
+  costs. Run before any Intel work
+- **profile-intel**: Profile a model on Intel, rank kernel families by share of device
+  time, and route each to the skill that fixes it. Covers unitrace install and its real use
+  (register spill). Run before any Intel optimization
+- **find-kernel-gaps**: Find hot operations no kernel covers, decide rewrite vs new kernel,
+  and turn the worthwhile ones into a definition plus solution. Most large gaps in eager
+  model code are contractions written as broadcast-multiply-then-sum
+- **optimize-ssm-scan**: Optimize state-space / SSD scan kernels (Mamba2, GDN, hybrid
+  models). Use when profiling reports materialised high-rank contractions — on hybrid models
+  the scan, not the GEMM, dominates
+- **optimize-onednn**: Diagnose and fix a slow oneDNN GEMM on Intel — `ONEDNN_VERBOSE`,
+  dispatch-gate resolution against oneDNN source, and the four call-level fixes. oneDNN is
+  what `F.linear` already calls on XPU, so this is where GEMM time is won or lost
 - **onboard-model-intel**: End-to-end Intel counterpart of `onboard-model` — acquire
   definitions on `xpu:0` without CUDA, cross-validate references, profile with unitrace,
   source kernels from oneDNN / vllm-xpu-kernels / sgl-kernel-xpu / Xe-Fuse / SYCL, and

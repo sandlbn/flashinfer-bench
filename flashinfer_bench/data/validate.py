@@ -126,6 +126,12 @@ class ScannedSolution:
     path: Path
     solution: Optional[Solution] = None
     error: Optional[str] = None
+    path_encodes_author: bool = True
+    """False for the flat `role/op_type/solution.json` layout.
+
+    There the leading segment is a role -- "baseline" -- not an author, so comparing it
+    against the JSON's `author` reports a mismatch on a correctly written file.
+    """
 
 
 @dataclass
@@ -250,11 +256,28 @@ def scan_dataset(dataset_root: Path) -> DatasetIndex:
     if solutions_dir.is_dir():
         for path in sorted(solutions_dir.rglob("*.json")):
             relative = path.relative_to(solutions_dir)
-            if len(relative.parts) != 4:
+            # Two layouts are in use and both load at runtime: the per-definition subdir
+            # `author/op_type/definition/solution.json`, and the flat
+            # `author/op_type/solution.json` that `add-baselines` writes. Skipping the flat
+            # one made every baseline written that way invisible here, so its traces were
+            # reported as referencing an unknown solution and its definition as having no
+            # baseline -- errors on a dataset that was in fact fine, which is worse than no
+            # check at all because it teaches readers to discount this report.
+            if len(relative.parts) == 4:
+                author, op_type, definition_name, filename = relative.parts
+            elif len(relative.parts) == 3:
+                author, op_type, filename = relative.parts
+                definition_name = ""
+            else:
                 continue
-            author, op_type, definition_name, filename = relative.parts
             solution_name = Path(filename).stem
             solution, error = _load_json(Solution, path)
+            if not definition_name:
+                # The solution states which definition it implements; trust that over the
+                # filename, which only conventionally starts with the definition's name.
+                definition_name = (
+                    getattr(solution, "definition", "") or solution_name.split("__")[0]
+                )
             index.solutions.setdefault(definition_name, []).append(
                 ScannedSolution(
                     author=author,
@@ -264,6 +287,7 @@ def scan_dataset(dataset_root: Path) -> DatasetIndex:
                     path=path,
                     solution=solution,
                     error=error,
+                    path_encodes_author=len(relative.parts) == 4,
                 )
             )
 
@@ -408,7 +432,7 @@ def check_layout(
         if solution_entry.solution is None:
             continue
         solution = solution_entry.solution
-        if solution.author != solution_entry.author:
+        if solution_entry.path_encodes_author and solution.author != solution_entry.author:
             messages.append(
                 CheckMessage(
                     level="error",
@@ -780,7 +804,7 @@ def check_solution_content(
                     message=f"{entry.solution_name}: definition field '{solution.definition}' != '{definition_name}'",
                 )
             )
-        if solution.author != entry.author:
+        if entry.path_encodes_author and solution.author != entry.author:
             messages.append(
                 CheckMessage(
                     level="error",

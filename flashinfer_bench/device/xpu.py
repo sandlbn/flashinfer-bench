@@ -17,7 +17,7 @@ from functools import lru_cache
 from typing import Any, ClassVar, Dict, List, Optional
 
 from .accelerator import Accelerator, canonicalize_device_name, parse_device, register_accelerator
-from .capabilities import DEFAULT_DTYPES, Capabilities
+from .capabilities import DEFAULT_DTYPES, FP8_DTYPES, Capabilities
 from .timer import EventTimer, Timer
 
 logger = logging.getLogger(__name__)
@@ -47,24 +47,36 @@ warm-cache latencies, so unknown parts round up.
 
 _PART_PROFILES: Dict[str, Dict[str, object]] = {
     # Battlemage (Xe2-HPG), validated hardware.
+    #
+    # FP8 is emulated, not native. CUTLASS-SYCL guards every fp8 and block-scaled-MX
+    # (BDPAS) atom behind SYCL_INTEL_TARGET == 35 (Crescent Island), so on Xe2 the fp8
+    # path upconverts to fp16 and runs the fp16 DPAS. Measured on Arc B580 at
+    # 4096x4096x4096: torch._scaled_mm is bit-exact against an fp32-upcast reference and
+    # reaches 52.7 TFLOP/s against bf16's 108.9 (0.48x). It runs and it is correct, so
+    # refusing it would block onboarding an FP8 model for no reason -- but a latency
+    # measured here is the emulation's, not the format's.
     "INTEL_ARC_B580": {
         "l2_bytes": 18 * _MIB,
         "sycl_target": "bmg",
+        "emulated_dtypes": FP8_DTYPES,
         "extra": {"architecture": "Xe2-HPG", "codename": "Battlemage", "device_ip_version": 20},
     },
     "INTEL_ARC_B570": {
         "l2_bytes": 18 * _MIB,
         "sycl_target": "bmg",
+        "emulated_dtypes": FP8_DTYPES,
         "extra": {"architecture": "Xe2-HPG", "codename": "Battlemage", "device_ip_version": 20},
     },
     "INTEL_ARC_PRO_B50": {
         "l2_bytes": 18 * _MIB,
         "sycl_target": "bmg",
+        "emulated_dtypes": FP8_DTYPES,
         "extra": {"architecture": "Xe2-HPG", "codename": "Battlemage", "device_ip_version": 20},
     },
     "INTEL_ARC_PRO_B60": {
         "l2_bytes": 18 * _MIB,
         "sycl_target": "bmg",
+        "emulated_dtypes": FP8_DTYPES,
         "extra": {"architecture": "Xe2-HPG", "codename": "Battlemage", "device_ip_version": 20},
     },
     # Xe3P "Crescent Island", device IP version 35. Pre-silicon: sgl-kernel-xpu builds
@@ -327,8 +339,14 @@ def _xpu_capabilities(index: int) -> Capabilities:
         l2_bytes = int(profile.get("l2_bytes", _CONSERVATIVE_L2_BYTES))  # type: ignore[arg-type]
 
     # The driver enumerates the sub-group widths this part supports; take the widest,
-    # which is what a group reduction is cheapest over and what upstream Intel kernels
-    # pin. Read rather than tabulated, so a new part needs no entry to get this right.
+    # which is what a group reduction is cheapest over. Read rather than tabulated, so a
+    # new part needs no entry to get this right.
+    #
+    # This is the *elementwise* width and only that. Matrix kernels must pin 16 on every
+    # Xe part -- DPAS has execution size 16 and CUTLASS-SYCL hardcodes
+    # `constexpr int sg_size = 16` with no 32-lane path anywhere -- so a caller sizing a
+    # tl.dot or XMX kernel against this field is reading the wrong number. See
+    # `.claude/skills/optimize-intel-kernels/architectures.md`.
     sub_groups = extra.get("sub_group_sizes") or []
     try:
         preferred_sub_group = max(int(v) for v in sub_groups) if sub_groups else None
@@ -340,6 +358,9 @@ def _xpu_capabilities(index: int) -> Capabilities:
         # Conservative until measured: a dtype that torch accepts but lowers to an
         # emulated path would otherwise be benchmarked as if it were native.
         supported_dtypes=frozenset(profile.get("supported_dtypes", DEFAULT_DTYPES)),  # type: ignore[arg-type]
+        # Correct but not at native rate. Kept out of supported_dtypes so a result is
+        # never read as a native measurement of that format.
+        emulated_dtypes=frozenset(profile.get("emulated_dtypes", frozenset())),  # type: ignore[arg-type]
         l2_bytes=l2_bytes,
         sycl_target=profile.get("sycl_target"),  # type: ignore[arg-type]
         supports_graphs=False,

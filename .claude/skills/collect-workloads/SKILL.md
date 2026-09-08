@@ -1,281 +1,179 @@
 ---
 name: collect-workloads
-description: Auto-collect workloads from SGLang inference runs using FlashInfer logging API. Dumps tensors, sanitizes them according to kernel definitions, and submits PR to flashinfer-trace workload repo.
+description: Collect real workloads for a definition from an SGLang inference run using FlashInfer's Level-10 dump, sanitize them into the flashinfer-trace dataset, and verify they are not synthetic. Use when a definition exists but has no workloads, or when a benchmark reports NO_WORKLOAD.
 ---
 
-# Collect Workloads
+# Collect workloads
 
-Collect real-world workloads by running SGLang inference with FlashInfer Level 10 logging, then sanitize and submit to the flashinfer-ai/flashinfer-trace HuggingFace dataset.
+Produce real `workloads/{op_type}/{definition_name}.jsonl` entries plus their safetensors
+blobs, from shapes an actual inference run produced — not from shapes someone guessed.
 
-**No code changes to SGLang or FlashInfer are required.** Collection works entirely through FlashInfer's built-in logging API.
-
-## Scripts
-
-| Script | Purpose |
-|--------|---------|
-| `scripts/collect_stream.py` | **Preferred** end-to-end streaming script: per-batch-size inference → sanitize → incremental HF push → eval → trace upload |
-| `scripts/collect_workloads.py` | Older entry point: runs SGLang inference + sanitizes dumps (collects all batch sizes then pushes once) |
-| `scripts/sanitize_dumps.py` | Converts FlashInfer Level 10 dump dirs → JSONL + safetensors; supports `--max-new-workloads N` for streaming mode |
-
-### Streaming collection (preferred)
-
-```bash
-# Must run under gpu-lock so CUDA_VISIBLE_DEVICES is set
-tools/gpu-lock --gpus 8 --exec-timeout 10800 -- \
-  python3 scripts/collect_stream.py \
-    --def-name  gqa_paged_decode_h5_kv1_d128_ps64 \
-    --model-key llama-4-scout-ps64 \
-    --model-path /path/to/model \
-    --batch-sizes 64 128 \
-    --pr-num 263 \
-    [--peer-node-addr nvl72089-T16] \
-    [--trace-dir tmp/flashinfer-trace]
-
-# Ragged prefill — add disable-radix-cache + disable-piecewise-cuda-graph
-tools/gpu-lock --gpus 8 --exec-timeout 10800 -- \
-  python3 scripts/collect_stream.py \
-    --def-name  gqa_ragged_prefill_causal_h5_kv1_d128 \
-    --model-key llama-4-scout \
-    --model-path /path/to/model \
-    --batch-sizes 64 128 \
-    --pr-num 265 \
-    --extra-server-flag --disable-radix-cache --disable-piecewise-cuda-graph
-
-# Paged prefill — add enable-deterministic-inference
-tools/gpu-lock --gpus 8 --exec-timeout 10800 -- \
-  python3 scripts/collect_stream.py \
-    --def-name  gqa_paged_prefill_causal_h5_kv1_d128_ps64 \
-    --model-key llama-4-scout-ps64 \
-    --model-path /path/to/model \
-    --batch-sizes 64 128 \
-    --pr-num 264 \
-    --extra-server-flag --disable-cuda-graph --enable-deterministic-inference
-```
-
-**Streaming workflow per batch size:**
-1. `bench_serving.py` with `DUMP_MAX_COUNT=500` (exhausted in round 1 of 2)
-2. `sanitize_dumps.py --max-new-workloads 4` — appends 4 diverse workloads
-3. Incremental HF push: updated JSONL + new blobs (no deletes)
-4. `rm -rf` dump dir
-
-After all batch sizes: `flashinfer-bench run` eval → push trace → PR2 done.
-
-**Key flags:**
-- `--dump-count 500` (default) — budget per server session
-- `--workloads-per-batch 4` (default) — workloads added per batch size
-- `--num-batches 2` (default) — inference rounds; budget typically hit in round 1
-- `--no-eval` — skip eval+trace push (useful when flashinfer-bench is unavailable)
-- `--no-push` — dry run: collect and sanitize without uploading
-- `--replace-first` — replace instead of append on first batch size
-
-**Auto-detection from definition tags:**
-- `tp:N` → sets `--tp N` (use `CUDA_VISIBLE_DEVICES=0,0` to simulate TP=2 on 1 GPU)
-- `page_size` const axis → sets `--page-size N`
-
-## Workflow
-
-### Phase 0: Install Latest Packages
-
-```bash
-git -C tmp/flashinfer pull && git -C tmp/sglang pull
-conda run -n flashinfer_bench pip install -e tmp/flashinfer --no-build-isolation
-conda run -n flashinfer_bench pip install -e "tmp/sglang/python[all]"
-```
-
-### Phase 1: Resolve Target Definitions
-
-- `--definitions <name> [name ...]`: specific definitions by name
-- `--op-type <type>`: all definitions under `definitions/{op_type}/`
-- `--all`: all definitions in the repo
-
-### Phase 2: FlashInfer Logging Configuration
-
-Parses `fi_api:<dotted.api.name>` tags from each definition to build `FLASHINFER_DUMP_INCLUDE`:
-- Wrapper class APIs (e.g. `BatchDecodeWithPagedKVCacheWrapper`) → include `.run`, and `.plan` if the definition has `int32`/`int64` inputs
-- **`BatchPrefillWithRaggedKVCacheWrapper`**: SGLang calls `.forward()`/`.forward_return_lse()` (not `.run()`) — those are automatically added to `FLASHINFER_DUMP_INCLUDE` for Ragged wrappers
-- Plain function APIs (e.g. `rmsnorm`) → include by function name
-
-Key env vars set automatically:
-```bash
-FLASHINFER_LOGLEVEL=10
-FLASHINFER_DUMP_DIR=./workload_dumps_<timestamp>
-FLASHINFER_DUMP_SAFETENSORS=1
-FLASHINFER_DUMP_INCLUDE=<fi_api patterns>   # only log matching API calls
-FLASHINFER_DUMP_EXCLUDE=*.__init__
-FLASHINFER_DUMP_MAX_COUNT=500              # ~4 batches × 16 layers × 8 TP ranks per session
-FLASHINFER_DUMP_MAX_SIZE_GB=30
-```
-
-**DUMP_MAX_COUNT sizing**: with `--restart-per-batch-size`, each server session independently counts toward DUMP_MAX_COUNT.  500 covers ~4 full forward passes for TP=8, 16-layer models (4 × 16 × 8 = 512 run() calls). Use 500 as the standard value when collecting per-batch-size.
-
-### Phase 2b (optional): Piggyback definition trace dump
-
-Setting `FLASHINFER_TRACE_DUMP=1` and `FLASHINFER_TRACE_DUMP_DIR=<dir>` alongside the
-logging vars above tells FlashInfer to write a Definition JSON for every
-`@flashinfer_api(trace=...)`-decorated call (one file per unique (op, shape)). This means
-**one SGLang run can produce both workload tensors and definition JSONs**, which is the
-fastest way to pick up a shape that turned out to be missing from the dataset (typical
-case: a new page-size variant or a quant-config variant).
-
-```bash
-export FLASHINFER_TRACE_DUMP=1
-export FLASHINFER_TRACE_DUMP_DIR=tmp/dumps/fi_trace_{def_name}
-# ...your existing FLASHINFER_LOGLEVEL/FLASHINFER_DUMP_* vars stay unchanged...
-```
-
-After the run, stage the new JSONs into the dataset with the snippet from
-[`/extract-kernel-definitions` Path A3](../extract-kernel-definitions/SKILL.md#a3-dedupe-and-stage-into-the-dataset),
-then normalize them for the validator with the
-[A3b](../extract-kernel-definitions/SKILL.md#a3b-normalize-the-staged-jsons-for-flashinfer-bench-validate)
-fix-up snippet (the dumper's `def _xxx_reference` and `dtype: "unknown"` need
-patching).
-The trace dump is independent of the logging API and adds negligible overhead, so it's
-safe to leave on for any collection run. Skip it only when the definitions are already
-known-correct and stable.
-
-### Phase 3: SGLang Inference
-
-**Inference source**: synthetic random prompts (default, `--dataset random`) or real ShareGPT prompts (`--dataset sharegpt`).
-
-- **`random`** (default): generates token-id prompts of a chosen length via `sample_random_requests` (ported from InferenceX `utils/bench_serving/benchmark_serving.py`). Use when you need controlled prefill length and a guaranteed decode budget. Each request decodes for exactly `--osl` tokens because `ignore_eos=True` is on by default.
-  - Recommended pairs: `--isl 1024 --osl 1024` (decode-heavy, big-batch decode shapes) and `--isl 8192 --osl 1024` (prefill-heavy).
-  - `--random-range-ratio` jitters lengths uniformly in `[ratio*len, len]`. Leave at `1.0` for exact lengths.
-- **`sharegpt`**: real prompts from `anon8231489123/ShareGPT_Vicuna_unfiltered`. Length distribution is uncontrolled; use only when prompt realism matters more than coverage.
-
-**Batch sizes**: `[8, 32, 64, 128]` — powers of 2 matching SGLang CUDA graph capture points, run multiple rounds each for KV-length diversity.
-
-**Dispatch**: sustained inflight (matches InferenceX `--request-rate inf`). sglang's async semaphore caps concurrent requests at `batch_size` and backfills on each completion, so new prefills overlap with ongoing decodes — yielding mixed prefill+decode batches and varied intra-batch kv_lens.
-
-**Per-batch-size isolation** (`--restart-per-batch-size`): pass this flag to `bench_serving.py` when using `FLASHINFER_DUMP_MAX_COUNT`.  Without it, the first batch size exhausts the dump budget (DUMP_MAX_COUNT is a global counter per server process) and later batch sizes capture nothing.  With it, each batch size gets its own server session and therefore its own fresh counter.
-
-Standard collection invocation with isolation:
-```bash
-FLASHINFER_DUMP_MAX_COUNT=500 \
-FLASHINFER_DUMP_INCLUDE="BatchDecodeWithPagedKVCacheWrapper*" \
-FLASHINFER_DUMP_EXCLUDE="*.__init__" \
-... \
-python3 examples/sglang_bench/bench_serving.py \
-  --model <model-key> \
-  --model-path /path/to/model \
-  --dataset random --isl 1024 --osl 1024 \
-  --batch-sizes 64 128 \
-  --num-batches 4 \
-  --restart-per-batch-size \
-  --disable-cuda-graph
-```
-
-For prefill-heavy coverage, run a second pass with `--isl 8192 --osl 1024`. For ShareGPT prompts pass `--dataset sharegpt` (no `--isl`/`--osl` needed).
-
-**Three execution modes** (chosen automatically based on definition type):
-
-| Mode | When | How |
-|------|------|-----|
-| SGLang offline Engine | Decode-only definitions | `engine.generate()` with exact batch size per call — guarantees decode sees `B` concurrent sequences |
-| SGLang HTTP server (paged) | Paged-prefill definitions | Launches server with `--enable-deterministic-inference` to force `use_ragged=False`, sends prefix-sharing requests via `/v1/chat/completions` |
-| SGLang HTTP server (ragged) | Ragged-prefill definitions (`BatchPrefillWithRaggedKVCacheWrapper`) | Launches server with `--disable-piecewise-cuda-graph` (no `--enable-deterministic-inference`), sends requests with `max_tokens=1` |
-
-**Critical ragged prefill flags**: `--disable-cuda-graph` alone is insufficient. SGLang always captures a piecewise CUDA graph for prefill; during capture `is_in_piecewise_cuda_graph()=True` forces `use_ragged=False`, so the captured graph only uses `BatchPrefillWithPagedKVCacheWrapper`. Adding `--disable-piecewise-cuda-graph` prevents the capture, ensuring every prefill executes eagerly through `BatchPrefillWithRaggedKVCacheWrapper`. Do **not** add `--enable-deterministic-inference` for ragged — it forces `use_ragged=False` entirely.
-
-### Phase 4: Tensor Dump Sanitization
-
-`sanitize_dumps.py` processes dump dirs:
-1. Matches dumps to definitions via `fi_api` function name
-2. Pairs `plan()` dumps with the following `run()` dump (same PID) to get structural tensors
-3. Maps plan kwargs: `paged_kv_indptr→kv_indptr`, `paged_kv_indices→kv_indices`, etc.
-4. Tensor storage policy:
-   - `int32`/`int64` (structural: indptrs, indices) → saved to safetensors blob
-   - float activations (`q`, `k_cache`, `v_cache`) → `{"type": "random"}` (shapes validated but values irrelevant for benchmarking)
-   - scalars (`sm_scale`) → `{"type": "scalar", "value": <float>}`
-5. Trims `kv_indices` to `kv_indptr[-1]` (SGLang over-allocates KV pool)
-6. Deduplicates: at most 2 entries per unique axes combination
-
-### Phase 5: Baseline Evaluation
-
-Runs the baseline solution against collected workloads before PR submission:
-```bash
-flashinfer-bench run --local {trace_dir} --definitions {def_name} --solutions baseline
-# → writes {trace_dir}/traces/{def_name}_baseline.jsonl
-```
-
-All entries must have `evaluation.status == "PASSED"`. If any fail, do not submit PR 2.
-
-### Phase 6: Submit PR 2 (HuggingFace flashinfer-trace)
-
-One HuggingFace PR per definition. PR 1 (GitHub flashinfer-bench) must already be open.
-
-**PR 2 contents:**
-1. `solutions/baseline/{op_type}/{def_name}/flashinfer_wrapper_*.json` — FlashInfer API wrapper (calls `BatchDecodeWithPagedKVCacheWrapper` or `BatchPrefillWithPagedKVCacheWrapper`, **not** `reference_impl`)
-2. `workloads/{op_type}/{def_name}.jsonl`
-3. `blob/workloads/{op_type}/{def_name}/*.safetensors`
-4. `definitions/{op_type}/{def_name}.json` (copied from PR 1)
-5. `tests/references/test_{def_name}.py` (copied from PR 1)
-6. `traces/{op_type}/{def_name}.jsonl` (baseline eval trace, all PASSED)
-
-**PR description must include** the full stdout of `collect_workloads.py sglang` under `## SGLang Collection Log`. The log must show real ShareGPT inference with diverse `(batch_size, kv_length)` pairs — uniform tiny KV caches (e.g. `batch_size=4096` with 1-page contexts) indicate synthetic data, not real inference.
-
-## Output Format
-
-```
-{flashinfer_trace_dir}/workloads/{op_type}/{def_name}.jsonl
-{flashinfer_trace_dir}/blob/workloads/{op_type}/{def_name}/{def_name}_{uuid}.safetensors
-```
-
-Each JSONL line:
-```json
-{
-  "definition": "gqa_paged_decode_h32_kv8_d128_ps1",
-  "workload": {
-    "uuid": "a1b2c3d4-...",
-    "axes": {"len_indptr": 33, "num_kv_indices": 4096},
-    "inputs": {
-      "q": {"type": "random"},
-      "k_cache": {"type": "random"},
-      "v_cache": {"type": "random"},
-      "kv_indptr": {"type": "safetensors", "path": "...", "tensor_key": "kv_indptr"},
-      "kv_indices": {"type": "safetensors", "path": "...", "tensor_key": "kv_indices"},
-      "kv_last_page_len": {"type": "safetensors", "path": "...", "tensor_key": "kv_last_page_len"},
-      "sm_scale": {"type": "scalar", "value": 0.0883}
-    }
-  }
-}
-```
-
-## Error Handling
-
-**No tensor dumps generated**: verify `FLASHINFER_LOGLEVEL=10` is set before any FlashInfer import; check `FLASHINFER_DUMP_INCLUDE` matches actual API function names; confirm `--attention-backend flashinfer`.
-
-**`run()` not captured**: look for `cudaErrorStreamCaptureUnsupported` in SGLang log. Fix: always pass both `--disable-cuda-graph` and `--disable-piecewise-cuda-graph`.
-
-**Ragged prefill yields 0 workloads**: two possible causes — (1) `--enable-deterministic-inference` is set, which forces `use_ragged=False` globally — never set this for ragged definitions; (2) piecewise CUDA graph is active (default even without `--enable-deterministic-inference`), so `is_in_piecewise_cuda_graph()=True` during capture forces `use_ragged=False`, and the cached graph always routes to `BatchPrefillWithPagedKVCacheWrapper`. Fix: add `--disable-piecewise-cuda-graph`. The script auto-detects ragged prefill definitions and adds this flag automatically.
-
-**Constant axis mismatch across TP**: use `--skip-const-axis-check` when collecting TP=1 dumps for a TP=2 definition (structural tensors are identical across TP).
-
-**SGLang not wired to target FlashInfer API**: grep for the `fi_api` function name in `tmp/sglang/python/sglang/srt/`. If missing, the `onboard-model` skill handles submitting a SGLang PR to wire it in.
+**This path requires NVIDIA.** It drives SGLang with the FlashInfer attention backend, and
+`tools/gpu-lock` allocates through `nvidia-smi`. On an Intel-only box, workloads come from
+`onboard-model-intel` Phase 2 Path C instead (module hooks on a `transformers` run); see
+"On Intel" at the end.
 
 ## Prerequisites
 
-Run `/clone-repos` first. Then:
-```bash
-/clone-repos
-/extract-kernel-definitions --model-name <model>
-/collect-workloads --op-type <op_type> --model-path /path/to/model
+- `/clone-repos` has been run (`tmp/sglang`, `tmp/flashinfer`, `tmp/flashinfer-trace`).
+- The definition JSON already exists in `tmp/flashinfer-trace/definitions/{op_type}/`.
+- The model has an entry in `examples/sglang_bench/model_configs.json` (Step 1).
+- Passwordless SSH between allocated nodes, if TP exceeds the local GPU count.
+
+## Step 1: Confirm the model is in `model_configs.json`
+
+```json
+"<model-key>": {
+    "server_flags": [
+        "--trust-remote-code",
+        "--attention-backend", "flashinfer",
+        "--tp-size", "<N>"
+    ]
+}
 ```
 
+The extra server flags depend on which kernel you are capturing, and getting them wrong is
+the usual reason a run yields zero workloads:
 
-## Intel GPUs
+| Definition kind | Add to `--extra-server-flag` |
+| --- | --- |
+| Paged decode | none |
+| Paged prefill | `--disable-cuda-graph --enable-deterministic-inference` |
+| Ragged prefill | `--disable-radix-cache --disable-piecewise-cuda-graph` |
 
-**Workloads are hardware-independent; do not re-collect them for Intel.** A workload is a
-set of axis values plus input specs — shapes and dtypes that a real inference run
-exercised. A workload captured from an SGLang run on an H100 is a valid replay input on an
-Intel GPU, and re-collecting it there would produce the same file.
+Never pass `--enable-deterministic-inference` for ragged prefill — it suppresses the ragged
+path and the run captures nothing.
 
-Collection stays on NVIDIA because it depends on SGLang with the FlashInfer backend. Run
-collection there, then benchmark the resulting workloads on whatever hardware you have:
+## Step 2: Run collection
+
+`scripts/collect_stream.py` does the whole loop: it runs `bench_serving.py` per batch size,
+sanitizes, pushes incrementally, and deletes the dump directory before the next size.
 
 ```bash
-FIB_DEVICE_BACKEND=xpu flashinfer-bench run --local tmp/flashinfer-trace
+tools/gpu-lock --gpus 8 --exec-timeout 10800 -- \
+  python3 scripts/collect_stream.py \
+    --def-name   gqa_paged_decode_h5_kv1_d128_ps64 \
+    --model-key  llama-4-scout-ps64 \
+    --model-path /path/to/model \
+    --batch-sizes 64 128 \
+    --pr-num 263 \
+    [--extra-server-flag --disable-cuda-graph --enable-deterministic-inference] \
+    [--trace-dir tmp/flashinfer-trace] \
+    [--peer-node-addr <host>]
 ```
 
-Definitions whose dtypes the target device cannot execute (FP8 on Xe2, for instance) are
-skipped with an explanation rather than benchmarked — the run reports them, so a skipped
-definition is never mistaken for a broken kernel.
+| Flag | Default | Use |
+| --- | --- | --- |
+| `--dump-count` | 500 | Dump budget per server session |
+| `--workloads-per-batch` | 4 | Workloads appended per batch size |
+| `--num-batches` | 2 | Inference rounds; the budget is usually hit in round 1 |
+| `--replace-first` | off | Start the JSONL fresh instead of appending |
+| `--no-push` | off | Collect and sanitize without uploading — use this first |
+| `--no-eval` | off | Skip the eval + trace push |
+
+Read from the definition's tags automatically: `tp:N` sets `--tp N`, and a `page_size` const
+axis sets `--page-size`. To simulate TP=2 on one GPU, `CUDA_VISIBLE_DEVICES=0,0`.
+
+**Multi-node** triggers automatically when the config's TP exceeds locally visible GPUs.
+Peers come from `SLURM_JOB_ID` and workers launch over SSH; dump env vars are forwarded only
+to rank 0, so only the head node dumps. Model paths must be on a filesystem mounted on every
+allocated node — a local path will fail on the workers. Peer-environment details are in the
+header comment of `examples/sglang_bench/bench_serving.py`.
+
+If you drive `sanitize_dumps.py` yourself rather than through `collect_stream.py`, set
+`FLASHINFER_DUMP_INCLUDE` to both `plan*` and `run*`
+(`BatchDecodeWithPagedKVCacheWrapper.plan*,BatchDecodeWithPagedKVCacheWrapper.run*`).
+Pairing each `run()` with its `plan()` is what lets the sanitizer skip const-axis checks on
+tensors absent from the `run()` dump (`k_cache`, `v_cache`). With `run*` only, pass
+`--skip-const-axis-check`.
+
+## Step 3: Verify the workloads are real
+
+Synthetic-looking workloads are the failure this step exists to catch. Diversity on the
+varying axis is the test.
+
+```bash
+python3 -c "
+import json, sys
+p = '<trace_dir>/workloads/<op_type>/<def_name>.jsonl'
+entries = [json.loads(l) for l in open(p)]
+axes = list(entries[0]['workload']['axes'])
+key = axes[0]
+vals = sorted({e['workload']['axes'][key] for e in entries})
+print('axes:', axes, '| entries:', len(entries))
+print(f'{key} unique: {len(vals)} sample: {vals[:10]}')
+sys.exit(1) if len(vals) < 5 else print('REAL workloads OK')
+"
+```
+
+Fewer than 5 distinct values on the varying axis means the run did not exercise the kernel —
+recheck the Step 1 flags before collecting again.
+
+## Step 4: If sanitize reports 0 workloads with const-axis warnings
+
+A definition constant disagrees with the tensors the model actually produced. The dump is
+the ground truth, not the definition.
+
+```python
+from pathlib import Path
+import json, safetensors.torch
+
+first = sorted(Path(DUMP_DIR).iterdir())[0]
+for k, v in safetensors.torch.load_file(first / "inputs.safetensors").items():
+    print(f"  {k}: {tuple(v.shape)} {v.dtype}")
+meta = json.loads((first / "metadata.jsonl").read_text().splitlines()[0])
+print("tensor_details:", json.dumps(meta.get("tensor_details", {}), indent=2))
+```
+
+Then fix the definition, in this order — skipping a step leaves the dataset inconsistent:
+
+1. Correct the const axis value (e.g. `head_dim: 64 → 128`).
+2. Rename the definition file **and** its `name` field (`_d64_` → `_d128_`).
+3. Fix the matching `assert` in the `reference`.
+4. Rename the workload `.jsonl` and the blob directory.
+5. Delete the old definition JSON.
+6. Update sibling definitions for the same model that share the constant (`_ps1` / `_ps64`).
+7. Re-run `sanitize_dumps.py` with the corrected name.
+
+## Step 5: Baseline evaluation
+
+```bash
+flashinfer-bench run --local tmp/flashinfer-trace --definitions <def_name> --save-results
+```
+
+Every entry must be `PASSED` before the workloads ship. A non-PASSED entry means the
+definition's reference disagrees with the baseline on real shapes — fix that, do not publish.
+
+## Step 6: Hand off
+
+`/submit-onboarding-prs` opens the dataset PR. It needs the collection log (the
+`collect_stream.py` stdout) as provenance for the PR body.
+
+## Failure table
+
+| Symptom | Cause | Action |
+| --- | --- | --- |
+| No dumps produced | `FLASHINFER_DUMP_*` not reaching the server, or wrong wrapper name | Confirm the include pattern names the wrapper the model actually calls |
+| Ragged run yields 0 workloads | `--enable-deterministic-inference` was passed | Remove it; use `--disable-radix-cache --disable-piecewise-cuda-graph` |
+| Sanitize reports 0 with const-axis warnings | Definition constant is wrong | Step 4 |
+| Low diversity on the varying axis | Kernel was not exercised | Recheck Step 1 flags |
+| Workers dump nothing on multi-node | Expected — only rank 0 dumps | Not an error |
+| Model not found on worker nodes | Model path is node-local | Move it to a shared mount |
+| Eval trace has non-PASSED entries | Reference disagrees on real shapes | Fix the definition; do not publish |
+
+## On Intel
+
+Definitions and workloads are hardware-agnostic, so workloads collected on NVIDIA are
+reused unchanged on Intel — never re-collect them per backend.
+
+When no NVIDIA box is available, `onboard-model-intel` Phase 2 Path C emits workloads
+alongside its definitions from module hooks on a `transformers` run. That gives TP=1 shapes;
+TP/EP variants come from Path B arithmetic. The provenance artifact for the PR is then the
+Path C run log rather than an SGLang collection log.
+
+## Sources
+
+- `tmp/flashinfer/docs/logging.rst` and `tmp/flashinfer/flashinfer/api_logging.py` — the
+  authority on Level-10 dump env vars
+- `examples/sglang_bench/bench_serving.py` header — multi-node and peer-environment details
+- `docs/flashinfer-trace/workload.mdx` — the workload JSONL schema

@@ -8,7 +8,7 @@ from typing import Any, List, Optional, Tuple
 
 import torch
 
-from flashinfer_bench.bench.config import ResolvedEvalConfig
+from flashinfer_bench.bench.config import EvalConfig, ResolvedEvalConfig
 from flashinfer_bench.bench.runner.runner import DeviceBaseline
 from flashinfer_bench.bench.utils import make_eval
 from flashinfer_bench.compile import Runnable
@@ -24,6 +24,16 @@ from flashinfer_bench.data import (
 
 class Evaluator(ABC):
     @classmethod
+    @classmethod
+    def eval_defaults(cls) -> Optional[EvalConfig]:
+        """Eval parameters this evaluator recommends when nothing else specifies them.
+
+        Applied at the lowest priority by ``BenchmarkConfig.resolve_eval_config``, so a
+        CLI flag or any config layer overrides it. ``None`` means the generic defaults
+        are right for this kind of operation.
+        """
+        return None
+
     @abstractmethod
     def can_evaluate(cls, definition: Definition) -> bool: ...
 

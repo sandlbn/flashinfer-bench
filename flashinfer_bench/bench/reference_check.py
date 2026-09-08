@@ -128,14 +128,30 @@ def required_dtypes(definition: Definition) -> FrozenSet[str]:
 
 
 def unsupported_dtypes(definition: Definition, device: str) -> FrozenSet[str]:
-    """Dtypes this definition needs that ``device`` cannot execute.
+    """Dtypes this definition needs that ``device`` cannot execute at all.
 
     A non-empty result means the definition should be skipped on this device rather than
-    benchmarked: a dtype the hardware lacks is either a hard failure or, worse, a silent
-    emulation that would be reported as if it were a native kernel.
+    benchmarked, because the dtype is a hard failure there.
+
+    A dtype the device runs only through emulation is *not* reported here -- it executes
+    and its results are correct, so refusing it would make an FP8 model impossible to
+    onboard on a part that runs it fine. Use :func:`emulated_dtypes` to label such a
+    result, since its latency describes the emulation rather than the format.
     """
     accelerator = get_accelerator(device)
     return accelerator.capabilities(device).unsupported_dtypes(required_dtypes(definition))
+
+
+def emulated_dtypes(definition: Definition, device: str) -> FrozenSet[str]:
+    """Dtypes this definition needs that ``device`` runs correctly but not natively.
+
+    Non-empty means any latency measured for this definition on this device is a property
+    of the emulation path, and must not be compared against a native measurement of the
+    same dtype on other hardware.
+    """
+    accelerator = get_accelerator(device)
+    caps = accelerator.capabilities(device)
+    return caps.emulated_required_dtypes(required_dtypes(definition))
 
 
 def _pick_workload(trace_set: TraceSet, definition_name: str) -> Optional[Workload]:
@@ -351,12 +367,18 @@ def check_references(
         )
         result = check_reference(definition, workload, device, cfg, trace_set.root)
         results.append(result)
+        # Correctness is unaffected by emulation, but throughput is, so say so on the
+        # same line as the verdict rather than leaving it to be inferred later.
+        emulated = emulated_dtypes(definition, device)
         logger.info(
-            "%-44s %-18s max_abs=%.3e max_rel=%.3e",
+            "%-44s %-18s max_abs=%.3e max_rel=%.3e%s",
             name,
             result.status.value,
             result.max_absolute_error,
             result.max_relative_error,
+            f"  [emulated: {', '.join(sorted(emulated))} -- latency is not native]"
+            if emulated
+            else "",
         )
 
     return ReferenceAttestation(

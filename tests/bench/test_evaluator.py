@@ -523,3 +523,40 @@ def test_resolve_evaluator_selects_default():
 
 if __name__ == "__main__":
     pytest.main(sys.argv)
+
+
+class TestEvaluatorEvalDefaults:
+    """An evaluator may recommend eval parameters for the kind of op it handles.
+
+    Applied at the lowest priority, so they fill in what nothing else specified and lose
+    to every config layer and CLI flag.
+    """
+
+    def test_lowbit_relaxes_tolerance_and_ratio_together(self):
+        from flashinfer_bench.bench.config import BenchmarkConfig
+
+        cfg = BenchmarkConfig().resolve_eval_config(_lowbit_def(), "TEST_HW")
+        # A ratio only means something at a stated tolerance: relaxing one without the
+        # other made the 95% gate unreachable for a kernel dequantizing into bfloat16.
+        assert cfg.rtol == LowBitEvaluator.DEFAULT_RTOL
+        assert cfg.atol == LowBitEvaluator.DEFAULT_ATOL
+        assert cfg.required_matched_ratio == LowBitEvaluator.DEFAULT_REQUIRED_MATCHED_RATIO
+
+    def test_dense_definition_keeps_the_generic_tolerance(self):
+        from flashinfer_bench.bench.config import BenchmarkConfig
+
+        cfg = BenchmarkConfig().resolve_eval_config(_simple_def(), "TEST_HW")
+        assert cfg.rtol == 1e-2
+        assert cfg.atol == 1e-2
+        assert cfg.required_matched_ratio is None
+
+    def test_explicit_override_beats_the_evaluator_default(self):
+        from flashinfer_bench.bench.config import BenchmarkConfig
+
+        cfg = BenchmarkConfig(rtol=1e-4, required_matched_ratio=1.0).resolve_eval_config(
+            _lowbit_def(), "TEST_HW"
+        )
+        assert cfg.rtol == 1e-4
+        assert cfg.required_matched_ratio == 1.0
+        # Untouched fields still take the evaluator's recommendation.
+        assert cfg.atol == LowBitEvaluator.DEFAULT_ATOL

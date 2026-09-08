@@ -17,14 +17,17 @@ device's capability record, so the install command derives it instead of asking.
 
 from __future__ import annotations
 
+import ctypes
 import importlib.metadata
 import importlib.util
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -218,6 +221,78 @@ def all_status() -> List[Dict[str, Optional[str]]]:
     return [status(s) for s in SPECS]
 
 
+class _DnnlVersion(ctypes.Structure):
+    _fields_ = [
+        ("major", ctypes.c_int),
+        ("minor", ctypes.c_int),
+        ("patch", ctypes.c_int),
+        ("hash", ctypes.c_char_p),
+        ("cpu_runtime", ctypes.c_int),
+        ("gpu_runtime", ctypes.c_int),
+    ]
+
+
+@lru_cache(maxsize=1)
+def onednn_link_version() -> Optional[str]:
+    """Version and commit of the oneDNN a SYCL solution will *link against*.
+
+    Recording the directory is not enough. `/opt/intel/oneapi/dnnl/latest` is a symlink that
+    moves, and a locally rebuilt oneDNN -- the only way to change the GEMM kernel catalog --
+    sits at the same path as the stock one. Without the version and commit, a trace measured
+    against a patched library is indistinguishable from one measured against a released one,
+    which is exactly the claim a reader needs to check.
+    """
+    from flashinfer_bench.compile.builders.sycl_builder import find_onednn_root
+
+    root = find_onednn_root()
+    if root is None:
+        return None
+    for sub in ("lib", "lib64", "lib/intel64"):
+        lib_path = Path(root) / sub / "libdnnl.so"
+        if not lib_path.exists():
+            continue
+        try:
+            lib = ctypes.CDLL(str(lib_path))
+            lib.dnnl_version.restype = ctypes.POINTER(_DnnlVersion)
+            v = lib.dnnl_version().contents
+            commit = v.hash.decode()[:12] if v.hash else "unknown"
+            real = os.path.realpath(str(lib_path))
+            return f"{v.major}.{v.minor}.{v.patch}+{commit} ({real})"
+        except Exception:
+            continue
+    return None
+
+
+@lru_cache(maxsize=1)
+def onednn_runtime_version() -> Optional[str]:
+    """Version of the oneDNN that torch itself executes.
+
+    Not necessarily the one solutions link against: torch-xpu bundles its own oneDNN, and it
+    has been observed a minor version ahead of the oneAPI install. That matters because a
+    definition's `reference` for a GEMM *is* torch's oneDNN, so a solution linking a
+    different build is being compared across two libraries, not one.
+    """
+    import subprocess
+    import sys
+
+    code = (
+        "import torch;a=torch.randn(8,64,dtype=torch.bfloat16,device='xpu:0');"
+        "torch.matmul(a,a.T);torch.xpu.synchronize()"
+    )
+    try:
+        out = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=180,
+            env={**os.environ, "ONEDNN_VERBOSE": "1"},
+        )
+    except Exception:
+        return None
+    m = re.search(r"oneDNN v([0-9.]+) \(commit ([0-9a-f]+)\)", out.stderr + out.stdout)
+    return f"{m.group(1)}+{m.group(2)[:12]}" if m else None
+
+
 def provider_provenance() -> Dict[str, str]:
     """Installed providers and their versions, for recording in a trace.
 
@@ -229,6 +304,30 @@ def provider_provenance() -> Dict[str, str]:
         if not is_installed(spec):
             continue
         out[spec.name] = provider_version(spec) or (find_root(spec) or "present")
+
+    # oneDNN gets version+commit rather than a path, and both sides of it. A GEMM
+    # definition's reference is `torch.matmul`, which runs torch's own bundled oneDNN, while
+    # a SYCL solution links whatever FIB_ONEDNN_DIR points at. When those differ the
+    # comparison spans two libraries, and the trace has to say so or the number is not
+    # interpretable later.
+    link = onednn_link_version()
+    runtime = onednn_runtime_version()
+    if link:
+        out["onednn"] = link
+    if runtime:
+        out["env:onednn_runtime"] = runtime
+    if link and runtime and link.split(" ")[0].split("+")[0] != runtime.split("+")[0]:
+        out["env:onednn_version_mismatch"] = (
+            f"solutions link {link.split(' ')[0]}, torch runs {runtime}"
+        )
+        logger.warning(
+            "oneDNN version mismatch: solutions link %s but torch runs %s. A SYCL solution "
+            "and the reference it is measured against are using different oneDNN builds; "
+            "set FIB_ONEDNN_DIR to the matching install or treat the comparison as "
+            "cross-library.",
+            link.split(" ")[0],
+            runtime,
+        )
     return out
 
 

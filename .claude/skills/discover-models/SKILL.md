@@ -1,251 +1,194 @@
 ---
 name: discover-models
-description: Discover candidate LLMs and produce a kernel inventory — required definitions, classified as existing/new and fi_supported/fi_missing — for onboarding. Use as Phase 1 of /onboard-model, or standalone to plan onboarding work.
+description: Discover candidate LLMs and produce a kernel inventory — the definitions a model needs, classified existing/new and by which backend can supply a kernel (FlashInfer on CUDA, vllm-xpu / sgl-kernel-xpu / oneDNN on Intel). Writes the run manifest the rest of the pipeline consumes. Use as Phase 1 of /onboard-model or /onboard-model-intel.
 ---
 
-# Discover Models
+# Discover models
 
-Identify target models and produce a per-kernel inventory:
-- which definitions are needed,
-- which already live in the HuggingFace dataset (`tmp/flashinfer-trace/definitions/`),
-- which are new and supported by FlashInfer,
-- which are new and missing from FlashInfer (so a kernel-request issue is needed).
-
-Produces the `kernels` block of the onboard-model run manifest.
-
-## Usage
-
-```bash
-# Auto-discover candidate models added to SGLang in the last 30 days
-/discover-models --discover
-
-# Plan a specific model
-/discover-models --model-name qwen3-235b-a22b --hf-repo-id Qwen/Qwen3-235B-A22B
-
-# Write the inventory to a manifest file (consumed by /onboard-model)
-/discover-models --model-name kimi-k2 --manifest tmp/onboard_kimi-k2_20260427.json
-```
-
-## Parameters
-
-- `--discover` (optional): Auto-discover candidates from SGLang day-0 additions and sgl-cookbook YAMLs.
-- `--model-name` (optional): Specific model slug to plan (e.g. `qwen3-235b-a22b`).
-- `--hf-repo-id` (optional): HuggingFace repo override (e.g. `Qwen/Qwen3-235B-A22B`). Inferred from `--model-name` if omitted.
-- `--manifest` (optional): Path to an onboard-model run manifest. The skill writes the `model_slug`, `hf_repo_id`, `repo_shas`, and `kernels` array. If the file already exists, fields are merged; existing per-kernel statuses are preserved unless `--refresh` is set.
-- `--refresh` (optional): Re-classify all kernels even if entries already exist in the manifest.
+Answer two questions and write them down: **which definitions does this model need**, and
+**for each, who can supply a kernel**. Output is the run manifest every later phase reads.
 
 ## Prerequisites
 
-- `/clone-repos` has been run, so `tmp/sglang/`, `tmp/flashinfer/`, `tmp/sgl-cookbook/`, and `tmp/flashinfer-trace/` are present and current.
-- `huggingface_hub` is installed and (for gated models) authenticated.
+`/clone-repos` — this skill greps `tmp/sglang`, `tmp/flashinfer`, `tmp/sgl-cookbook` and
+`tmp/flashinfer-trace`.
 
----
+## 1a. Find candidates
 
-## Phase 1a: Discover candidate models
-
-Run only when `--discover` is set.
-
-**Day-0 SGLang additions** (highest priority — production-ready):
+Skip when a model was named explicitly.
 
 ```bash
+# Day-0 SGLang additions: a brand-new model file is the strongest signal
 git -C tmp/sglang log --since="30 days ago" --name-status --diff-filter=A \
-    -- "python/sglang/srt/models/*.py" | grep "^A" | awk '{print $2}'
+    -- "python/sglang/srt/models/*.py" | awk '/^A/{print $2}'
+
+# New sgl-cookbook entries mean a recommended serving config exists
+COOKBOOK=$(ls -d tmp/sgl-cookbook/data/models/generated/* | sort -V | tail -1)
+git -C tmp/sgl-cookbook log --since="30 days ago" --name-status --diff-filter=A \
+    -- "${COOKBOOK#tmp/sgl-cookbook/}/*.yaml" | awk '/^A/{print $2}'
 ```
 
-Models with a brand-new `.py` under `python/sglang/srt/models/` in the last 30 days are
-day-0 candidates. Parse the model class to derive a slug.
+Always resolve the cookbook directory with `sort -V | tail -1`; a pinned version path goes
+stale silently.
 
-**sgl-cookbook new entries**:
+Drop candidates already listed in the Summary table of `docs/model_coverage.mdx`.
+
+## 1b. Read the model config
 
 ```bash
-git -C tmp/sgl-cookbook log --since="30 days ago" --name-status --diff-filter=A \
-    -- "data/models/generated/v0.5.6/*.yaml" | grep "^A" | awk '{print $2}'
+python -c "
+import json, urllib.request
+c = json.load(urllib.request.urlopen('https://huggingface.co/<repo_id>/raw/main/config.json'))
+print('architectures', c.get('architectures'))
+# Multimodal configs (*ForConditionalGeneration) nest the language model here. Reading only
+# top-level keys returns nothing for them, silently.
+t = c.get('text_config', c)
+for k in ('hidden_size','intermediate_size','moe_intermediate_size','num_attention_heads',
+          'num_key_value_heads','head_dim','num_hidden_layers','vocab_size',
+          'num_experts','num_experts_per_tok','torch_dtype','dtype'):
+    if k in t: print(f'{k:24} {t[k]}')
+if 'vision_config' in c:
+    print('NOTE: has a vision tower -- scope it explicitly; the dataset covers text ops only')
+"
 ```
 
-A new YAML signals a model with a recommended serving config.
+A gated repo needs `hf auth login`. An unrecognised `architectures` value means the
+model is not in SGLang yet — record it and stop; there is nothing to onboard against.
 
-**Filter already-tracked models**: read `docs/model_coverage.mdx` Summary table and skip any
-candidate already listed.
+## 1c. Compute the definitions this model needs
 
-## Phase 1b: Fetch model config from HuggingFace
+The naming formulas and TP/EP division rules live in `/extract-kernel-definitions` section
+B2 — that table is the single owner. Apply it to the config values from 1b, once per (TP, EP)
+combination in the cookbook YAML.
 
-For each candidate (or the specified `--model-name`):
+## 1d. Existing or new
+
+```bash
+for name in <computed_names>; do
+  if ls tmp/flashinfer-trace/definitions/*/"$name".json >/dev/null 2>&1; then
+    echo "existing $name"
+  else
+    echo "new      $name"
+  fi
+done
+```
+
+An existing definition is reused unchanged. Also check it has workloads —
+`ls tmp/flashinfer-trace/workloads/*/$name.jsonl` — because a definition with none cannot be
+benchmarked and needs `/collect-workloads` even though Phase 2 can be skipped.
+
+## 1e. Who can supply a kernel
+
+Two independent questions. Answer both; a manifest that answers only the first is useless on
+an Intel-only box.
+
+**CUDA / FlashInfer:**
+
+| op_type | Check in `tmp/flashinfer/flashinfer/` |
+|---|---|
+| `rmsnorm` | `norm/` |
+| `gqa_paged` | `decode.py`, `prefill.py` |
+| `gqa_ragged` | `prefill.py` |
+| `mla_paged` | `mla/` |
+| `mamba_ssu` | `mamba/` |
+| `dsa_paged` | `sparse.py` |
+| `gdn` | `gdn_decode.py`, `gdn_prefill.py` |
+| `moe` | `fused_moe/` — check the specific variant |
+| `sampling` | `sampling.py` |
+| `rope` | `rope.py` |
+| `activation` | `activation.py` |
+| `gemm` | always available via PyTorch |
+
+A kernel existing is `fi_supported`. Whether Path A can *harvest* it automatically is a
+separate flag — the API must carry a trace decorator:
+
+```bash
+grep -rn "@flashinfer_api(trace=" tmp/flashinfer/flashinfer/ | grep -i "<module_or_api>"
+```
+
+Record as `fi_trace_template` true/false. False still means `fi_supported`, but Phase 2 falls
+back to manual extraction.
+
+**Intel:** ask the registry and the provider inventories rather than assuming.
+
+```bash
+python -c "
+from flashinfer_bench.integration.xpu_kernels import REGISTRY
+for k in sorted(REGISTRY, key=lambda k: (k.op_type, k.name)):
+    print(f'{k.op_type:12} {k.provider:16} {k.name}')
+"
+```
+
+Record `intel_status` per definition: `wired` (a baseline exists today), `available`
+(a provider ships the kernel but nothing is registered — see
+`onboard-model-intel/providers.md`), or `none` (needs a SYCL or Triton solution). Without
+this the manifest cannot drive `/onboard-model-intel` Phase 5.
+
+## 1f. Does SGLang route through it?
+
+For each `fi_supported` definition, whether SGLang already calls the FlashInfer kernel drives
+whether workloads can be collected at all.
+
+```bash
+grep -rn "<flashinfer_api_name>" tmp/sglang/python/sglang/srt/ | grep -v __pycache__
+```
+
+No hit means `sgl_missing`: record the file that *would* host the call (usually
+`layers/attention/flashinfer_backend.py` or the matching layer module), so the SGLang PR step
+has a target.
+
+## 1g. Write the manifest
 
 ```python
-from huggingface_hub import hf_hub_download
-import json
+import json, subprocess
+from pathlib import Path
 
-config_path = hf_hub_download(repo_id=hf_repo_id, filename="config.json")
-with open(config_path) as f:
-    config = json.load(f)
+def sha(repo):
+    try:
+        return subprocess.check_output(
+            ["git", "-C", f"tmp/{repo}", "rev-parse", "--short", "HEAD"], text=True).strip()
+    except Exception:
+        return None
+
+path = Path("tmp/onboard_<slug>_<date>.json")
+m = json.loads(path.read_text()) if path.exists() else {}
+m.update({
+    "model_slug": "<slug>",
+    "hf_repo_id": "<repo_id>",
+    "date": "<YYYY-MM-DD>",
+    "repo_shas": {r: sha(r) for r in
+                  ("sglang", "flashinfer", "sgl-cookbook", "flashinfer-trace")},
+})
+by_name = {k["definition_name"]: k for k in m.get("kernels", [])}
+for k in <computed_kernel_records>:              # merge, never clobber later phases
+    by_name.setdefault(k["definition_name"], {}).update(k)
+m["kernels"] = list(by_name.values())
+path.write_text(json.dumps(m, indent=2))
 ```
 
-Key fields to extract: see `track-models` SKILL.md for the full `config.json → kernel param`
-mapping table.
+Merging matters: `phase2_status`, `phase3_status`, `workload_entries`, `fi_issue_url` and
+`phase4` are written by later phases and must survive a re-run.
 
-## Phase 1c: Determine required kernel definitions
+Per-kernel fields:
 
-Use the per-op-type formulas in `track-models` Phase 3a to compute the expected definition
-names from the model config and the sgl-cookbook TP/EP values. Each formula yields a fully
-qualified definition name like `gqa_paged_decode_h40_kv8_d128_ps1`.
+| Field | Values |
+|---|---|
+| `definition_name`, `op_type` | — |
+| `phase1_status` | `existing` / `new` |
+| `fi_status` | `fi_supported` / `fi_missing` |
+| `fi_trace_template` | true / false |
+| `sgl_status` | `sgl_integrated` / `sgl_missing` / `n/a` |
+| `intel_status` | `wired` / `available` / `none` |
 
-## Phase 1d: Classify existing vs new
+## 1h. Report
 
-For each expected definition name, search the HuggingFace dataset clone (definitions live
-only there after the trace-dataset refactor):
+Print four buckets, because each routes to a different next step:
 
-```bash
-find tmp/flashinfer-trace/definitions/ -name "{definition_name}.json"
-```
+- **existing** — reuse; check workloads
+- **new + fi_supported + sgl_integrated** — Path A trace-dump, then collect workloads
+- **new + fi_supported + sgl_missing** — Path A possible, workloads blocked on an SGLang PR
+- **new + fi_missing** — manual extraction, plus a FlashInfer kernel-request issue
 
-| Result | Classification |
-|--------|---------------|
-| File found | **existing** — no new definition needed |
-| Not found | **new** — proceed to FlashInfer-availability classification |
-
-## Phase 1e: Check FlashInfer kernel availability for new definitions
-
-For each *new* definition, determine whether FlashInfer already implements the underlying
-kernel.
-
-| op_type | Check path in `tmp/flashinfer/` |
-|---------|--------------------------------|
-| `rmsnorm` | `flashinfer/norm.py` — grep for `rmsnorm` |
-| `gqa_paged` | `flashinfer/decode.py`, `flashinfer/prefill.py` |
-| `gqa_ragged` | `flashinfer/prefill.py` |
-| `mla_paged` | `flashinfer/mla.py` |
-| `dsa_paged` | `flashinfer/sparse.py` |
-| `gdn` | `flashinfer/gdn.py` or `flashinfer/gdn/` |
-| `moe` | `flashinfer/fused_moe/` — check the specific variant |
-| `gemm` | always available via PyTorch |
-| `sampling` | `flashinfer/sampling.py` |
-| `mamba_ssu` | `flashinfer/mamba.py` — grep for `selective_state_update` |
-| `rope` | `flashinfer/rope.py` — grep for `apply_rope_with_cos_sin_cache` |
-
-Also check `tmp/flashinfer/tests/` for a corresponding test file — its presence is a strong
-signal the kernel is implemented and tested.
-
-A stronger signal that the kernel is **fully ready for the trace-dump path** (Path A in
-[`extract-kernel-definitions`](../extract-kernel-definitions/SKILL.md)) is whether the
-FlashInfer API carries an `@flashinfer_api(trace=...)` decorator (added by
-[flashinfer-ai/flashinfer#2931](https://github.com/flashinfer-ai/flashinfer/pull/2931)).
-Check with:
-
-```bash
-grep -rn "@flashinfer_api(trace=" tmp/flashinfer/flashinfer/ | grep -i "{module_or_api}"
-```
-
-If the API is decorated, Phase 2 can produce its Definition JSON automatically by running
-a short SGLang inference pass with `FLASHINFER_TRACE_DUMP=1`. If FlashInfer has the kernel
-but not the decorator, classification is still `fi_supported` but Phase 2 falls back to
-manual extraction. Record the decorator-presence flag on the manifest entry as
-`fi_trace_template` (`true`/`false`) so reviewers know which path to expect.
-
-Classify each new definition:
-
-- **fi_supported**: FlashInfer has the kernel → onboard-model Phase 2 (trace-dump if
-  `fi_trace_template=true`, else manual extraction; see `extract-kernel-definitions`).
-- **fi_missing**: FlashInfer does not have the kernel → onboard-model Phase 2 (manual
-  extraction from SGLang + file kernel-request issue).
-
-## Phase 1f: Check SGLang integration for fi_supported definitions
-
-For each `fi_supported` definition, determine whether SGLang already routes through the
-FlashInfer kernel. The result drives Phase 3 (workload collection).
-
-```bash
-# Use the fi_api tag from the definition (or the expected wrapper name) to grep:
-grep -r "{flashinfer_api_name}" tmp/sglang/python/sglang/srt/ 2>/dev/null | grep -v __pycache__
-```
-
-Common mapping:
-
-| fi_api | SGLang integration file | Search term |
-|--------|------------------------|-------------|
-| `flashinfer.mla.BatchMLAPagedAttentionWrapper` | `layers/attention/flashinfer_backend.py` | `BatchMLAPagedAttentionWrapper` |
-| `flashinfer.decode.BatchDecodeWithPagedKVCacheWrapper` | `layers/attention/flashinfer_backend.py` | `BatchDecodeWithPagedKVCacheWrapper` |
-| `flashinfer.prefill.BatchPrefillWithPagedKVCacheWrapper` | `layers/attention/flashinfer_backend.py` | `BatchPrefillWithPagedKVCacheWrapper` |
-| `flashinfer.norm.rmsnorm` | `layers/layernorm.py` | `flashinfer.norm` |
-| `flashinfer.fused_moe.trtllm_fp8_block_scale_moe` | `layers/moe/fused_moe.py` | `trtllm_fp8_block_scale_moe` |
-| `flashinfer.gdn.gated_delta_rule_decode` | `layers/attention/gdn_backend.py` | `gated_delta_rule_decode` |
-| `flashinfer.mamba.selective_state_update` | `layers/mamba/mamba_mixer.py` | `selective_state_update` |
-
-Classify:
-
-- **sgl_integrated**: SGLang already calls this FlashInfer API → Phase 3 collects workloads directly.
-- **sgl_missing**: SGLang does not yet wire this API → Phase 3 must submit an SGLang PR first.
-
-For `fi_missing` definitions, SGLang integration is moot (no FlashInfer kernel to call) — set `sgl_status` to `n/a`.
-
-## Phase 1g: Report
-
-Print a classification table:
-
-```
-Model: Qwen3-235B-A22B
-HF repo: Qwen/Qwen3-235B-A22B
-Architecture: 94 layers, GQA + MoE
-
-Kernel inventory:
-  EXISTING (skip):
-    ✅ rmsnorm_h7168
-    ✅ moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048
-  NEW — FlashInfer supported, SGLang integrated → ready for workload collection:
-    🆕 gqa_paged_decode_h40_kv8_d128_ps1
-    🆕 gqa_paged_decode_h40_kv8_d128_ps64
-  NEW — FlashInfer supported, SGLang missing → submit SGLang PR first:
-    🆕 dsa_topk_indexer_fp8_h64_d128_topk2048_ps64
-  NEW — FlashInfer MISSING → file kernel-request issue, skip workload collection:
-    ❓ <new_op_type>_<params>
-```
-
-## Output: run-manifest contract
-
-When `--manifest <path>` is set, write/update a JSON file with this shape (the same manifest
-consumed by `/onboard-model` and `/submit-onboarding-prs`):
-
-```json
-{
-  "model_slug": "qwen3-235b-a22b",
-  "hf_repo_id": "Qwen/Qwen3-235B-A22B",
-  "date": "2026-04-27",
-  "repo_shas": {
-    "sglang": "abc1234",
-    "flashinfer": "def5678",
-    "sgl_cookbook": "ghi9012",
-    "flashinfer_trace": "jkl3456"
-  },
-  "kernels": [
-    {
-      "definition_name": "gqa_paged_decode_h40_kv8_d128_ps1",
-      "op_type": "gqa_paged",
-      "phase1_status": "new",
-      "fi_status": "fi_supported",
-      "fi_trace_template": true,
-      "sgl_status": "sgl_integrated"
-    },
-    {
-      "definition_name": "rmsnorm_h7168",
-      "op_type": "rmsnorm",
-      "phase1_status": "existing"
-    },
-    {
-      "definition_name": "new_op_h512",
-      "op_type": "new_op",
-      "phase1_status": "new",
-      "fi_status": "fi_missing",
-      "sgl_status": "n/a"
-    }
-  ]
-}
-```
-
-Existing entries written by later phases (`phase2_status`, `phase3_status`, `workload_entries`,
-`fi_issue_url`, `phase4`) are preserved on update.
-
-## See Also
-
-- [onboard-model](../onboard-model/SKILL.md) — full pipeline that consumes this skill's output
-- [track-models](../track-models/SKILL.md) — config-field and per-op-type formula reference
-- [clone-repos](../clone-repos/SKILL.md) — must run first
-- [submit-onboarding-prs](../submit-onboarding-prs/SKILL.md) — Phase 4 counterpart
+On Intel the routing is `intel_status` instead: `wired` → benchmark now; `available` → wire a
+baseline (`/onboard-model-intel` Phase 5); `none` → write a solution
+(`/optimize-intel-kernels`).

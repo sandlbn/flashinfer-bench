@@ -190,8 +190,40 @@ class TestCapabilities:
     def test_gates_unsupported_dtypes(self):
         caps = FakeAccelerator.caps
         assert caps.supports_dtype("bfloat16")
+        assert caps.is_native_dtype("bfloat16")
+        # This fixture declares no emulated dtypes, so an absent dtype is still refused.
         assert not caps.supports_dtype("float8_e4m3fn")
-        assert caps.unsupported_dtypes(["float32", "float8_e4m3fn"]) == frozenset({"float8_e4m3fn"})
+        assert caps.unsupported_dtypes({"float8_e4m3fn"}) == frozenset({"float8_e4m3fn"})
+
+    def test_emulated_dtype_runs_but_is_not_native(self):
+        """A dtype the runtime executes correctly but not on dedicated hardware.
+
+        Battlemage has no FP8 DPAS, so ``torch._scaled_mm`` upconverts to fp16: the
+        results are bit-exact and the throughput is not the format's. Such a dtype must
+        run -- refusing it would make an FP8 model impossible to onboard on a part that
+        handles it fine -- while never being reported as native.
+        """
+        caps = Capabilities(
+            canonical_id="FAKE_EMULATED",
+            supported_dtypes=frozenset({"float32", "bfloat16"}),
+            emulated_dtypes=frozenset({"float8_e4m3fn"}),
+        )
+        assert caps.supports_dtype("float8_e4m3fn")
+        assert not caps.is_native_dtype("float8_e4m3fn")
+        assert caps.unsupported_dtypes({"float8_e4m3fn"}) == frozenset()
+        assert caps.emulated_required_dtypes({"float8_e4m3fn"}) == frozenset(
+            {"float8_e4m3fn"}
+        )
+        # A dtype in neither set is still a hard refusal.
+        assert not caps.supports_dtype("float4_e2m1")
+        assert caps.unsupported_dtypes({"float4_e2m1"}) == frozenset({"float4_e2m1"})
+        # And a native dtype is not mislabelled as emulated.
+        assert caps.is_native_dtype("bfloat16")
+        assert caps.emulated_required_dtypes({"bfloat16"}) == frozenset()
+        # A mixed request splits: nothing unsupported, only the fp8 flagged as emulated.
+        mixed = ["float32", "float8_e4m3fn"]
+        assert caps.unsupported_dtypes(mixed) == frozenset()
+        assert caps.emulated_required_dtypes(mixed) == frozenset({"float8_e4m3fn"})
 
     def test_unknown_part_gets_conservative_defaults(self):
         from flashinfer_bench.device.capabilities import DEFAULT_DTYPES, Capabilities
