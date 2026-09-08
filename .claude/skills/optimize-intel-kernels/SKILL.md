@@ -333,6 +333,32 @@ there contradict what a CUDA author would assume: sub-group 16 rather than the 3
 reports, no SLM double-buffering in any Xe mainloop, no pingpong schedule, and fp8 /
 block-scaled mxfp4-mxfp8 present only on Crescent Island.
 
+## Before rewriting a memory-bound kernel, measure what its *access pattern* allows
+
+Peak bandwidth is the wrong yardstick. Read the same bytes in the same shape the kernel is
+obliged to touch, and compare against that instead.
+
+Worked example -- vLLM's Triton unified attention, Arc B580, gqa_paged decode h32 kv8 d128
+ps64, batch 64, ctx 1024, 2026-09-08. The KV cache is
+`[pages, page_size, kv_heads, head_dim]` and the grid is `(q_blocks, kv_heads)`, so each
+workgroup streams one head, strided by `kv_heads * head_dim`:
+
+| read | GB/s |
+| --- | --- |
+| whole KV cache, contiguous | 430.9 |
+| one kv-head slice -- what the kernel actually does | 167.1 |
+| the attention kernel itself | 164.1 |
+
+Against peak the kernel looks 2.6x off and worth a rewrite. Against its own access pattern
+it is at **98%**, and no kernel change recovers the difference: the 2.6x lives in the cache
+layout, so the lever is a head-major KV cache -- a serving-stack decision, not a kernel one.
+
+Launch tuning was exhausted separately and found nothing. vLLM's defaults (`TILE_SIZE=32`,
+`BLOCK_M=16`, 4 warps) beat every alternative swept, several catastrophically:
+`TILE_SIZE=64` at 0.23x, 16 warps at 0.43x. Note 4 warps is 64 work-items here, not 128 --
+Intel's Triton runs 16 threads per warp, so a warp count carried over from an NVIDIA tuning
+guide describes a different workgroup.
+
 ## Failure table
 
 | Symptom | Cause | Action |
