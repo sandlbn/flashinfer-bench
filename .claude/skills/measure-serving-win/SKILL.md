@@ -79,6 +79,13 @@ These must reach the **worker** process, which is why they are environment varia
 `sitecustomize` and not arguments to a launcher. Patching from a launcher patches a class
 that never runs a forward pass, and nothing reports an error.
 
+**Time alternatives in interleaved rounds, never in sequence.** A GPU that has been idle
+ramps its clocks over the first measurements, so whichever case a sweep times first absorbs
+the ramp and looks slow. Measured on Arc B580 this inverted a comparison outright: a kernel
+timed first read 0.53x against its competitor and 1.09x when the rounds were interleaved and
+medians taken, with non-overlapping spreads. Warm every case before timing any of them, then
+alternate.
+
 **Size the run so the timed window is seconds, not a second.** The patched arm pays a
 one-time SYCL build and JIT that the baseline does not, and a warm-up generate does not fully
 absorb it. The same configuration measured at 0.9s and at 5s per arm reported a 2.5x

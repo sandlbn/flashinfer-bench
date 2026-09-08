@@ -21,21 +21,31 @@ queue, so ordering already holds and the caller synchronizes when it needs the r
 Removing the block took the same kernel from 0.44x to 2.21x against the reference at m=1.
 Structure was never the problem; a per-call host block was.
 
-**It stays off by default, and the end-to-end check now says it should.** The numbers above
-are against this definition's `reference`, which computes the projection as *two* GEMMs.
-vLLM issues *one* merged GEMM and then its own fused `silu_and_mul`, so the reference is
-roughly 2x worse than production before any kernel is written. Timed against what vLLM
-actually runs (Arc B580, k=1024 d=3072, bf16, wall-clock over 200 calls, 2026-09-08):
+**Measured against what vLLM actually runs, not against the reference.** This definition's
+`reference` computes the projection as *two* GEMMs; vLLM issues *one* merged GEMM and then
+its own fused `silu_and_mul`, so the reference is roughly 2x worse than production before
+any kernel is written and every ratio taken against it inherits that factor.
 
-    M=64    ours 0.0649ms  vLLM 0.0342ms  0.53x   <- we are ~2x slower
-    M=701   ours 0.1066ms  vLLM 0.1222ms  1.15x
-    M=2801  ours 0.4567ms  vLLM 0.5567ms  1.22x
+Against vLLM's real path (Arc B580, k=1024 d=3072, bf16, medians of interleaved rounds,
+2026-09-08):
 
-So the win is 1.15-1.22x at prefill widths and a ~2x *loss* at decode. A served run is
-mostly decode, and enabling fusion at every size measured flat-to-negative end to end
-(Qwen3-0.6B, 3 repeats, with and without the token gate). DEFAULT_MIN_TOKENS exists to keep
-the fused path away from the sizes where it loses; do not lower it on the strength of the
-`reference` ratios.
+    M=64    ours 22.7us   vLLM 24.6us   1.09x
+    M=701   ours 109.9us  vLLM 144.4us  1.31x
+    M=2801  ours 464.6us  vLLM 565.2us  1.22x
+
+An earlier revision of this note recorded 0.53x at M=64 and concluded the fused path loses
+badly at decode. That was a measurement artefact: the cases were timed in sequence rather
+than interleaved, so the first one absorbed the GPU's clock ramp. Interleaving the rounds
+and taking medians removes it, and the two distributions then do not overlap. **Time
+alternatives in interleaved rounds on this part; a sequential sweep charges the ramp to
+whichever case runs first.**
+
+There is still headroom rather than a finished kernel: two plain half-GEMMs with no epilogue
+at all measure 17.8us at M=64, so the fused epilogue is costing about 5us over the floor a
+perfect fusion would reach.
+
+The token gate stays because it bounds the risk at sizes nobody has measured, not because
+the fused path was shown to lose.
 
 It also takes the merged ``[2d, k]`` weight exactly as vLLM stores it. Splitting it into
 two ``[k, d]`` operands would mean a transposed copy of every MLP weight, which on a small
