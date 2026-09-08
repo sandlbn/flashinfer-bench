@@ -168,6 +168,55 @@ the Solution's `dependencies` (`"onemkl"`, `"onednn"`) and call them on the same
 Hand-write a kernel when you are fusing operations or doing something the libraries do not
 cover.
 
+## Know what you are competing with, and what winning would take
+
+A kernel is not judged against the Definition's `reference`. The reference is plain PyTorch
+and exists to decide correctness; it routinely does several passes over memory where the
+serving stack does one, so a ratio against it can overstate the win by the whole factor that
+matters. Kernels recorded at 2-12x against a reference have measured at parity or worse
+against the kernel they would actually replace. Compare against the provider baseline
+(`vllm-xpu`, `sgl-kernel-xpu`, oneDNN) -- that is what runs if yours is declined.
+
+**Substitution is not free, so a faster kernel is not automatically a win.** Resolving the
+definition, building a lookup key, checking dtypes and invoking the built kernel cost real
+time per call and do not shrink with the kernel. Measured at ~5.9us on Arc B580. A kernel
+whose total runtime is a few microseconds therefore cannot pay for its own replacement,
+however large its ratio: three times faster than a 5us kernel saves 3.3us and costs 5.9us to
+obtain. Before optimizing, ask what the kernel costs in absolute terms. Under ~10us, the win
+has to come from removing the call (fusion) rather than from making it faster.
+
+**Compare against what the access pattern allows, not against peak bandwidth.** Read the
+same bytes in the same shape the kernel is obliged to touch, and use that as the ceiling. An
+attention kernel on Arc B580 sustained 164 GB/s against a ~456 GB/s peak, which reads as a
+2.6x rewrite opportunity -- but a bare read of one KV-head slice of its
+`[pages, page_size, kv_heads, head_dim]` cache sustains 167 GB/s. The kernel was at 98% of
+its ceiling and no rewrite could recover the difference; the 2.6x was in the data layout.
+Measure the ceiling first, or you will spend rounds on a kernel that is already done.
+
+**Fusion is where the wins are, because it removes work rather than accelerating it.** You
+will not beat oneDNN at a plain matmul -- it is tuned per architecture and is already the
+path `F.linear` takes. What oneDNN cannot express is an epilogue that spans two accumulator
+lanes, so fusing an activation or a norm into the GEMM's epilogue removes a kernel launch
+and a full round trip through memory. Reach for oneDNN post-ops before writing a matmul.
+
+## Measuring your own kernel
+
+Getting this wrong will send you optimizing the wrong thing, and it is easy to get wrong.
+
+- **Interleave the alternatives; never time them in sequence.** A GPU that has been idle
+  ramps its clocks, so whichever case runs first absorbs the ramp. This inverted a
+  comparison outright on Arc B580: a kernel read 0.53x against its competitor timed first
+  and 1.09x when the rounds were interleaved and medians taken. Warm every case, then
+  alternate them.
+- **Put many calls inside one timed region.** Wrapping a single call in an event pair
+  charges the event and launch overhead to the measurement -- about 40us on this part, which
+  is most of the number for a short kernel and puts every decode-sized kernel on the same
+  floor. Batch until the region is milliseconds, then divide.
+- **Never block the host inside the kernel.** A `wait()` after every submit turned a 2.21x
+  oneDNN kernel into 0.44x, and the structure was blamed before the block was found. The
+  framework's queue already orders work and the caller synchronizes when it needs the
+  result.
+
 ## Correctness requirements
 
 - Validate shapes and dtypes with `TVM_FFI_ICHECK*` before touching data.
@@ -176,6 +225,14 @@ cover.
   `sycl::ext::oneapi::bfloat16` is `bfloat16`.
 - Accumulate in `float` even when inputs and outputs are half precision, unless the
   Definition says otherwise.
+- **Assume your output buffers may alias your inputs.** Destination-passing callers pass
+  `output is hidden_states` and `residual_out is residual` deliberately: the serving
+  adapter does this because allocating a fresh pair per call cost more than the kernel
+  saved. Aliasing is safe only if each work-item reads every index it needs before writing
+  any index another work-item might still read -- in practice, read index i of all inputs,
+  then write index i of all outputs, with the group reduction as the barrier between the
+  passes. If your kernel cannot honour that, say so in the Solution description; nothing in
+  the interface enforces it.
 
 ## Portability
 
