@@ -133,7 +133,9 @@ a win that cannot exist. Watch for a reference that does *more work than product
 gated-MLP reference computing two separate projections where the server issues one merged
 GEMM is ~2x worse before any kernel is written, and every ratio measured against it inherits
 that factor. Take the ratio from a baseline solution wrapping the provider kernel
-(`add-baselines --providers vllm-xpu`), not from the reference column.
+(`add-baselines --providers vllm-xpu`), not from the reference column —
+`scripts/rank_vs_provider.py` computes exactly that from the traces already on disk, and
+subtracts the dispatch cost so the output is a deployment decision rather than a ratio.
 
 **Compare the kernel's runtime against what dispatch costs, before substituting at all.**
 Measured on Arc B580 (fp16 RMSNorm, 64x1536, wall-clock over 3000 calls, 2026-09-08):
@@ -280,6 +282,10 @@ them at this width yet, and the sibling's provenance is not theirs.
 ## Sources
 
 - `scripts/measure_serving_win.py` — the harness
+- `scripts/rank_vs_provider.py` — ranks solutions against the provider kernel rather than
+  the definition's reference, and subtracts what a substitution costs. Run it before
+  choosing what to deploy; a definition absent from its output has no provider baseline to
+  be judged against, which is not the same as winning
 - `scripts/fill_serving_gaps.py` — turns its `no-solution` reports into definitions
 - `/find-kernel-gaps` — the complementary detector: hot ops no definition covers
 - `/profile-intel` — where the share comes from
