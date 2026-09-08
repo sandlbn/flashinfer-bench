@@ -31,6 +31,9 @@ def _apply_table_dir() -> Path:
 
 logger = logging.getLogger(__name__)
 
+_PROVIDER_MARKERS = ("vllm_xpu", "sgl_kernel_xpu", "vllm_", "flashinfer_wrapper")
+"""Solution-name markers for a kernel the serving stack would run if we declined."""
+
 
 def _targets_this_machine(solution) -> bool:
     """Whether this solution declares the backend we are actually running on.
@@ -232,8 +235,13 @@ class ApplyTable:
             config = config_registry.get(def_name)
             if config is None:
                 continue
-            per_key, ranked = cls._sweep_def(
-                trace_set, def_name, config.max_atol, config.max_rtol, hardware_id
+            per_key, ranked, rejected_any = cls._sweep_def(
+                trace_set,
+                def_name,
+                config.max_atol,
+                config.max_rtol,
+                hardware_id,
+                config.min_gain_us / 1000.0,
             )
 
             # Build index
@@ -243,11 +251,97 @@ class ApplyTable:
                 bucket = index.setdefault(def_name, {})
                 bucket[key] = t.solution
 
-            # Build def_best
-            if ranked:
+            # Build def_best.
+            #
+            # `use_def_best` extends the overall winner to shapes that were never measured.
+            # That is interpolation between measured points when every measured point was
+            # worth substituting, but an unjustified guess once some were explicitly judged
+            # not to be: the shapes it would cover are the ones most like the rejected ones.
+            # Leaving it unset makes those calls fall back, which is what the rejection
+            # asked for.
+            if ranked and not rejected_any:
                 def_best[def_name] = ranked[0][0]
+            elif rejected_any:
+                logger.info(
+                    "%s: no def_best -- some keys do not clear the substitution cost, so "
+                    "extending a winner to unmeasured shapes is not justified.",
+                    def_name,
+                )
 
         return cls(digest=digest, index=index, def_best=def_best)
+
+    @classmethod
+    def _drop_keys_not_worth_substituting(
+        cls,
+        def_name: str,
+        per_key: Dict[ApplyKey, Trace],
+        traces: List[Trace],
+        builder: Any,
+        min_gain_ms: float,
+    ) -> Dict[ApplyKey, Trace]:
+        """Keep only keys where our winner beats the provider by more than dispatch costs.
+
+        The provider baseline is what runs when we decline, so it -- not the definition's
+        reference -- is what a substitution has to beat. And it has to beat it by more than
+        the substitution costs: a kernel three times faster than the provider's still loses
+        the exchange when the kernel is 5us and dispatch is 6us.
+
+        Keys with no provider trace are kept. There is nothing to compare against, and
+        dropping them would silently disable substitution for every definition whose
+        baseline has simply not been generated yet.
+        """
+        provider_latency: Dict[ApplyKey, float] = {}
+        for t in traces:
+            solution = t.solution or ""
+            if not any(f"__{p}" in solution for p in _PROVIDER_MARKERS):
+                continue
+            latency = t.evaluation.performance.latency_ms
+            if not latency:
+                continue
+            key = builder.build_from_workload(t.workload)
+            if latency < provider_latency.get(key, float("inf")):
+                provider_latency[key] = latency
+
+        kept: Dict[ApplyKey, Trace] = {}
+        dropped = 0
+        for key, trace in per_key.items():
+            provider = provider_latency.get(key)
+            ours = trace.evaluation.performance.latency_ms
+            if provider is None or not ours or (provider - ours) > min_gain_ms:
+                kept[key] = trace
+            else:
+                dropped += 1
+        if dropped:
+            logger.info(
+                "%s: %d of %d key(s) not indexed -- the solution does not beat the provider "
+                "kernel by the %.2fus a substitution costs.",
+                def_name,
+                dropped,
+                len(per_key),
+                min_gain_ms * 1000,
+            )
+        return kept
+
+    @staticmethod
+    def _trace_timing(trace: Trace) -> Optional[str]:
+        """Which timing methodology produced this trace's latency, if recorded."""
+        env = getattr(trace.evaluation, "environment", None)
+        libs = getattr(env, "libs", None) if env is not None else None
+        if isinstance(libs, dict):
+            return libs.get("timing")
+        return getattr(libs, "timing", None) if libs is not None else None
+
+    @staticmethod
+    def _current_timing(hardware_id: Optional[str]) -> Optional[str]:
+        """The methodology this machine measures with, so stale traces can be excluded."""
+        try:
+            from flashinfer_bench.device import default_device_type, get_accelerator
+
+            accel = get_accelerator(default_device_type())
+            devices = accel.list_devices()
+            return accel.make_timer(devices[0]).name if devices else None
+        except Exception:
+            return None
 
     @staticmethod
     def _trace_hardware(trace: Trace) -> Optional[str]:
@@ -298,7 +392,8 @@ class ApplyTable:
         max_atol: float,
         max_rtol: float,
         hardware_id: Optional[str] = None,
-    ) -> Tuple[Dict[ApplyKey, Trace], List[Tuple[str, int]]]:
+        min_gain_ms: float = 0.0,
+    ) -> Tuple[Dict[ApplyKey, Trace], List[Tuple[str, int]], bool]:
         """Sweep through traces for a definition to find optimal solutions per key.
 
         This method processes all traces for a given kernel definition, groups them
@@ -331,6 +426,23 @@ class ApplyTable:
         # built for another architecture builds and then raises on first use, inside the
         # serving engine. Dropping them leaves the definition with no entry, which falls
         # back cleanly, instead of selecting something unusable.
+        # Latencies from different timing methodologies are not comparable -- the earlier
+        # per-call event timing reported ~8x the true latency for a short kernel -- so a
+        # stale trace ranked against a fresh one manufactures a win out of the measurement
+        # change alone. Keep only what this machine's timer would produce; traces recording
+        # no methodology are kept, since most predate the field.
+        current_timing = cls._current_timing(hardware_id)
+        if current_timing and traces:
+            same_timing = [t for t in traces if cls._trace_timing(t) in (current_timing, None)]
+            if same_timing and len(same_timing) < len(traces):
+                logger.debug(
+                    "%s: ignoring %d trace(s) measured with another timing methodology",
+                    def_name,
+                    len(traces) - len(same_timing),
+                )
+            if same_timing:
+                traces = same_timing
+
         if hardware_id is not None and traces:
             # `speedup_factor` is relative to the reference on the part that produced it,
             # so ranking across parts is not a comparison -- and the winner is then a
@@ -376,6 +488,14 @@ class ApplyTable:
             ):
                 per_key[key] = t
 
+        rejected_any = False
+        if min_gain_ms > 0:
+            before = len(per_key)
+            per_key = cls._drop_keys_not_worth_substituting(
+                def_name, per_key, traces, builder, min_gain_ms
+            )
+            rejected_any = len(per_key) < before
+
         # Count wins per solution
         win_counts: Dict[str, int] = {}
         for t in per_key.values():
@@ -383,7 +503,7 @@ class ApplyTable:
                 win_counts[t.solution] = win_counts.get(t.solution, 0) + 1
 
         ranked = sorted(win_counts.items(), key=lambda kv: kv[1], reverse=True)
-        return per_key, ranked
+        return per_key, ranked, rejected_any
 
     @classmethod
     def _prewarm_aot(

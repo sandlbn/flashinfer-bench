@@ -21,6 +21,24 @@ class ApplyConfig(BaseModel):
     """The ratio of the top solutions to AOT build for each definition."""
     on_miss_policy: Literal["fallback_only", "use_def_best"] = "fallback_only"
     """The policy when a runtime ApplyKey misses the table."""
+    min_gain_us: float = Field(default=0.0, ge=0)
+    """Microseconds a solution must save over the provider baseline to be worth selecting.
+
+    Substituting a kernel is not free: resolving the definition, building the key, checking
+    dtypes and invoking the Runnable cost real time on every call, and that cost does not
+    shrink with the kernel. Measured at ~5.9us on Arc B580 against a ~5us elementwise kernel,
+    which means a solution can be several times faster than the provider's and still lose
+    the exchange.
+
+    When this is above zero, a key is indexed only if the best solution beats the best
+    provider baseline (``vllm-xpu``, ``sgl-kernel-xpu``) by more than this margin on the
+    hardware the table is built for. Keys with no provider baseline are left alone: there is
+    nothing to compare against, and refusing them would disable substitution wherever a
+    baseline simply has not been generated.
+
+    Zero disables the check, which is the default so that no existing deployment changes
+    behaviour on upgrade. Set it to the dispatch cost measured on your own part.
+    """
 
 
 class ApplyConfigRegistry(BaseModel):

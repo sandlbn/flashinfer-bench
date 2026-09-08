@@ -190,6 +190,22 @@ GEMM dominates a model the reachable headroom for everything else is small by co
 Report it as "worth +X% on this model" and follow the share: the useful next move is a family
 with a larger one, not more tuning on a small one.
 
+**Gate deployment on the margin, not the ratio.** `ApplyConfig(min_gain_us=...)` indexes a
+shape only where the solution beats the *provider* baseline by more than a substitution
+costs; `FIB_APPLY_MIN_GAIN_US` sets it in the serving integration. It is off by default
+(`0.0`) so no existing deployment changes on upgrade -- set it to the dispatch cost measured
+on your part. Without it, `apply()` deploys anything faster than the provider, including
+wins far smaller than the cost of taking them, and the run loses throughput while every
+counter reports `applied`.
+
+Two details that make it hold. Shapes are judged individually, so a family can substitute at
+prefill sizes and decline at decode sizes. And once any shape is rejected, `def_best` is
+withheld for that definition: the unmeasured shapes a miss would cover are the ones most
+like the rejected ones, so extending the surviving winner to them is exactly the wrong
+extrapolation. A definition with no provider baseline is left alone -- there is nothing to
+compare against, and refusing it would disable substitution wherever a baseline has simply
+not been generated.
+
 **Measure what the dispatch itself costs, with `--overhead-arm`.** It adds a third arm:
 patched, but pointed at an empty dataset, so every interception runs and nothing can ever
 match. That is the price of being in the path with none of the benefit, and on an elementwise

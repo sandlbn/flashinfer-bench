@@ -40,12 +40,13 @@ def _is_provider(solution_name: str) -> bool:
 
 
 def collect(
-    dataset: pathlib.Path, hardware_id: str
+    dataset: pathlib.Path, hardware_id: str, timing: Optional[str] = None
 ) -> Dict[str, Dict[Tuple[str, Optional[int]], Dict[str, float]]]:
     """{definition: {(workload, tokens): {solution: latency_ms}}} over PASSED traces here.
 
-    Only this part's traces: a latency from another device is not comparable, and mixing
-    them silently produces a ratio between two machines.
+    Only this part's traces, and only this timing methodology: a latency from another
+    device or another timer is not comparable, and mixing either silently produces a ratio
+    between two things that were never measured the same way.
     """
     out: Dict[str, Dict[Tuple[str, Optional[int]], Dict[str, float]]] = collections.defaultdict(
         lambda: collections.defaultdict(dict)
@@ -58,7 +59,15 @@ def collect(
             ev = trace.get("evaluation") or {}
             if ev.get("status") != "PASSED":
                 continue
-            if (ev.get("environment") or {}).get("hardware_id") != hardware_id:
+            env = ev.get("environment") or {}
+            if env.get("hardware_id") != hardware_id:
+                continue
+            # Latencies from different timing methodologies are not comparable: the earlier
+            # per-call event timer reported ~8x the true latency for a short kernel, so
+            # ranking a stale trace against a fresh one invents a win out of the change in
+            # measurement. Traces recording no methodology are kept; most predate the field.
+            recorded = (env.get("libs") or {}).get("timing")
+            if timing and recorded and recorded != timing:
                 continue
             latency = (ev.get("performance") or {}).get("latency_ms")
             solution = trace.get("solution")
@@ -125,7 +134,15 @@ def main() -> None:
         accel = get_accelerator(default_device_type())
         hardware_id = accel.canonical_id(accel.list_devices()[0])
 
-    data = collect(args.dataset, hardware_id)
+    timing = None
+    try:
+        from flashinfer_bench.device import default_device_type, get_accelerator
+
+        accel = get_accelerator(default_device_type())
+        timing = accel.make_timer(accel.list_devices()[0]).name
+    except Exception:
+        pass
+    data = collect(args.dataset, hardware_id, timing)
     dispatch_ms = args.dispatch_us / 1000.0
     rows, no_provider, only_floor = [], [], []
 
