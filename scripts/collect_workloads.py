@@ -1171,8 +1171,10 @@ def run_baseline_eval(def_files: list[Path], trace_dir: Path) -> None:
             str(trace_dir),
             "--definitions",
             def_name,
-            "--solutions",
-            "baseline",
+            # No solution is *named* "baseline" -- "baseline" is an author. Passing it to
+            # --solutions (which filters on Solution.name) matched nothing, so `run`
+            # evaluated zero solutions, wrote no trace, and exited 0; this function then
+            # reported "All workloads PASSED" having measured nothing.
             "--save-results",
             "--warmup-runs",
             "3",
@@ -1209,14 +1211,19 @@ def run_baseline_eval(def_files: list[Path], trace_dir: Path) -> None:
                 for f in failed[:10]:
                     print(f"    uuid={f['workload']} status={f['status']}")
                 all_passed = False
+            elif passed == 0:
+                print("  ERROR: the trace file exists but contains no evaluated workload.")
+                all_passed = False
             else:
                 print(f"  All {passed} workloads PASSED ✓")
                 print(f"  Trace written to: {out_trace}")
         else:
-            print(f"  WARNING: No trace output found at {out_trace}")
+            print(f"  ERROR: No trace output found at {out_trace}")
             print(f"  flashinfer-bench stdout:\n{stdout[:2000]}")
-            if result.returncode != 0:
-                all_passed = False
+            # A missing trace means nothing was evaluated. That is a failure of this step
+            # whatever the exit code says -- treating a zero exit as success here is what
+            # let a run that measured nothing satisfy the "all workloads PASSED" gate.
+            all_passed = False
 
     if not all_passed:
         print(

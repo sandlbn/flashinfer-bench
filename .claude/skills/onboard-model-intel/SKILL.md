@@ -143,7 +143,7 @@ flashinfer-bench validate-references --local tmp/flashinfer-trace \
 | --- | --- | --- |
 | `PASSED` | Agrees across devices | Continue |
 | `MISMATCH` | The PyTorch reference itself differs on XPU | Reduce to a minimal repro, run `run()` on `cpu` and `xpu:0`, `torch.testing.assert_close`, report to pytorch/pytorch with `torch.__version__` and the driver version. Do not work around it |
-| `UNSUPPORTED_DTYPE` | The part lacks a dtype the definition needs | Pick a different target; Battlemage has no FP8 |
+| `UNSUPPORTED_DTYPE` | The part supports the dtype neither natively nor by emulation | Pick a different target. Note Battlemage *does* run FP8, emulated — it is not refused here |
 | `NO_WORKLOAD` | Nothing to run it on | Attach a workload (Phase 2) |
 | `TARGET_ERROR` | The reference uses an op with no XPU implementation | Rewrite it in primitive ops and re-run |
 | `BUILD_ERROR` / `BASELINE_ERROR` | A solution or baseline failed to build | Phase 5; not a reference problem |
@@ -170,10 +170,12 @@ unitrace --device-timing --chrome-kernel-logging \
 `--output` is required and must be a directory the script can create: it calls
 `mkdir(parents=True, exist_ok=True)` on it, so `/dev/null` raises `FileExistsError` before
 any profiling happens. The definitions written there are a by-product of this pass -- the
-profile is what you came for -- but they are the same ones Path A produces, so keep them.
+profile is what you came for -- but they are the same ones Path C produces, so keep them.
 
 Aggregate kernel names into op families and rank by share of device time. Rank by
-**share × expected speedup**, not by either alone: a 3x win on 2% of time is worth less than
+**recoverable time** -- `share x (1 - 1/speedup)`, the formula `/profile-intel` uses and
+`scripts/profile_intel.py` computes -- not by share or speedup alone: a 3x win on 2% of
+time is worth less than
 a 1.15x win on 50%.
 
 Two validity gates:

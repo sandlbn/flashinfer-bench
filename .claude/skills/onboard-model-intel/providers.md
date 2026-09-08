@@ -93,17 +93,21 @@ grep -ohE '"[a-z_0-9]+\(' tmp/sgl-kernel-xpu/src/torch_extension_sycl.cc \
   | sed 's/"//;s/(//' | sort -u
 ```
 
-Ops that map onto dataset op_types nothing is wired for:
+To see which of those already have a registry entry — and therefore which are still worth
+wiring — ask the registry rather than reading a list that ages:
 
-| Op | Maps to |
-| --- | --- |
-| `mha_fwd` | `gqa_paged`, `gqa_ragged` |
-| `flash_mla_decode`, `flash_mla_prefill` | `mla_paged`, `mla_ragged` |
-| `flash_mla_sparse_decode`, `flash_mla_sparse_prefill` | `dsa_paged` |
-| `gdn_attention` | `gdn` |
-| `top_k_top_p_sampling_from_probs`, `top_k_renorm_probs`, `top_p_renorm_probs` | `sampling` |
-| `sgemm_lora_a_fwd`, `sgemm_lora_b_fwd` | `gemm` |
-| `store_cache`, `transfer_kv_per_layer`, `transfer_kv_all_layer` | KV-cache movement |
+```bash
+python -c "
+from flashinfer_bench.integration.xpu_kernels import REGISTRY
+import collections
+for op, n in sorted(collections.Counter(k.op_type for k in REGISTRY).items()):
+    print(f'{op:12} {n}')
+"
+```
+
+Families with no entry at that moment are the backlog. KV-cache movement
+(`store_cache`, `transfer_kv_per_layer`, `transfer_kv_all_layer`) has no dataset op_type at
+all, so it needs a definition before a kernel can bind to anything.
 
 ### `mha_fwd` covers the paged KV cache
 
@@ -124,8 +128,7 @@ definition — conflating them makes the paged path look unreachable when it is 
 The wrapper's real work is translating paging representations: FlashInfer-style
 `kv_indptr`/`kv_indices` against `mha_fwd`'s `page_table` matrix plus `cu_seqlens_k`. That is
 exactly the kind of impedance mismatch that runs cleanly and computes the wrong thing —
-verify numerically against the definition's reference before registering it. **Not yet
-done; open item.**
+verify numerically against the definition's reference before registering it.
 
 ### What is actually built, measured on Arc B580
 
@@ -169,142 +172,33 @@ Three things the wrapper has to get right, none of which fail loudly:
 Causal alignment needs no adjustment: the kernel's `causal=True` is bottom-right aligned,
 which is what the reference's `delta = kv_len - q_len` computes. Verified to 3.3e-03.
 
-### What is still not wireable
+### The causal x lse limitation, and how it was worked around
 
-- **`gqa_ragged`: all ten definitions are causal**, and the XPU build refuses
-  `return_softmax_lse` with causal masking (`return_softmax_lse is only supported without
-  causal/local masking`). The output alone is correct, but the definitions declare `lse` as
-  an output, so nothing can bind. Recomputing `lse` in the wrapper means materialising the
-  attention matrix, which costs more than the kernel saves.
-- **`gqa_paged` prefill (11 defs)**: same limitation -- they are causal and declare `lse`.
-- **21 `ps1` definitions**: page size 1 is rejected outright.
-- **`fp8_blockwise_scaled_mm`** (sgl): not built on XPU.
+The XPU build refuses `return_softmax_lse` together with causal masking
+(`return_softmax_lse is only supported without causal/local masking`). The attention output
+alone is correct; only `lse` is unavailable. Since most ragged/prefill definitions are causal
+*and* declare `lse` as an output, strict signature matching left them unbindable.
 
-### W4A16 is a float16 kernel, and bfloat16 is not merely a dtype swap
+The resolution is a `_no_lse` definition variant: the same operation declaring only
+`output`. Those bind, and the registry now covers `gqa_ragged`, `gqa_paged`, `mla_ragged`,
+`mla_paged`, `dsa_paged` and `gdn`. Definitions that still declare `lse` remain unbound by
+design -- recomputing it in the wrapper means materialising the attention matrix, which
+costs more than the kernel saves.
 
-`int4_gemm_w4a16` is oneDNN-backed and passes its own vendor test exactly -- **100% of
-elements within (1e-2, 1e-2)**, which `torch.testing.assert_close` enforces on every
-element, under both uniform and normal inputs.
-
-In **bfloat16 the same kernel matches only 81-92%** of elements at that tolerance. Intel's
-test (`tests/test_int4_gemm_onednn.py`) parametrizes `dtype=[torch.float16]` and nothing
-else, so bfloat16 is untested upstream, not merely unmeasured here.
-
-The reason is arithmetic: bfloat16 has 7 mantissa bits against float16's 10, and the
-dequantised value `(nibble - zero) * scale` therefore loses three bits -- of a weight that
-only carried four. Real AWQ and GPTQ checkpoints are float16, so a W4A16 definition should
-declare float16 and a bfloat16 one is asking for something the ecosystem does not ship.
-
-Declaring it correctly took the same kernel from failing a 95% gate to **8.5x-27x** against
-the definition's reference.
-
-**The general lesson:** when a vendor kernel misses a correctness gate, read the vendor's
-own test before touching the gate. It states the conditions the kernel is warranted under
--- dtype above all -- and a definition outside those conditions is the thing that is wrong.
-
-### Contract for `int4_gemm_w4a16`
-
-Established by measurement, since none of it is documented:
-
-- `B_packed [K/8, N]` int32, **column-major** -- the "NT format" its error message demands
-  is literally `strides[-2] == 1`, so pass `packed.t().contiguous().t()`
-- `B_scale [K/G, N]`, `B_zeros [K/G, N/8]` int32, eight zero-point nibbles packed along N
-- dequantisation is `(nibble - zero) * scale`, with **no** offset; the `+1` convention some
-  GPTQ exporters use disagrees by ~8.5e-2 relative
-- internally it uses oneDNN's grouped-scale API along K -- the one that is silently wrong
-  for f8 operands (see `/optimize-onednn`); on the s4 path it is correct
-
-### `gated_delta_rule_non_spec`: resolved, and why `gdn` still does not bind
-
-The kernel is correct and the mapping is fully established -- **matched to 3.8e-3 on output
-and 9.5e-4 on state**. It nonetheless cannot serve the dataset's `gdn_decode_*`
-definitions, for a reason that is neither side's bug.
-
-**The exact calling convention** (from `csrc/xpu/gdn_attn/gated_delta_rule.hpp:95-180`, not
-from the docs):
-
-- Pass **raw `b`**. The kernel applies `act_sigmoid` to it itself (`:143`). Passing
-  `sigmoid(b)` double-applies it. The vendor test's variable is named `ref_beta` because
-  its *reference* takes a sigmoid'd value, while the *kernel* takes the raw one -- reading
-  the test alone gets this backwards.
-- Pass **raw `a`**; the kernel computes `exp(-exp(A_log) * softplus(a + dt_bias))`.
-- **`dt_bias` must be bfloat16** ("dt_bias dtype must match core_attn_out dtype"), while
-  **`A_log` must stay float32**. The definitions declare both float32.
-- **Clone `q` and `k` before the call** -- the kernel writes to them.
-- Decode: `num_prefills=0`, `num_decodes=B`, `non_spec_query_start_loc=arange(B+1, int32)`,
-  `non_spec_state_indices_tensor=arange(B, int32)`. No chunk padding on this path.
-- State memory order is `h*(K*V) + v*K + k`, i.e. `[H, V, K]` k-last -- matching the
-  definitions.
-
-**Why it does not bind: a fusion-boundary mismatch.** The kernel L2-normalises `q` and `k`
-inside its own loop (`:159-170`, `sum += eps=1e-6`, then `q /= sqrt(sum)` and
-`q *= 1/sqrt(head_k_dim)`). The dataset's `gdn_decode_*` reference does not normalise at
-all. On CUDA the normalisation is a separate op upstream; Intel folded it into this kernel,
-so the two draw the operation boundary in different places.
-
-No wrapper can bridge it. Normalisation discards `|q|` and `|k|` entirely, so no transform
-of the inputs reproduces the unnormalised result -- and `k` enters the state update
-quadratically, so it cannot be compensated afterwards either. Checked whether the recorded
-workloads happen to be unit-norm already, which would have made the normalisation
-idempotent: they are not (norms range 0.40 to 1.60).
-
-Feeding the definition's reference L2-normalised `q`/`k` reproduces the kernel to 3.8e-3,
-which is what proves the mapping is right and the boundary is the only difference.
-
-**To use this kernel, the dataset needs a definition whose boundary includes the
-normalisation.** That is a new definition, not a wrapper. Recorded rather than worked
-around, because a baseline registered against the current definition would run cleanly and
-compute something else -- the exact failure this registry exists to prevent.
-
-Note also that `gdn_decode_qk16_v32_d128_k_last` has **no workloads**; only the `qk4_v8`
-and `qk8_v16` variants (54 each) are benchmarkable.
-
-### A signature does not prove the kernel is built
-
-`inspect.signature` reads the Python wrapper, which ships regardless of which backend was
-compiled. The XPU build is *partial*: on the same install `top_k_renorm_prob` and
-`min_p_sampling_from_probs` work while `top_p_sampling_from_probs` does not.
-
-Enumeration lies too — `dir(sgl_kernel)` gives ~190 names, `dir(torch.ops.sgl_kernel)` gives
-4, and neither is the true surface, because ops are JIT-registered on first use.
-
-**And the wrong import makes a built op look missing.** `vllm-xpu-kernels` registers into
-two namespaces: `torch.ops._C` (norms, activations, rope) and `torch.ops._xpu_C` (the
-sampler, among others). Importing `vllm_xpu_kernels._C` registers only the first, and
-`torch.ops._xpu_C.topk_topp_sampler` then raises `AttributeError: '_OpNamespace' '_xpu_C'
-object has no attribute ...` — indistinguishable from a kernel that was never compiled.
-`import vllm_xpu_kernels._xpu_C` makes the same op work. A wrapper must import the
-submodule that owns the op it calls, and a probe that concludes "not built" has to have
-imported the right one first. This cost a wrong conclusion here before it was caught.
-
-**Only a call with valid inputs proves it.** Either use the CLI:
+Check the current split rather than trusting a count here:
 
 ```bash
-flashinfer-bench providers verify --local tmp/flashinfer-trace --device xpu:0
+ls tmp/flashinfer-trace/definitions/<op_type>/ | wc -l          # total
+ls tmp/flashinfer-trace/definitions/<op_type>/*_no_lse*.json | wc -l   # output-only
 ```
 
-or call it directly before registering an entry:
+Still genuinely unavailable:
 
-```python
-import torch, sgl_kernel
-probs = torch.rand(8, 4096, device="xpu:0"); probs /= probs.sum(-1, keepdim=True)
-top_p = torch.full((8,), 0.9, device="xpu:0")
-sgl_kernel.top_p_sampling_from_probs(probs, top_p)   # raises here, not at benchmark time
-torch.xpu.synchronize()
-```
+- **Page size 1** is rejected outright by the paged kernels.
+- **`fp8_blockwise_scaled_mm`** (sgl) is not built on XPU.
 
-A registry entry for an op that is not built produces `RUNTIME_ERROR` on every workload of
-every matching definition — noisy, and easily mistaken for a wrapper bug.
-
-### Failure modes
-
-| Symptom | Cause | Fix |
-|---|---|---|
-| Build aborts citing memory | OOM guard fired | Reduce build parallelism; the guard is doing its job |
-| Build fails selecting a target | `DPCPP_SYCL_TARGET` unset or not `bmg`/`cri` | `providers install sgl-kernel-xpu --target bmg` |
-| Imports, then crashes at launch | Built for the wrong architecture | Rebuild for `capabilities().sycl_target` |
-| Nothing works on an integrated part | Not a supported target | Expected — use `vllm-xpu` or `--in-tree` |
-| `AttributeError` on an op that has a signature | Partial build | Call it to check; treat as not installed |
+This limitation is upstream, not ours: it also breaks SGLang's own DeepSeek
+`mha_return_lse` path on Intel.
 
 ## oneDNN
 

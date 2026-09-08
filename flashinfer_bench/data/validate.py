@@ -133,6 +133,10 @@ class ScannedSolution:
     against the JSON's `author` reports a mismatch on a correctly written file.
     """
 
+    path_encodes_op_type: bool = True
+    """False for `author/definition/solution.json`, where the middle segment is a
+    definition name rather than an op_type."""
+
 
 @dataclass
 class ScannedTrace:
@@ -272,12 +276,20 @@ def scan_dataset(dataset_root: Path) -> DatasetIndex:
                 continue
             solution_name = Path(filename).stem
             solution, error = _load_json(Solution, path)
+            path_encodes_op_type = True
             if not definition_name:
                 # The solution states which definition it implements; trust that over the
                 # filename, which only conventionally starts with the definition's name.
                 definition_name = (
                     getattr(solution, "definition", "") or solution_name.split("__")[0]
                 )
+                # The 3-part layout is written two ways: `role/op_type/file` by
+                # add-baselines, and `author/definition/file` by the Triton-to-XPU porter.
+                # The middle segment therefore only sometimes names an op_type, and reading
+                # it as one reported a mismatch on every ported solution. The definition
+                # itself is checked below, so nothing is lost by not re-deriving it here.
+                if op_type == definition_name:
+                    path_encodes_op_type = False
             index.solutions.setdefault(definition_name, []).append(
                 ScannedSolution(
                     author=author,
@@ -288,6 +300,7 @@ def scan_dataset(dataset_root: Path) -> DatasetIndex:
                     solution=solution,
                     error=error,
                     path_encodes_author=len(relative.parts) == 4,
+                    path_encodes_op_type=path_encodes_op_type,
                 )
             )
 
@@ -453,7 +466,10 @@ def check_layout(
                     message=f"solution name mismatch: path '{solution_entry.solution_name}', JSON '{solution.name}'",
                 )
             )
-        if solution_entry.op_type != definition_entry.op_type:
+        if (
+            solution_entry.path_encodes_op_type
+            and solution_entry.op_type != definition_entry.op_type
+        ):
             messages.append(
                 CheckMessage(
                     level="error",

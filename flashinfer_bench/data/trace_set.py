@@ -142,7 +142,9 @@ class TraceSet:
         return self.root / "blob" / "workloads"
 
     @classmethod
-    def from_path(cls: type[TraceSet], path: Optional[str] = None) -> TraceSet:
+    def from_path(
+        cls: type[TraceSet], path: Optional[str] = None, allow_create: bool = False
+    ) -> TraceSet:
         """Load a TraceSet from a directory structure.
 
         Loads a complete TraceSet by scanning the directory structure for:
@@ -172,8 +174,17 @@ class TraceSet:
         """
         path = Path(path) if path else get_fib_dataset_path()
 
-        # Create the path if it doesn't exist
-        path.mkdir(parents=True, exist_ok=True)
+        # Only a writer may bring a dataset into existence. Creating one on read turned a
+        # mistyped `--local` into an empty TraceSet, and every command downstream then
+        # reported success over zero definitions -- "Benchmark run complete. Results
+        # saved.", "0 ok, 0 warning, 0 error" -- while leaving a stray directory behind.
+        if not path.exists():
+            if not allow_create:
+                raise FileNotFoundError(
+                    f"Dataset path does not exist: {path}. Pass allow_create=True if this "
+                    "is meant to create a new dataset."
+                )
+            path.mkdir(parents=True, exist_ok=True)
 
         trace_set = cls(root=path)
 
@@ -486,8 +497,7 @@ class TraceSet:
         ]
         if len(baseline_solutions) == 0:
             raise ValueError(
-                f"No baseline solution from author {baseline_author!r} "
-                f"for definition {def_name!r}"
+                f"No baseline solution from author {baseline_author!r} for definition {def_name!r}"
             )
         if len(baseline_solutions) > 1:
             raise ValueError(

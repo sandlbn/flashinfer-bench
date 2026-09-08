@@ -325,12 +325,14 @@ def run_eval(def_name: str, trace_dir: Path) -> bool:
         str(trace_dir),
         "--definitions",
         def_name,
-        "--solutions",
-        "baseline",
+        # "baseline" is an author, not a solution name, and --solutions filters on
+        # Solution.name -- so passing it matched nothing and `run` evaluated zero
+        # solutions while still exiting 0.
+        "--save-results",
     ]
     result = subprocess.run(cmd)
     if result.returncode != 0:
-        log(f"WARNING: eval exited {result.returncode}")
+        log(f"ERROR: eval exited {result.returncode}")
         return False
     return True
 
@@ -346,13 +348,22 @@ def push_trace(pr_num: int, def_name: str, op_type: str, trace_dir: Path) -> Non
 
     api = HfApi()
 
-    # flashinfer-bench writes traces to traces/{op_type}/{def_name}.jsonl
-    trace_path = trace_dir / "traces" / op_type / f"{def_name}.jsonl"
-    if not trace_path.exists():
-        log(f"WARNING: trace not found at {trace_path}, skipping")
-        return
+    # Traces are sharded by the solution's author: traces/{author}/{op_type}/{def}.jsonl
+    # (TraceSet.save). Reading traces/{op_type}/{def}.jsonl -- the layout this used to
+    # assume -- never matched, so this step logged "trace not found" and returned, and the
+    # PR was reported complete without its baseline trace.
+    candidates = sorted((trace_dir / "traces").glob(f"*/{op_type}/{def_name}.jsonl"))
+    if not candidates:
+        log(f"ERROR: no trace found under {trace_dir / 'traces'}/*/{op_type}/{def_name}.jsonl")
+        raise SystemExit(1)
 
-    lines = [l for l in trace_path.read_text().splitlines() if l.strip()]
+    lines = [
+        line
+        for path in candidates
+        for line in path.read_text().splitlines()
+        if line.strip()
+    ]
+    trace_path = candidates[0]
     log(f"Pushing trace ({len(lines)} entries) to PR #{pr_num} ...")
 
     result = api.create_commit(

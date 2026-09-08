@@ -40,9 +40,11 @@ existing kernel optimises the symptom.
 
 ## Where a kernel can come from, in order
 
-1. **`sgl-kernel-xpu` `gdn_attention`** — the only Intel state-space kernel that exists.
-   Wire it as a baseline first (`/onboard-model-intel` Phase 5); it may cover your case
-   outright.
+1. **A registered provider kernel** — `sgl-kernel-xpu`'s `gdn_attention`, and vllm-xpu's
+   `gated_delta_rule_non_spec`, which is bound to `gdn` against the `_l2norm` definition
+   variants. Add them as baselines first (`/onboard-model-intel` Phase 5); one may cover
+   your case outright. Ask the registry for what is bound today rather than trusting this
+   list.
    ```bash
    grep -ohE '"[a-z_0-9]*gdn[a-z_0-9]*\(' tmp/sgl-kernel-xpu/src/torch_extension_sycl.cc
    ```
@@ -90,7 +92,7 @@ Same gates as any other kernel:
 
 ```bash
 flashinfer-bench validate-references --local tmp/flashinfer-trace --device xpu:0 --definitions <name>
-flashinfer-bench add-baselines --local tmp/flashinfer-trace --providers sgl-kernel-xpu --definitions <name>
+flashinfer-bench add-baselines --local tmp/flashinfer-trace --providers vllm-xpu,sgl-kernel-xpu --definitions <name>
 flashinfer-bench run --local tmp/flashinfer-trace --definitions <name> --save-results
 ```
 

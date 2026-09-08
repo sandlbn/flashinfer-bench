@@ -133,7 +133,7 @@ scale. Partial accumulation would have given 384 or 512.
 Grouped along N is **also wrong**, in a way a single-element check does not reveal: with
 `groups {1, 128}` over N, 30 of 40 sampled output elements are wrong, `C[0,0]` among the
 ten that happen to be right. Checking one element, or checking with a uniform scale, passes
-a broken configuration -- both mistakes were made here before the sweep above was written.
+a broken configuration. Both are easy to make: the sweep above exists to stop them.
 **Verify a scale configuration with varying values across many output positions**, never a
 constant at one corner.
 
@@ -323,7 +323,7 @@ onednn_runtime  3.12.3+6db5f1ba860c
 A minor-version gap like this makes every ratio cross-library rather than a kernel result.
 Check it before reporting a GEMM number, not after.
 
-`flashinfer-bench` now records both in `environment.libs` and logs a warning when they
+`flashinfer-bench` records both in `environment.libs` and logs a warning when they
 differ. On a mismatch, either point `FIB_ONEDNN_DIR` at a matching build or state explicitly that
 the comparison spans two libraries. To build a specific release:
 

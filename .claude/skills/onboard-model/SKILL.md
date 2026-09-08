@@ -32,7 +32,7 @@ fields in both PR bodies.
 ## Phase 1: Discover and classify
 
 ```bash
-/discover-models --model-name {model_slug} --hf-repo-id {hf_repo_id} \
+/discover-models   # takes no arguments; it reads the manifest and writes back to it
                  --manifest tmp/onboard_{model_slug}_{date}.json
 ```
 

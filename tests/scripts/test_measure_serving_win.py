@@ -98,9 +98,31 @@ class TestRootCause:
         assert "out of memory" in cause
         assert "See root cause above" not in cause
 
-    def test_deduplicates_repeated_worker_lines(self):
+    def test_deduplicates_and_strips_the_worker_prefix(self):
+        """The cause is the exception, not the log line that carried it."""
         line = "(EngineCore pid=1) ValueError: unsupported quantization"
-        assert msw._root_cause("\n".join([line] * 5)) == line.strip()
+        assert msw._root_cause("\n".join([line] * 5)) == "ValueError: unsupported quantization"
+
+    def test_traceback_frames_do_not_outrank_the_exception(self):
+        """Frames come after the exception in the text; taking the last match picked them.
+
+        The reported cause was then a random line of someone else's source.
+        """
+        output = "\n".join(
+            [
+                "(EngineCore pid=1) ERROR [core.py:1385] Traceback (most recent call last):",
+                '(EngineCore pid=1) ERROR [core.py:1385]   File "/x/runnable.py", line 95',
+                "(EngineCore pid=1) ERROR [core.py:1385]     ret = self._callable(*args)",
+                "(EngineCore pid=1) ERROR [core.py:1385]           ^^^^^^^^^^^^^^^^^^^^^",
+                "(EngineCore pid=1) RuntimeError: CUDA is not available; Triton kernel "
+                "requires CUDA.",
+                "(EngineCore pid=1)   rmsnorm: 293 call(s), 5 applied (1.7%)",
+                "(EngineCore pid=1)   detail: {'rmsnorm unsupported 3d': 288}",
+            ]
+        )
+        assert msw._root_cause(output) == (
+            "RuntimeError: CUDA is not available; Triton kernel requires CUDA."
+        )
 
     def test_no_recognisable_error_yields_empty_so_caller_falls_back(self):
         assert msw._root_cause("INFO all good\nINFO done") == ""

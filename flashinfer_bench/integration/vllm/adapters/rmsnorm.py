@@ -95,12 +95,19 @@ class RMSNormAdapter:
             # [tokens, hidden] that costs more than the kernel saves: measured on Arc B580
             # at 4096x1024, the kernel alone is 54.5us against vLLM's 103.9us, and the
             # recomputation takes it to 115.8us -- a 2.6x win turned into a loss.
-            missed = False
+            # This fallback must NOT run `orig`. vLLM's fused kernel is in place: it
+            # overwrites `x` with the norm and `residual` with the sum. Running it here
+            # would consume both buffers, and the second attempt below would then dispatch
+            # on already-normed data -- computing rmsnorm(norm(x+r) + (x+r)) and returning a
+            # corrupted residual stream, while the counter reported "applied". On a double
+            # miss it also ran `orig` twice per call, which is real work charged to every
+            # call the family makes. Defer the single `orig` call to the end.
+            missed_residual = False
 
-            def _miss(**_kwargs):
-                nonlocal missed
-                missed = True
-                return _fallback()
+            def _miss_residual(**_kwargs):
+                nonlocal missed_residual
+                missed_residual = True
+                return None
 
             # In-place, exactly as vLLM's own kernel is: it overwrites `input` with the
             # norm and `residual` with the sum, and its callers are written against that.
@@ -119,27 +126,35 @@ class RMSNormAdapter:
                     "output": out,
                     "residual_out": residual_out,
                 },
-                fallback=_miss,
+                fallback=_miss_residual,
             )
-            if not missed:
+            if not missed_residual:
                 stats.record("fused_add_rmsnorm", "applied", f"h{hidden}+res")
                 # The writes landed in the caller's own storage through the views, so hand
                 # back the originals rather than the flattened aliases.
                 return x, residual
 
-            # No two-output solution here. The single-output one is still worth trying, but
-            # only where the recomputation is cheap relative to the kernel -- which it is
-            # not at prefill widths, so this stays a fallback rather than the default path.
-            missed = False
+            # No two-output solution. The single-output one is still worth trying -- the
+            # buffers are untouched, because the fallback above deliberately did nothing --
+            # but only where recomputing `x + residual` is cheap relative to the kernel,
+            # which it is not at prefill widths. So this stays a fallback, not the default.
+            missed_single = False
+
+            def _miss_single(**_kwargs):
+                nonlocal missed_single
+                missed_single = True
+                return None
+
             out = apply(
                 f"fused_add_rmsnorm_h{hidden}",
                 kwargs={"hidden_states": xf, "residual": rf, "weight": weight},
-                fallback=_miss,
+                fallback=_miss_single,
             )
-            stats.record("fused_add_rmsnorm", "no-solution" if missed else "applied", f"h{hidden}")
+            if missed_single:
+                stats.record("fused_add_rmsnorm", "no-solution", f"h{hidden}")
+                return _fallback()  # the one and only call into vLLM's in-place kernel
+            stats.record("fused_add_rmsnorm", "applied", f"h{hidden}")
             if isinstance(out, tuple):
-                return out
-            if missed:
                 return out
             return out.view(shape), (xf + rf).view(shape)
 

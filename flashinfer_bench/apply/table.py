@@ -223,6 +223,7 @@ class ApplyTable:
             The newly built apply table.
         """
         digest = cls._digest(trace_set, config_registry)
+        hardware_id = cls._current_hardware_id()
 
         index: Dict[str, Dict[ApplyKey, str]] = {}
         def_best: Dict[str, str] = {}
@@ -231,7 +232,9 @@ class ApplyTable:
             config = config_registry.get(def_name)
             if config is None:
                 continue
-            per_key, ranked = cls._sweep_def(trace_set, def_name, config.max_atol, config.max_rtol)
+            per_key, ranked = cls._sweep_def(
+                trace_set, def_name, config.max_atol, config.max_rtol, hardware_id
+            )
 
             # Build index
             for key, t in per_key.items():
@@ -246,9 +249,55 @@ class ApplyTable:
 
         return cls(digest=digest, index=index, def_best=def_best)
 
+    @staticmethod
+    def _trace_hardware(trace: Trace) -> Optional[str]:
+        """Canonical part id a trace was measured on.
+
+        `hardware_id` is the canonical field, but traces recorded before it existed carry
+        only the raw vendor string, so fall back to canonicalizing that. Returns None when
+        the trace records neither, which the caller treats as "unknown, keep" rather than
+        "foreign, drop".
+        """
+        env = getattr(trace.evaluation, "environment", None)
+        if env is None:
+            return None
+        recorded = getattr(env, "hardware_id", None)
+        if recorded:
+            return recorded
+        raw = getattr(env, "hardware", None)
+        if not raw:
+            return None
+        from flashinfer_bench.device import canonicalize_device_name
+
+        return canonicalize_device_name(raw)
+
+    @staticmethod
+    def _current_hardware_id() -> Optional[str]:
+        """Canonical id of the device this process will dispatch on, if determinable.
+
+        Returns None when it cannot be established, in which case ranking stays unfiltered
+        -- the previous behaviour -- rather than silently selecting nothing.
+        """
+        try:
+            from flashinfer_bench.device import default_device_type, get_accelerator
+
+            device_type = default_device_type()
+            accelerator = get_accelerator(device_type)
+            devices = accelerator.list_devices()
+            if not devices:
+                return None
+            return accelerator.canonical_id(devices[0])
+        except Exception:
+            return None
+
     @classmethod
     def _sweep_def(
-        cls, trace_set: TraceSet, def_name: str, max_atol: float, max_rtol: float
+        cls,
+        trace_set: TraceSet,
+        def_name: str,
+        max_atol: float,
+        max_rtol: float,
+        hardware_id: Optional[str] = None,
     ) -> Tuple[Dict[ApplyKey, Trace], List[Tuple[str, int]]]:
         """Sweep through traces for a definition to find optimal solutions per key.
 
@@ -274,6 +323,45 @@ class ApplyTable:
             - List of (solution_name, win_count) pairs sorted by wins
         """
         traces = trace_set.filter_traces(def_name, max_atol, max_rtol)
+
+        # Rank only what was measured on this machine. `speedup_factor` is relative to the
+        # reference on the hardware that produced it, so comparing across parts is not a
+        # comparison at all -- and the winner is then a solution that cannot run here: a
+        # CUDA one fails to build and every call silently falls back, while a Triton one
+        # built for another architecture builds and then raises on first use, inside the
+        # serving engine. Dropping them leaves the definition with no entry, which falls
+        # back cleanly, instead of selecting something unusable.
+        if hardware_id is not None and traces:
+            # `speedup_factor` is relative to the reference on the part that produced it,
+            # so ranking across parts is not a comparison -- and the winner is then a
+            # solution that cannot run here: a CUDA one fails to build and every call
+            # falls back silently, while a Triton one built for another architecture
+            # builds and then raises on first use, inside the serving engine.
+            # A trace recording no hardware at all is ambiguous, so it is kept; only one
+            # that names a different part is dropped.
+            same_part = [t for t in traces if cls._trace_hardware(t) in (hardware_id, None)]
+            dropped = len(traces) - len(same_part)
+            if dropped and same_part:
+                logger.debug(
+                    "%s: ignoring %d trace(s) from other hardware when ranking for %s",
+                    def_name,
+                    dropped,
+                    hardware_id,
+                )
+                traces = same_part
+            elif dropped:
+                # Nothing was measured here at all. Refusing outright would leave the
+                # definition with no entry on a dataset never benchmarked on this part, so
+                # keep them and say so -- the selected solution may not run here.
+                logger.warning(
+                    "%s: no traces from %s; ranking %d trace(s) measured on other "
+                    "hardware. The selected solution may not run here -- benchmark this "
+                    "definition on this device to fix it.",
+                    def_name,
+                    hardware_id,
+                    len(traces),
+                )
+
         builder = ApplyKeyFactory.specialize(trace_set.definitions[def_name])
 
         # Pick the trace with the highest speedup_factor for each key
@@ -371,6 +459,9 @@ class ApplyTable:
             SHA256 hash digest as a hexadecimal string.
         """
         trace_set_dict = trace_set.to_dict()
+        # The table now depends on which part it was built for, so a cached one from
+        # another machine (or another GPU in this one) must not be reused.
+        trace_set_dict["_hardware_id"] = cls._current_hardware_id()
         for definition in trace_set_dict["definitions"].values():
             for drop in ("description", "tags", "reference", "constraints"):
                 definition.pop(drop, None)

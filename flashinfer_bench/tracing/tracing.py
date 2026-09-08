@@ -82,7 +82,7 @@ def enable_tracing(
     ...         # Tracing with config_b (config_a is paused)
     ...     # Back to config_a
     """
-    trace_set = TraceSet.from_path(dataset_path)
+    trace_set = TraceSet.from_path(dataset_path, allow_create=True)
     runtime = TracingRuntime(trace_set, tracing_config)
     runtime.start()
     return runtime

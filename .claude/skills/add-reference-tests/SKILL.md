@@ -59,7 +59,7 @@ Adding a template is a `build()` branch in that script keyed on the signature. P
 hand-writing, so the next definition of the same shape is free.
 
 **Hand-writing, when no template fits:** copy the nearest const-axis match rather than
-starting blank — 116 of these files exist and are near-identical by op_type.
+starting blank — the reference tests (count with `ls tests/references/ | wc -l`) exist and are near-identical by op_type.
 
 ```bash
 ls tmp/flashinfer-trace/tests/references/test_{op_type}_*.py
@@ -71,7 +71,7 @@ Then update the module constants, the definition name, the shapes, and the toler
 
 This is the failure the test exists to prevent: a test that validates a function which
 happens to be correct while the definition ships a different one. Load the reference from
-the JSON, which is what 71 of the existing files do:
+the JSON, which is what most of the existing files do:
 
 ```python
 import math
@@ -173,7 +173,7 @@ independent ground truth that exists there — `vllm-xpu-kernels`' `rms_norm`,
 `fused_add_rms_norm` and `silu_and_mul` for norms and activations, and `F.linear` against the
 reference's `A @ B.T` for GEMM.
 
-Hand-written tests copied from the existing 116 do **not**: they `import flashinfer` at module
+Hand-written tests copied from the existing ones do **not**: they `import flashinfer` at module
 scope, so on a box without CUDA `pytest tests/references/` fails with collection errors
 rather than skipping. Import ground truth inside `try/except` and select the device at
 runtime, as the generated ones do.
@@ -194,6 +194,7 @@ That belongs to `onboard-model-intel` Phase 3.
 
 ## Sources
 
-- `tmp/flashinfer-trace/tests/references/` — 116 worked examples; copy the nearest
+- `tmp/flashinfer-trace/tests/references/` — the worked examples (`ls ... | wc -l` for
+  the current count); copy the nearest
 - `tmp/flashinfer/tests/` — how each FlashInfer wrapper is really called
 - `docs/flashinfer-trace/definition.mdx` — the definition schema

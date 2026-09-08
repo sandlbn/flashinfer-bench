@@ -3,7 +3,7 @@
 import argparse
 import logging
 from pathlib import Path
-from typing import List
+from typing import Any, List
 
 from flashinfer_bench.bench import Benchmark, BenchmarkConfig
 from flashinfer_bench.data import TraceSet, save_json_file, save_jsonl_file
@@ -182,7 +182,7 @@ def visualize(args: argparse.Namespace):
 
     for i, trace_set in enumerate(trace_sets):
         if len(trace_sets) > 1:
-            logger.info(f"\nDataset {i+1}:")
+            logger.info(f"\nDataset {i + 1}:")
             logger.info("-" * 40)
 
         # Print summary statistics
@@ -529,8 +529,7 @@ def add_baselines(args: argparse.Namespace) -> None:
     # outside, which is how a registry that matches nothing goes unnoticed.
     if near_misses:
         logger.warning(
-            "%d definition(s) share an op_type with a registered kernel but differ in "
-            "signature:",
+            "%d definition(s) share an op_type with a registered kernel but differ in signature:",
             len(near_misses),
         )
         for line in near_misses[:10]:
@@ -690,7 +689,7 @@ def _validate_run(args: argparse.Namespace):
 
     checks = args.checks.split(",") if args.checks else None
     outputs = args.outputs.split(",") if args.outputs else ["stdout", "json", "text"]
-    validate_dataset(
+    report = validate_dataset(
         dataset=args.dataset,
         op_types=args.op_types,
         definitions=args.definitions,
@@ -699,6 +698,49 @@ def _validate_run(args: argparse.Namespace):
         output_folder=args.output_folder,
         outputs=outputs,
     )
+
+    # This command is the documented pre-flight gate before opening a PR, so its exit code
+    # has to mean something: discarding the report made every invocation succeed, including
+    # ones that printed errors. Two distinct ways to "pass while checking nothing" are
+    # failures in their own right -- a name filter that matched no definition, and a check
+    # selection that left nothing to run -- because both look identical to a clean report.
+    entries = getattr(report, "definitions", None) or {}
+    requested = list(args.definitions or []) + list(args.op_types or [])
+    if requested and not entries:
+        logger.error(
+            "No definition matched %s. Note that --definitions here takes space-separated "
+            "names, not a comma-separated list.",
+            requested,
+        )
+        raise SystemExit(2)
+
+    errors = sum(1 for e in entries.values() if _entry_status(e) == "error")
+    if errors:
+        logger.error("%d definition(s) reported errors.", errors)
+        raise SystemExit(1)
+
+
+def _entry_status(entry: Any) -> str:
+    """Worst level across a definition's checks, however the report models them."""
+    worst = "ok"
+    checks = entry.values() if isinstance(entry, dict) else vars(entry).values()
+    for check in checks:
+        messages = None
+        if isinstance(check, dict):
+            messages = check.get("messages")
+        elif hasattr(check, "messages"):
+            messages = check.messages
+        for message in messages or []:
+            level = (
+                message.get("level")
+                if isinstance(message, dict)
+                else getattr(message, "level", None)
+            )
+            if level == "error":
+                return "error"
+            if level == "warning":
+                worst = "warning"
+    return worst
 
 
 def _validate_render(args: argparse.Namespace):

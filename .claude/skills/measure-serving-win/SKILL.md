@@ -30,8 +30,38 @@ python scripts/measure_serving_win.py --model <repo_id> --dataset tmp/flashinfer
 ```
 
 Run it with the interpreter of the environment **vLLM** is installed in, which is not
-necessarily the project venv — the child arms inherit it through `sys.executable`, and the
-integration is installed by that environment's `sitecustomize`.
+necessarily the project venv — the child arms inherit it through `sys.executable`.
+
+That environment needs a `sitecustomize.py` on its path, because the patch has to install in
+vLLM's worker process and nothing else runs there. Create it once, in that venv's
+`site-packages/`:
+
+```python
+# <vllm-venv>/lib/python3.X/site-packages/sitecustomize.py
+import os
+
+if os.environ.get("FIB_VLLM_INTEGRATION", "").lower() in ("1", "true", "yes", "on"):
+    from flashinfer_bench.integration.vllm import install_vllm_integrations
+
+    install_vllm_integrations()
+    if os.environ.get("FIB_ENABLE_APPLY", "").lower() in ("1", "true", "yes", "on"):
+        from flashinfer_bench.apply import ApplyConfig, enable_apply
+
+        enable_apply(
+            os.environ.get("FIB_DATASET_PATH"),
+            ApplyConfig(
+                max_atol=float(os.environ.get("FIB_APPLY_MAX_ATOL", "0.02")),
+                max_rtol=float(os.environ.get("FIB_APPLY_MAX_RTOL", "0.02")),
+                on_miss_policy="use_def_best",
+            ),
+        )
+```
+
+It is inert unless `FIB_VLLM_INTEGRATION` is set, so it changes nothing by existing. The
+tolerances matter: `apply()`'s default `max_rtol=1e-5` rejects every correct bf16 kernel,
+because bf16's worst-case relative spacing is 2**-7 = 0.0078. `0.02` is ~2.5 bf16 ULPs --
+loose enough to admit a correct kernel, tight enough that a wrong one (relative error
+O(0.1-1)) still fails.
 
 Baseline and patched run in **separate processes**: the patch installs at interpreter start
 and cannot be toggled within one run. Both arms must generate identical work — fix the token
@@ -134,6 +164,15 @@ is **net** of this tax, so the kernels' own contribution is larger than the head
 regression on a model with no matching definitions is not evidence about any kernel; it is
 the cost of enabling `apply()` at all. Report the two separately.
 
+**A regression with 0% substitution and a near-zero overhead arm means the lookup itself is
+the cost.** When a definition exists but cannot match — wrong dtype, a shape outside the
+recorded keys — every call runs the full resolve path (merge, key build, dtype check) and
+then falls back, whereas a definition that does not exist at all short-circuits on the first
+lookup. So "patched with a real dataset that never matches" can be materially slower than
+"patched with an empty one", and the difference is not the kernels. Read `dispatch` and
+`kernels` separately before concluding anything: a near-zero `dispatch` with a large negative
+`kernels` at 0% applied is this, not a bad kernel.
+
 **A regression at 100% substitution is a real result, not a broken measurement.** It is the
 expected consequence of how the kernels get selected: `apply()` keys its index on the exact
 axis values in the recorded workloads, and `on_miss_policy="use_def_best"` extends the winner
@@ -177,6 +216,11 @@ which it reports as not found and then exits 0 — the benchmark silently measur
 Two things it will not do silently, because both produce a definition that benchmarks
 cleanly while computing the wrong function:
 
+- **Dtype is never inherited.** A definition whose dtype differs from the one the model
+  runs in is refused by `apply()`'s dtype guard, so it never substitutes — and the counters
+  report `no-solution`, which reads as "not extracted yet" rather than "extracted in the
+  wrong dtype". Pass `--dtype` from the model config's `torch_dtype`; quantized checkpoints
+  are commonly `float16` while the sibling definition is `bfloat16`.
 - **Epsilon is never inherited.** Models differ (1e-5 and 1e-6 both occur), so a norm family
   requires `--eps` with the value that model uses (`config.json`'s `rms_norm_eps`).
 - **A width already present at another epsilon gets a suffixed name.** `{family}_h{H}` does

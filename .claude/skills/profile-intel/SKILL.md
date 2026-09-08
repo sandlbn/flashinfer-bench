@@ -85,7 +85,8 @@ worth nothing end to end, and how a "structural" MLP loss turned out to be one b
 
 Two rules the ranking does not encode:
 
-- **Rank by share × expected speedup, not share alone.** GEMM at 78% routes to a library
+- **Rank by recoverable time, not share alone** — `share x (1 - 1/speedup)`, as above.
+  GEMM at ~78% routes to a library
   already near hardware peak, so its realistic upside is fusion, not the matmul. A norm at 4%
   where the vendor kernel loses by 1.3x may be the easier win.
 - **A `transformers` profile cannot rank attention or KV-cache** the way a serving stack
@@ -97,7 +98,7 @@ Two rules the ranking does not encode:
 ### unitrace — per-kernel timing, spill, SIMD and GRF
 
 ```bash
-export PATH="$HOME/Projects/pti-gpu/tools/unitrace/build:$PATH"
+export PATH="<your pti-gpu checkout>/tools/unitrace/build:$PATH"
 unitrace -d -v -o prof python your_script.py      # -v splits by launch shape
 ```
 
@@ -112,7 +113,7 @@ Kernel, Compiled, SIMD, ..., Spill Memory Per Thread, Register File Size Per Thr
 "gemm_kernel[SIMD16 {20;1;1} {64;8;1}]", AOT, 16, ..., 0, 256
 ```
 
-**The script must end with a sync unitrace hooks, or you get an empty report.**
+**The script must end with a sync that unitrace hooks, or you get an empty report.**
 
 ```python
 torch.xpu.current_stream().synchronize()   # zeCommandListHostSynchronize -- hooked

@@ -233,6 +233,14 @@ Start with `.claude/skills/`. Each subdirectory contains a `SKILL.md` with full 
   source kernels from oneDNN / vllm-xpu-kernels / sgl-kernel-xpu / Xe-Fuse / SYCL, and
   diagnose and fix provider problems
 - **clone-repos**: Clone SGLang, FlashInfer, sgl-cookbook, and flashinfer-trace to `tmp/`
+- **discover-models**: Classify a model new to the project and record it in the onboarding
+  manifest. First step of `/onboard-model`
+- **submit-onboarding-prs**: Open the per-definition pair of PRs that publishes an
+  onboarding — PR 2 to the HuggingFace dataset, PR 1 to `docs/model_coverage.mdx`. Includes
+  the pre-flight `validate` gate
+- **measure-serving-win**: Convert a per-kernel speedup into tokens/sec under vLLM, A/B, with
+  the dispatch counters that prove the substitution happened. Run before claiming any
+  deployment win — a kernel is worth at most its share of serving device time
 
 ## Common Misunderstandings
 

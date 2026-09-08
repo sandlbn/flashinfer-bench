@@ -281,7 +281,12 @@ class PersistentSubprocessWorker:
             raise RunnerError(f"Baseline handle not found: {baseline}")
         bl = self._baselines[baseline]
 
-        solution_name = solution.name
+        # The strike count is scoped to this definition as well as this solution. A kernel
+        # with a legitimate shape restriction fails the small workloads and passes the large
+        # ones; counting strikes across every workload and definition the worker ever saw
+        # meant three small failures condemned every remaining shape, and each was written
+        # out as a failure verdict carrying a traceback from a workload it never ran.
+        solution_name = f"{bl.definition.name}::{solution.name}"
         failure_record = self._should_skip_solution(solution_name)
         if failure_record is not None:
             logger.info(
@@ -290,7 +295,13 @@ class PersistentSubprocessWorker:
             return make_eval(
                 status=failure_record.last_status,
                 device=self._device,
-                extra_msg=f"Solution skipped after {failure_record.failure_count} failures. Last error: {failure_record.last_error}",
+                extra_msg=(
+                    f"NOT RUN on this workload: skipped after "
+                    f"{failure_record.failure_count} consecutive failures on earlier "
+                    f"workloads of this definition. The status and error below are carried "
+                    f"over from the last workload that did run, not measured here. "
+                    f"Last error: {failure_record.last_error}"
+                ),
             )
 
         eval_msg = {
@@ -320,7 +331,7 @@ class PersistentSubprocessWorker:
                     if response.get("cmd") == WorkerResponse.EVALUATION.value:
                         evaluation = response["evaluation"]
                         if evaluation.status == EvaluationStatus.PASSED:
-                            self._clear_failure_record(solution.name)
+                            self._clear_failure_record(solution_name)
                         elif evaluation.status in (
                             EvaluationStatus.RUNTIME_ERROR,
                             EvaluationStatus.INCORRECT_SHAPE,
@@ -328,7 +339,7 @@ class PersistentSubprocessWorker:
                             EvaluationStatus.COMPILE_ERROR,
                         ):
                             error_text = (evaluation.log or "").strip() or "Evaluation failed"
-                            self._record_failure(solution.name, error_text, evaluation.status)
+                            self._record_failure(solution_name, error_text, evaluation.status)
                         return evaluation
                     elif response.get("cmd") == WorkerResponse.ERROR.value:
                         error_msg = response.get("error", "Unknown evaluation error")
@@ -375,7 +386,7 @@ class PersistentSubprocessWorker:
                     )
             else:
                 error_msg = f"Evaluation timeout after {cfg.timeout_seconds} seconds for solution {solution.name}"
-                self._record_failure(solution.name, error_msg, EvaluationStatus.TIMEOUT)
+                self._record_failure(solution_name, error_msg, EvaluationStatus.TIMEOUT)
                 return make_eval(
                     status=EvaluationStatus.TIMEOUT, device=self._device, extra_msg=error_msg
                 )
@@ -466,6 +477,10 @@ class PersistentRunner(Runner):
 
                 if failed_worker.restart():
                     logger.info(f"Successfully restarted persistent worker for device {device}")
+                    # The budget counts *consecutive* failures. Without clearing it, a run
+                    # long enough to accumulate the limit one isolated failure at a time
+                    # loses the device even though it recovered every time.
+                    self._device_retry_counts[device] = 0
                 else:
                     logger.error(f"Failed to restart persistent worker for device {device}")
                     if new_retry_count >= self._worker_max_retries:
@@ -549,7 +564,13 @@ class PersistentRunner(Runner):
                     )
 
         if failed_workers:
-            self._handle_failed_workers(failed_workers, increment_retries=True)
+            # A reference that raises is a property of the definition or its workload -- an
+            # op with no implementation here, a shape mismatch, an LFS pointer that was
+            # never fetched -- not evidence that the device is unhealthy. Charging it to the
+            # device's retry budget retired the device after a handful of bad definitions,
+            # and every remaining definition in the run then produced no trace at all while
+            # the command still reported success.
+            self._handle_failed_workers(failed_workers, increment_retries=False)
             if not self._has_healthy_workers():
                 raise RuntimeError("No healthy persistent workers available")
 

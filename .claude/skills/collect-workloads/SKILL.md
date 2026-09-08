@@ -56,7 +56,7 @@ tools/gpu-lock --gpus 8 --exec-timeout 10800 -- \
     --model-key  llama-4-scout-ps64 \
     --model-path /path/to/model \
     --batch-sizes 64 128 \
-    --pr-num 263 \
+    --pr-num <pr_num> \        # the open HF dataset PR to push the trace into
     [--extra-server-flag --disable-cuda-graph --enable-deterministic-inference] \
     [--trace-dir tmp/flashinfer-trace] \
     [--peer-node-addr <host>]

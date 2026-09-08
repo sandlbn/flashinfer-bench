@@ -208,9 +208,10 @@ file and pass `--body-file` rather than inlining it.
 ## Path C: Intel
 
 `scripts/extract_model_kernels_xpu.py` records shapes from module hooks on a live
-`transformers` run — no CUDA, no SGLang. Its output names are **not** dataset names and must
-be transcribed through the B2 table before anything downstream matches. Procedure:
-`/onboard-model-intel` Phase 2.
+`transformers` run — no CUDA, no SGLang. It emits dataset names directly (`rmsnorm_h{H}`,
+`gemm_n{N}_k{K}` on the B2 conventions), so no transcription step is needed. Verify the
+emitted names before staging rather than assuming either way — the listing command and the
+staging procedure are in `/onboard-model-intel` Phase 2.
 
 ## Failure table
 

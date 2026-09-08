@@ -3,7 +3,7 @@
 Rules for DPAS-backed work — GEMM, attention, quantized matmul — established by reading
 Intel's own sources rather than inferred. `architectures.md` covers everything else.
 
-Sources, all cloned by `/clone-repos`: `tmp/sycl-tla` (CUTLASS-SYCL, Intel's reference Xe
+Sources, cloned by `/clone-repos`, except `tmp/intel-triton` (the Intel Triton backend), which you clone yourself from github.com/intel/intel-xpu-backend-for-triton when you need to read its lowering passes
 kernels), `tmp/intel-triton` (Triton's Intel backend), `tmp/oneDNN`.
 
 Battlemage is `SYCL_INTEL_TARGET == 20`. **Anything in sycl-tla guarded by `== 35` is
@@ -63,7 +63,7 @@ Note the direction of travel: int8×int4 mixed DPAS is kept on Battlemage and **
 CRI** — the source comment is "Skip int8 x int4 for CRI as the dpas is removed."
 
 **fp8 still runs on Battlemage, by emulation, and PyTorch already does it.**
-`examples/08_bmg_gemm_f8` and the FMHA runner upconvert fp8 to fp16
+sycl-tla's `examples/08_bmg_gemm_f8` and its FMHA runner upconvert fp8 to fp16
 (`convert_FP8_to_FP16`) and use the fp16 DPAS. Measured on Arc B580, 4096x4096x4096:
 
 | | latency | throughput |

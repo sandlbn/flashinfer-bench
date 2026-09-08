@@ -29,6 +29,10 @@ _GAP = re.compile(r"([a-z0-9_]+) no-solution ([a-z])(\d+)")
 
 # The suffix letter a family names its width with, and the axis that width sets. Anything
 # not listed is not safely reparametrizable by substitution and is reported, not guessed.
+_FLOAT_DTYPES = {"float16", "bfloat16", "float32", "float64"}
+"""Dtypes a definition may be reparametrized between. Quantized storage dtypes are not
+here: changing those changes the operation, not its precision."""
+
 _FAMILIES: Dict[str, Tuple[str, str]] = {
     "silu_and_mul": ("d", "d"),
     "gelu_and_mul": ("d", "d"),
@@ -190,6 +194,14 @@ def main() -> None:
         help="Explicit gap, e.g. 'silu_and_mul:d8192'. Repeatable.",
     )
     ap.add_argument(
+        "--dtype",
+        default=None,
+        help="Tensor dtype this model runs in (float16, bfloat16, ...). Like epsilon, it is "
+        "never safely inherited from a sibling: a definition whose dtype differs from the "
+        "model's is rejected at dispatch and every call silently falls back, reported as "
+        "no-solution. Read it from the model config's torch_dtype.",
+    )
+    ap.add_argument(
         "--eps",
         default=None,
         help="Epsilon for norm families. Models differ (1e-5 and 1e-6 both occur), so it "
@@ -221,10 +233,10 @@ def main() -> None:
         if family not in _FAMILIES:
             skipped.append(f"{name}: family not reparametrizable by width; extract it instead")
             continue
-        existing = list(defs_dir.rglob(f"{name}.json"))
-        if existing and not args.eps:
-            skipped.append(f"{name}: already exists")
-            continue
+        # The existence check happens after the epsilon suffix is resolved, below: with
+        # --eps the final name may gain a suffix, so a check on the bare name here would
+        # either skip a definition that still needs writing or -- as it did -- let an
+        # existing one through to be overwritten.
         sibling = _sibling(defs_dir, family, letter)
         if sibling is None:
             skipped.append(f"{name}: no sibling of this family to clone")
@@ -262,6 +274,42 @@ def main() -> None:
                     "(read it off the module, or from config.json's rms_norm_eps)."
                 )
                 continue
+
+        # Never overwrite. An existing definition may be status:verified and carry real
+        # collected workloads; replacing it with a reparametrized clone of a sibling would
+        # silently downgrade both, and the only signal would be a line saying "wrote".
+        if list(defs_dir.rglob(f"{name}.json")):
+            skipped.append(f"{name}: already exists; refusing to overwrite it")
+            continue
+
+        # Same trap as epsilon: a width alone does not identify the operation. A
+        # bfloat16 definition presented with float16 activations is refused by the dtype
+        # guard in apply(), so it never substitutes -- and the counters say "no-solution",
+        # which reads as "not extracted yet" rather than "extracted in the wrong dtype".
+        sibling_dtypes = {
+            spec.get("dtype")
+            for spec in list(base["inputs"].values()) + list(base["outputs"].values())
+            if spec.get("dtype")
+        }
+        floats = {d for d in sibling_dtypes if d in _FLOAT_DTYPES}
+        if floats:
+            if not args.dtype:
+                skipped.append(
+                    f"{name}: sibling {sibling.stem} is {'/'.join(sorted(floats))}; pass "
+                    "--dtype with the dtype this model runs in (config.json torch_dtype), "
+                    "or the definition will never match at dispatch."
+                )
+                continue
+            if args.dtype not in floats:
+                name = f"{name}_{args.dtype}"
+                defn["name"] = name
+                print(
+                    f"  note  naming this one {name} so it does not collide with the "
+                    f"{'/'.join(sorted(floats))} definition at the same width"
+                )
+            for spec in list(defn["inputs"].values()) + list(defn["outputs"].values()):
+                if spec.get("dtype") in _FLOAT_DTYPES:
+                    spec["dtype"] = args.dtype
 
         out_def = sibling.with_name(f"{name}.json")
         wl_src = args.dataset / "workloads" / defn["op_type"] / f"{sibling.stem}.jsonl"

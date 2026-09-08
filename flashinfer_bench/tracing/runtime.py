@@ -457,7 +457,7 @@ class TracingRuntime:
         if not fib_enable_tracing:
             return None
         fib_dataset_path = get_fib_dataset_path()
-        trace_set = TraceSet.from_path(fib_dataset_path)
+        trace_set = TraceSet.from_path(fib_dataset_path, allow_create=True)
         return cls(trace_set, None)
 
     @classmethod

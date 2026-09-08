@@ -12,7 +12,8 @@ caps = get_accelerator("xpu:0").capabilities("xpu:0")
 caps.preferred_sub_group_size   # elementwise sub-group width; matrix kernels pin 16
 caps.vector_width(2)            # elements per 16-byte access for a 2-byte dtype
 caps.supports_large_grf         # gates -ze-opt-large-register-file
-caps.supported_dtypes           # Battlemage has no FP8 — check before targeting a dtype
+caps.supported_dtypes           # native ∪ emulated; pair with is_native_dtype()
+caps.emulated_dtypes            # runs correctly, but not at the format's throughput
 caps.l2_bytes, caps.sycl_target
 ```
 

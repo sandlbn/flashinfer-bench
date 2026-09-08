@@ -151,23 +151,42 @@ def _run_arm(
 # vLLM's top-level failure is always "Engine core initialization failed. See root cause
 # above" -- the cause is hundreds of lines earlier, in the worker's own traceback. A plain
 # tail of the output therefore reports the symptom every time and never the reason.
+# An exception line has a distinctive shape -- `SomeError: message` -- which traceback
+# frames, caret rules and log prose do not. Matching that, rather than any line containing
+# the word "error", is what keeps the reported cause from being a random source line.
+_EXCEPTION = re.compile(r"\b([A-Za-z_][\w.]*(?:Error|Exception|Interrupt))\b: (.+)")
+
+# A second pass for failures that raise no exception line at all.
 _CAUSE = re.compile(
-    r"(Error|Exception|RuntimeError|ValueError|NotImplementedError|out of memory|"
-    r"OutOfMemory|Assertion|not supported|Unsupported|No available memory|KeyError)",
+    r"(out of memory|OutOfMemory|not supported|Unsupported|No available memory)",
     re.IGNORECASE,
 )
-_NOISE = re.compile(r"See root cause above|Failed core proc|raise |^\s*File \"")
+
+# vLLM's own wrapper never names the reason, and the dispatch counters legitimately
+# contain words like "unsupported"; both outrank the real cause when the last match wins.
+_NOISE = re.compile(r"See root cause above|Failed core proc|detail: \{|call\(s\), ")
 
 
 def _root_cause(output: str) -> str:
     """The most specific error lines, preferring the worker's over the launcher's."""
-    hits = [ln.strip() for ln in output.splitlines() if _CAUSE.search(ln) and not _NOISE.search(ln)]
+    hits = []
+    for line in output.splitlines():
+        if _NOISE.search(line):
+            continue
+        match = _EXCEPTION.search(line)
+        if match:
+            hits.append(f"{match.group(1)}: {match.group(2).strip()}"[:300])
+    if not hits:
+        hits = [
+            line.strip()[:300]
+            for line in output.splitlines()
+            if _CAUSE.search(line) and not _NOISE.search(line)
+        ]
     seen, uniq = set(), []
-    for ln in hits:
-        key = ln[:160]
-        if key not in seen:
-            seen.add(key)
-            uniq.append(ln[:300])
+    for line in hits:
+        if line[:160] not in seen:
+            seen.add(line[:160])
+            uniq.append(line)
     return "\n".join(uniq[-4:])
 
 

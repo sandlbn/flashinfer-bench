@@ -51,8 +51,10 @@ Then filter:
 
 - **Route by op_type** using the provider decision table in `onboard-model-intel/SKILL.md`
   Phase 5. GEMM-shaped work goes to oneDNN before anyone hand-writes a matmul.
-- **Check the dtype exists on this part**: `caps.supported_dtypes` — Battlemage has no FP8,
-  and an FP8 definition produces `UNSUPPORTED_DTYPE`, not a slow kernel.
+- **Check the dtype exists on this part**: `caps.supported_dtypes` is native ∪ emulated, so
+  ask `caps.is_native_dtype()` separately — Battlemage runs FP8 emulated, not natively,
+  so an FP8 definition runs and passes here — at emulated throughput, which is the
+  thing to check before reading its latency as a native FP8 number.
 - **Prefer ops with an upstream baseline**, so Step 6 has something to beat.
 
 Norm, activation and RoPE kernels are the best first targets: small, memory-bound, easy to

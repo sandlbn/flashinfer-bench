@@ -16,6 +16,20 @@ from .runner import IsolatedRunner, PersistentRunner
 
 logger = logging.getLogger(__name__)
 
+_RESUME_RETRY_STATUSES = frozenset(
+    {
+        EvaluationStatus.COMPILE_ERROR,
+        EvaluationStatus.TIMEOUT,
+        EvaluationStatus.RUNTIME_ERROR,
+    }
+)
+"""Outcomes `--resume` re-attempts rather than treats as settled.
+
+The INCORRECT_* statuses and PASSED are properties of the solution and do not change
+between runs on the same hardware. These three describe the environment the run happened
+in, which is exactly what a re-run is for.
+"""
+
 
 class Benchmark:
     """Benchmark execution engine for FlashInfer-Bench kernel solutions.
@@ -119,11 +133,27 @@ class Benchmark:
             existing_traces: Set[Tuple[str, str]] = set()  # (workload_uuid, solution_name)
             if resume:
                 existing_def_traces = self._trace_set.traces.get(def_name, [])
+                retryable = 0
                 for trace in existing_def_traces:
-                    if trace.solution and trace.evaluation:
-                        existing_traces.add((trace.workload.uuid, trace.solution))
+                    if not (trace.solution and trace.evaluation):
+                        continue
+                    if trace.evaluation.status in _RESUME_RETRY_STATUSES:
+                        # Not a verdict about the solution -- a build that could not run
+                        # here, a timeout, a crash. These are environment-dependent, and
+                        # skipping them made a fixed environment unfixable: after a missing
+                        # toolchain recorded COMPILE_ERROR for every solution, --resume
+                        # never rebuilt any of them and the dataset kept reporting that the
+                        # kernels do not build.
+                        retryable += 1
+                        continue
+                    existing_traces.add((trace.workload.uuid, trace.solution))
                 if existing_traces:
                     logger.info(f"Found {len(existing_traces)} existing traces for def={def_name}")
+                if retryable:
+                    logger.info(
+                        f"Retrying {retryable} previously failed evaluation(s) for "
+                        f"def={def_name} (build/timeout/runtime failures are not verdicts)"
+                    )
 
             workloads = self._trace_set.workloads.get(def_name, [])
             def_traces: List[Trace] = []
