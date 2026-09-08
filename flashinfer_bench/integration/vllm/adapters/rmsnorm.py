@@ -21,6 +21,7 @@ from flashinfer_bench.apply import apply
 from flashinfer_bench.integration.patch_manager import PatchSpec
 
 from . import stats
+from .naming import candidates
 
 
 class RMSNormAdapter:
@@ -77,17 +78,22 @@ class RMSNormAdapter:
                 def _miss(**_kwargs):
                     nonlocal missed
                     missed = True
-                    return _fallback()
+                    return None
 
-                out = apply(
-                    f"rmsnorm_h{hidden}",
-                    kwargs={"hidden_states": xf, "weight": weight},
-                    fallback=_miss,
-                )
-                stats.record("rmsnorm", "no-solution" if missed else "applied", f"h{hidden}")
-                # `_miss` returns the fallback's own result, which is already the caller's
-                # shape; only a result computed on the flattened view needs restoring.
-                return out if missed or out.shape == shape else out.view(shape)
+                # Dtype-qualified name first; the bare one is what most definitions use.
+                out = None
+                for name in candidates(f"rmsnorm_h{hidden}", x.dtype):
+                    missed = False
+                    out = apply(
+                        name, kwargs={"hidden_states": xf, "weight": weight}, fallback=_miss
+                    )
+                    if not missed:
+                        break
+                if missed:
+                    stats.record("rmsnorm", "no-solution", f"h{hidden}")
+                    return _fallback()
+                stats.record("rmsnorm", "applied", f"h{hidden}")
+                return out if out.shape == shape else out.view(shape)
 
             # vLLM's fused form returns (normed, new_residual) and callers rely on both.
             # Prefer the definition that returns the summed residual too. The single-output
@@ -117,17 +123,21 @@ class RMSNormAdapter:
             # of both inputs before writing index i of both outputs.
             residual_out = rf
             out = xf
-            apply(
-                f"fused_add_rmsnorm_residual_h{hidden}",
-                kwargs={
-                    "hidden_states": xf,
-                    "residual": rf,
-                    "weight": weight,
-                    "output": out,
-                    "residual_out": residual_out,
-                },
-                fallback=_miss_residual,
-            )
+            for name in candidates(f"fused_add_rmsnorm_residual_h{hidden}", x.dtype):
+                missed_residual = False
+                apply(
+                    name,
+                    kwargs={
+                        "hidden_states": xf,
+                        "residual": rf,
+                        "weight": weight,
+                        "output": out,
+                        "residual_out": residual_out,
+                    },
+                    fallback=_miss_residual,
+                )
+                if not missed_residual:
+                    break
             if not missed_residual:
                 stats.record("fused_add_rmsnorm", "applied", f"h{hidden}+res")
                 # The writes landed in the caller's own storage through the views, so hand
@@ -145,11 +155,16 @@ class RMSNormAdapter:
                 missed_single = True
                 return None
 
-            out = apply(
-                f"fused_add_rmsnorm_h{hidden}",
-                kwargs={"hidden_states": xf, "residual": rf, "weight": weight},
-                fallback=_miss_single,
-            )
+            out = None
+            for name in candidates(f"fused_add_rmsnorm_h{hidden}", x.dtype):
+                missed_single = False
+                out = apply(
+                    name,
+                    kwargs={"hidden_states": xf, "residual": rf, "weight": weight},
+                    fallback=_miss_single,
+                )
+                if not missed_single:
+                    break
             if missed_single:
                 stats.record("fused_add_rmsnorm", "no-solution", f"h{hidden}")
                 return _fallback()  # the one and only call into vLLM's in-place kernel

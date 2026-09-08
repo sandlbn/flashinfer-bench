@@ -275,17 +275,11 @@ def main() -> None:
                 )
                 continue
 
-        # Never overwrite. An existing definition may be status:verified and carry real
-        # collected workloads; replacing it with a reparametrized clone of a sibling would
-        # silently downgrade both, and the only signal would be a line saying "wrote".
-        if list(defs_dir.rglob(f"{name}.json")):
-            skipped.append(f"{name}: already exists; refusing to overwrite it")
-            continue
-
         # Same trap as epsilon: a width alone does not identify the operation. A
         # bfloat16 definition presented with float16 activations is refused by the dtype
         # guard in apply(), so it never substitutes -- and the counters say "no-solution",
         # which reads as "not extracted yet" rather than "extracted in the wrong dtype".
+        base_name = name
         sibling_dtypes = {
             spec.get("dtype")
             for spec in list(base["inputs"].values()) + list(base["outputs"].values())
@@ -303,13 +297,26 @@ def main() -> None:
             if args.dtype not in floats:
                 name = f"{name}_{args.dtype}"
                 defn["name"] = name
-                print(
-                    f"  note  naming this one {name} so it does not collide with the "
-                    f"{'/'.join(sorted(floats))} definition at the same width"
+                clash_here = bool(list(defs_dir.rglob(f"{base_name}.json")))
+                why = (
+                    f"a {'/'.join(sorted(floats))} definition already holds {base_name}"
+                    if clash_here
+                    else f"the {'/'.join(sorted(floats))} sibling it was cloned from "
+                    "declares a different dtype"
                 )
+                print(f"  note  naming this one {name}: {why}")
             for spec in list(defn["inputs"].values()) + list(defn["outputs"].values()):
                 if spec.get("dtype") in _FLOAT_DTYPES:
                     spec["dtype"] = args.dtype
+
+        # Never overwrite, checked on the FINAL name -- after the epsilon and dtype
+        # suffixes are resolved. An existing definition may be status:verified and carry
+        # real collected workloads, and replacing it with a reparametrized clone would
+        # silently downgrade both; but checking the bare name instead refused variants
+        # that do not exist yet, which is the opposite failure.
+        if list(defs_dir.rglob(f"{name}.json")):
+            skipped.append(f"{name}: already exists; refusing to overwrite it")
+            continue
 
         out_def = sibling.with_name(f"{name}.json")
         wl_src = args.dataset / "workloads" / defn["op_type"] / f"{sibling.stem}.jsonl"

@@ -16,6 +16,7 @@ from flashinfer_bench.apply import apply
 from flashinfer_bench.integration.patch_manager import PatchSpec
 
 from . import stats
+from .naming import candidates
 
 
 class SiluAndMulAdapter:
@@ -59,11 +60,22 @@ class SiluAndMulAdapter:
             def _miss(**_kwargs):
                 nonlocal missed
                 missed = True
-                return _fallback()
+                return None
 
-            out = apply(f"silu_and_mul_d{d}", kwargs={"x": xf}, fallback=_miss)
-            stats.record("silu_and_mul", "no-solution" if missed else "applied", f"d{d}")
+            # Try the dtype-qualified definition before the bare one. The fallback records
+            # the miss and returns None rather than running the original, so trying a
+            # second name costs nothing and cannot double-apply.
+            out = None
+            for name in candidates(f"silu_and_mul_d{d}", x.dtype):
+                missed = False
+                out = apply(name, kwargs={"x": xf}, fallback=_miss)
+                if not missed:
+                    break
+            if missed:
+                stats.record("silu_and_mul", "no-solution", f"d{d}")
+                return _fallback()
+            stats.record("silu_and_mul", "applied", f"d{d}")
             # The output's last dim is d, not 2d, so restore the leading dims only.
-            return out if missed else out.view(*shape[:-1], d)
+            return out.view(*shape[:-1], d)
 
         return wrapper

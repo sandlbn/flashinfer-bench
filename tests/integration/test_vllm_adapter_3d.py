@@ -78,7 +78,8 @@ class TestRMSNorm3D:
         x = torch.randn(2, 3, HIDDEN)
         out = wrapper(layer, x)
 
-        assert calls["name"] == f"rmsnorm_h{HIDDEN}"
+        # The dtype-qualified name is tried first; these tensors are float32.
+        assert calls["name"] == f"rmsnorm_h{HIDDEN}_float32"
         assert calls["kwargs"]["hidden_states"].shape == (6, HIDDEN)
         assert out.shape == x.shape
         torch.testing.assert_close(out, _ref_rmsnorm(x, layer.weight))
@@ -138,7 +139,7 @@ class TestSiluAndMul3D:
         x = torch.randn(2, 3, 2 * HIDDEN)
         out = wrapper(_Layer(), x)
 
-        assert calls["name"] == f"silu_and_mul_d{HIDDEN}"
+        assert calls["name"] == f"silu_and_mul_d{HIDDEN}_float32"
         assert calls["kwargs"]["x"].shape == (6, 2 * HIDDEN)
         assert out.shape == (2, 3, HIDDEN)
 
@@ -154,3 +155,52 @@ class TestSiluAndMul3D:
         wrapper(_Layer(), torch.randn(2, 3, 7))
         assert fell_back
         assert "name" not in calls
+
+
+class TestDtypeQualifiedLookup:
+    """A definition is named for its shape, but shape does not identify the operation.
+
+    Two models at the same width can run in different precisions, and apply() refuses a
+    solution whose dtype differs from the tensors handed to it. The dataset distinguishes
+    them with a suffix, so the adapter has to ask for that name -- otherwise a correctly
+    generated `*_float16` definition is never looked up and the counters say "no-solution",
+    which reads as "nothing extracted for this shape".
+    """
+
+    def test_falls_through_to_the_bare_name_when_no_suffixed_one_exists(self, monkeypatch):
+        tried = []
+
+        def fake_apply(name, kwargs=None, fallback=None, **_):
+            tried.append(name)
+            if name.endswith("_float32"):
+                return fallback(**(kwargs or {}))  # no suffixed definition here
+            return _ref_rmsnorm(kwargs["hidden_states"], kwargs["weight"])
+
+        monkeypatch.setattr(rmsnorm_mod, "apply", fake_apply)
+        adapter = RMSNormAdapter()
+        wrapper = adapter.make_wrapper(
+            _spec(adapter), lambda *_a, **_k: pytest.fail("should not fall back to vLLM")
+        )
+        out = wrapper(_Layer(torch.ones(HIDDEN)), torch.randn(4, HIDDEN))
+        assert tried == [f"rmsnorm_h{HIDDEN}_float32", f"rmsnorm_h{HIDDEN}"]
+        assert out.shape == (4, HIDDEN)
+
+    def test_the_original_runs_once_when_every_candidate_misses(self, monkeypatch):
+        """Trying a second name must not re-run the fallback.
+
+        vLLM's fused kernel is in place; running it per candidate would consume the
+        buffers and corrupt the residual stream.
+        """
+        monkeypatch.setattr(
+            rmsnorm_mod, "apply", lambda name, kwargs=None, fallback=None, **_: fallback()
+        )
+        calls = []
+
+        def orig(self_, x, residual=None):
+            calls.append(1)
+            return (x, residual) if residual is not None else x
+
+        adapter = RMSNormAdapter()
+        wrapper = adapter.make_wrapper(_spec(adapter), orig)
+        wrapper(_Layer(torch.ones(HIDDEN)), torch.randn(4, HIDDEN), torch.randn(4, HIDDEN))
+        assert calls == [1], "vLLM's in-place kernel must run exactly once"

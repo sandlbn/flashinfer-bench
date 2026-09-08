@@ -272,3 +272,46 @@ class TestDtypeIsNotInherited:
             capsys,
         )
         assert (dataset / "definitions" / "activation" / "silu_and_mul_d8192.json").exists()
+
+
+class TestOverwriteGuardUsesTheFinalName:
+    """The guard must run after the epsilon and dtype suffixes are resolved.
+
+    Checking the bare name refuses a variant that does not exist yet -- the opposite
+    failure from the one the guard exists to prevent, and just as silent.
+    """
+
+    def test_a_dtype_variant_is_written_although_the_bare_name_exists(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        import sys
+
+        d = tmp_path / "definitions" / "activation"
+        d.mkdir(parents=True)
+        (tmp_path / "workloads" / "activation").mkdir(parents=True)
+        typed = json.loads(json.dumps(SILU))
+        for spec in list(typed["inputs"].values()) + list(typed["outputs"].values()):
+            spec["dtype"] = "bfloat16"
+        (d / "silu_and_mul_d4864.json").write_text(json.dumps(typed))
+        occupied = json.loads(json.dumps(typed))
+        occupied["name"] = "silu_and_mul_d8192"
+        (d / "silu_and_mul_d8192.json").write_text(json.dumps(occupied))
+
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "fill_serving_gaps.py",
+                "--dataset",
+                str(tmp_path),
+                "--gaps",
+                "silu_and_mul:d8192",
+                "--dtype",
+                "float16",
+                "--write",
+            ],
+        )
+        fsg.main()
+        assert (d / "silu_and_mul_d8192_float16.json").exists()
+        # and the bfloat16 one it would have collided with is untouched
+        assert json.loads((d / "silu_and_mul_d8192.json").read_text()) == occupied
