@@ -6,7 +6,7 @@ Arc B580 against a ~5us elementwise kernel, so a solution can be three times fas
 provider's and still lose the exchange -- which is what several families measured end to end.
 """
 
-from typing import Dict, List
+from typing import List
 
 import pytest
 
@@ -14,12 +14,9 @@ from flashinfer_bench.apply.config import ApplyConfig, ApplyConfigRegistry
 from flashinfer_bench.apply.table import ApplyTable
 from flashinfer_bench.data import (
     Definition,
-    Evaluation,
-    EvaluationStatus,
     Solution,
     Trace,
     TraceSet,
-    Workload,
 )
 
 HIDDEN = 1024
@@ -132,10 +129,29 @@ class TestGate:
         ]
         assert len(_table(traces, 5.91).index.get("norm", {})) == 1
 
-    def test_no_provider_baseline_leaves_the_key_alone(self):
-        """Nothing to compare against; refusing would disable ungenerated baselines."""
+    def test_no_provider_baseline_is_not_a_licence_to_deploy(self):
+        """Absence of a comparator is absence of evidence, not evidence of a win.
+
+        Letting an unjudgeable key through made the gate inert on the real dataset: most
+        keys had no comparable provider trace, so almost nothing it was meant to judge was
+        judged. The burden of proof belongs on the substitution, which is what costs time.
+        """
         traces = [_trace("norm__ours", 64, 0.005)]
-        assert len(_table(traces, 5.91).index.get("norm", {})) == 1
+        assert len(_table(traces, 5.91).index.get("norm", {})) == 0
+        # ... and with the gate off, behaviour is unchanged.
+        assert len(_table(traces, 0.0).index.get("norm", {})) == 1
+
+    def test_a_provider_baseline_outside_our_tolerance_still_counts(self):
+        """The provider kernel runs whether or not it meets the tolerance we apply to ours.
+
+        Sourcing comparators from the tolerance-filtered set removed them, the key read as
+        having nothing to compare against, and the gate let it through -- which is how the
+        gate came to be inert for all but a handful of keys.
+        """
+        loose = _trace("norm__vllm_xpu_rms_norm", 64, 0.008)
+        loose.evaluation.correctness.max_absolute_error = 0.125  # far above our max_atol
+        traces = [_trace("norm__ours", 64, 0.005), loose]
+        assert len(_table(traces, 5.91).index.get("norm", {})) == 0
 
     def test_def_best_is_withheld_once_any_key_is_rejected(self):
         """Otherwise a miss falls through to def_best and re-substitutes what was rejected.

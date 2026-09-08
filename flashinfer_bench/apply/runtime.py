@@ -72,7 +72,20 @@ class ApplyRuntime:
         if not fib_enable_apply:
             return None
         fib_dataset_path = get_fib_dataset_path()
-        trace_set = TraceSet.from_path(fib_dataset_path)
+        try:
+            trace_set = TraceSet.from_path(fib_dataset_path)
+        except FileNotFoundError:
+            # This path runs lazily, inside the first apply() call -- which is inside the
+            # first model forward. Letting it raise there surfaces a dataset-path mistake as
+            # a crash in the middle of inference, and because `_env_initialized` is already
+            # set, every later call then returns None and falls back silently: one loud
+            # failure followed by a silent no-op. Report it once and disable instead.
+            logger.error(
+                "FIB_ENABLE_APPLY is set but no dataset exists at %s; running without "
+                "optimized kernels. Set FIB_DATASET_PATH to a dataset directory.",
+                fib_dataset_path,
+            )
+            return None
         return cls(trace_set, None)
 
     @classmethod

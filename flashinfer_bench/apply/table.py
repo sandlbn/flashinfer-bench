@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from flashinfer_bench.compile import BuilderRegistry
-from flashinfer_bench.data import Trace, TraceSet
+from flashinfer_bench.data import EvaluationStatus, Trace, TraceSet
 from flashinfer_bench.env import get_fib_cache_path
 
 from .config import ApplyConfigRegistry
@@ -271,6 +271,32 @@ class ApplyTable:
         return cls(digest=digest, index=index, def_best=def_best)
 
     @classmethod
+    def _provider_traces(
+        cls,
+        trace_set: TraceSet,
+        def_name: str,
+        hardware_id: Optional[str],
+        timing: Optional[str],
+    ) -> List[Trace]:
+        """Every PASSED provider trace for this definition on this part and timer."""
+        out: List[Trace] = []
+        for trace in trace_set.traces.get(def_name, []):
+            evaluation = trace.evaluation
+            if evaluation is None or evaluation.status != EvaluationStatus.PASSED:
+                continue
+            solution = trace.solution or ""
+            if not any(f"__{p}" in solution for p in _PROVIDER_MARKERS):
+                continue
+            if hardware_id and cls._trace_hardware(trace) not in (hardware_id, None):
+                continue
+            if timing:
+                recorded = cls._trace_timing(trace)
+                if recorded and recorded != timing:
+                    continue
+            out.append(trace)
+        return out
+
+    @classmethod
     def _drop_keys_not_worth_substituting(
         cls,
         def_name: str,
@@ -303,22 +329,31 @@ class ApplyTable:
                 provider_latency[key] = latency
 
         kept: Dict[ApplyKey, Trace] = {}
-        dropped = 0
+        dropped = uncomparable = 0
         for key, trace in per_key.items():
             provider = provider_latency.get(key)
             ours = trace.evaluation.performance.latency_ms
-            if provider is None or not ours or (provider - ours) > min_gain_ms:
+            if provider is None or not ours:
+                # No comparator, so no evidence that substituting is worth its cost. With
+                # the gate on, absence of evidence is not a licence to deploy: the burden of
+                # proof belongs on the substitution, which is the thing that costs time.
+                uncomparable += 1
+                continue
+            if (provider - ours) > min_gain_ms:
                 kept[key] = trace
             else:
                 dropped += 1
-        if dropped:
+        if dropped or uncomparable:
             logger.info(
-                "%s: %d of %d key(s) not indexed -- the solution does not beat the provider "
-                "kernel by the %.2fus a substitution costs.",
+                "%s: %d of %d key(s) not indexed (%d lose to the provider by less than the "
+                "%.2fus a substitution costs, %d have no provider baseline on this part to "
+                "compare against -- run add-baselines to judge them).",
                 def_name,
-                dropped,
+                dropped + uncomparable,
                 len(per_key),
+                dropped,
                 min_gain_ms * 1000,
+                uncomparable,
             )
         return kept
 
@@ -492,7 +527,18 @@ class ApplyTable:
         if min_gain_ms > 0:
             before = len(per_key)
             per_key = cls._drop_keys_not_worth_substituting(
-                def_name, per_key, traces, builder, min_gain_ms
+                def_name,
+                per_key,
+                # Deliberately not `traces`: that has been filtered to solutions meeting
+                # *our* correctness tolerance, and several provider baselines pass with an
+                # error above it. Excluding them made the comparator vanish and the key read
+                # as "nothing to compare against", which the gate then let through -- so the
+                # gate was inert for almost every key it was meant to judge. The provider
+                # kernel runs whether or not it meets our tolerance; it is the thing being
+                # replaced, so it is the thing to measure against.
+                cls._provider_traces(trace_set, def_name, hardware_id, current_timing),
+                builder,
+                min_gain_ms,
             )
             rejected_any = len(per_key) < before
 

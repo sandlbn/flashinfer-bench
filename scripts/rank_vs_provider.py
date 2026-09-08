@@ -29,8 +29,10 @@ import json
 import pathlib
 from typing import Dict, List, Optional, Tuple
 
-PROVIDERS = ("vllm_xpu", "sgl_kernel_xpu")
-"""Solution-name markers for the kernel a real deployment would otherwise run."""
+from flashinfer_bench.apply.table import _PROVIDER_MARKERS as PROVIDERS  # noqa: E402
+
+"""Shared with the apply table, so the ranking and the deploy gate cannot disagree about
+which solutions represent the kernel a deployment would otherwise run."""
 
 Bucket = List[Tuple[float, float]]  # (ours_ms, provider_ms)
 
@@ -114,9 +116,12 @@ def main() -> None:
     ap.add_argument(
         "--floor-us",
         type=float,
-        default=60.0,
-        help="Drop workloads where every measurement is below this: device-event "
-        "timing has a fixed cost and below it the ratio measures the harness.",
+        default=None,
+        help="Drop workloads where every measurement is below this. Defaults by timer: "
+        "60us for the legacy per-call 'event' methodology, whose overhead really did "
+        "floor short kernels, and 0 for anything that amortizes it -- applying the "
+        "legacy floor to current traces discards exactly the decode-sized data that "
+        "decides deployment.",
     )
     ap.add_argument(
         "--decode-max-tokens",
@@ -142,6 +147,12 @@ def main() -> None:
         timing = accel.make_timer(accel.list_devices()[0]).name
     except Exception:
         pass
+    if args.floor_us is None:
+        # The floor exists to hide measurements dominated by timer overhead. Only the old
+        # per-call event timer had overhead worth hiding; keeping its floor for a timer that
+        # amortizes it would throw away every decode-sized comparison as "unmeasurable".
+        args.floor_us = 60.0 if timing == "event" else 0.0
+
     data = collect(args.dataset, hardware_id, timing)
     dispatch_ms = args.dispatch_us / 1000.0
     rows, no_provider, only_floor = [], [], []

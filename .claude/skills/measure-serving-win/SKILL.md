@@ -53,6 +53,8 @@ if os.environ.get("FIB_VLLM_INTEGRATION", "").lower() in ("1", "true", "yes", "o
                 max_atol=float(os.environ.get("FIB_APPLY_MAX_ATOL", "0.02")),
                 max_rtol=float(os.environ.get("FIB_APPLY_MAX_RTOL", "0.02")),
                 on_miss_policy="use_def_best",
+                # Measured dispatch cost on this part; see the gate section below.
+                min_gain_us=float(os.environ.get("FIB_APPLY_MIN_GAIN_US", "5.91")),
             ),
         )
 ```

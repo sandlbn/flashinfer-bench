@@ -135,9 +135,10 @@ class EventTimer(Timer):
 
     #: Aim for a timed region at least this long, in milliseconds. Event record and the
     #: surrounding synchronize cost tens of microseconds on some backends, so a region that
-    #: contains a single short call reports mostly that overhead. A millisecond puts the
-    #: fixed cost below a percent without making a sweep slow.
-    _TARGET_REGION_MS: ClassVar[float] = 1.0
+    #: contains a single short call reports mostly that overhead. The residual bias is
+    #: overhead/inner, so 5ms against a ~40us overhead leaves well under a percent while
+    #: keeping a sweep quick.
+    _TARGET_REGION_MS: ClassVar[float] = 5.0
 
     #: Never batch beyond this, so a pathologically fast kernel cannot blow up the run time
     #: or hold the device for an unbounded stretch.
@@ -157,12 +158,20 @@ class EventTimer(Timer):
             self._module.synchronize(device)
             start = self._module.Event(enable_timing=True)
             end = self._module.Event(enable_timing=True)
-            start.record()
+            # Enough calls that the region's own overhead does not dominate the estimate.
+            # With 8, the ~40us overhead added ~5us to a 5us kernel, halving the batch size
+            # chosen and leaving several percent of bias in the result the batching exists
+            # to remove.
+            probe = 64
             for _ in range(8):
+                fn(*args)  # the probe must not pay first-call costs it then extrapolates
+            self._module.synchronize(device)
+            start.record()
+            for _ in range(probe):
                 fn(*args)
             end.record()
             self._module.synchronize(device)
-            per_call_ms = start.elapsed_time(end) / 8
+            per_call_ms = start.elapsed_time(end) / probe
 
         if per_call_ms <= 0:
             return self._MAX_INNER

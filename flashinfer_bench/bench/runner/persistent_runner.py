@@ -344,7 +344,7 @@ class PersistentSubprocessWorker:
                     elif response.get("cmd") == WorkerResponse.ERROR.value:
                         error_msg = response.get("error", "Unknown evaluation error")
                         self._record_failure(
-                            solution.name, error_msg, EvaluationStatus.RUNTIME_ERROR
+                            solution_name, error_msg, EvaluationStatus.RUNTIME_ERROR
                         )
                         return make_eval(
                             status=EvaluationStatus.RUNTIME_ERROR,
@@ -354,7 +354,7 @@ class PersistentSubprocessWorker:
                     else:
                         error_msg = f"Unexpected evaluation response: {response}"
                         self._record_failure(
-                            solution.name, error_msg, EvaluationStatus.RUNTIME_ERROR
+                            solution_name, error_msg, EvaluationStatus.RUNTIME_ERROR
                         )
                         return make_eval(
                             status=EvaluationStatus.RUNTIME_ERROR,

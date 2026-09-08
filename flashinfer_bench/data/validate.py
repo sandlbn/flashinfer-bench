@@ -940,6 +940,7 @@ def _check_trace_comparability(trace_entries: list[ScannedTrace]) -> list[CheckM
     messages: list[CheckMessage] = []
 
     timings: set[str] = set()
+    timings_by_hardware: dict[str, set[str]] = {}
     hardware: set[str] = set()
     untimed = 0
     unidentified = 0
@@ -955,6 +956,13 @@ def _check_trace_comparability(trace_entries: list[ScannedTrace]) -> list[CheckM
             timing = evaluation.environment.libs.get("timing")
             if timing:
                 timings.add(timing)
+                # Track the methodologies per part as well. Latencies are only ever
+                # compared within a part, so a dataset holding CUDA CUPTI traces beside
+                # Intel event traces is correct, not mixed -- flagging it as an error would
+                # make every multi-hardware dataset fail the pre-flight gate.
+                timings_by_hardware.setdefault(
+                    evaluation.environment.hardware_id or "?", set()
+                ).add(timing)
             else:
                 untimed += 1
 
@@ -987,16 +995,19 @@ def _check_trace_comparability(trace_entries: list[ScannedTrace]) -> list[CheckM
             )
         )
 
-    if len(timings) > 1:
-        messages.append(
-            CheckMessage(
-                level="error",
-                message=(
-                    f"traces mix timing methodologies ({', '.join(sorted(timings))}); "
-                    "these latencies are not comparable and must not be ranked together"
-                ),
+    for part, part_timings in sorted(timings_by_hardware.items()):
+        if len(part_timings) > 1:
+            messages.append(
+                CheckMessage(
+                    level="error",
+                    message=(
+                        f"traces for {part} mix timing methodologies "
+                        f"({', '.join(sorted(part_timings))}); these latencies are not "
+                        "comparable and must not be ranked together. Re-benchmark, or drop "
+                        "the traces measured with the superseded methodology"
+                    ),
+                )
             )
-        )
 
     if len(hardware) > 1:
         messages.append(
