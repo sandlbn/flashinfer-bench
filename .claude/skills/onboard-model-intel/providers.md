@@ -200,6 +200,31 @@ Still genuinely unavailable:
 This limitation is upstream, not ours: it also breaks SGLang's own DeepSeek
 `mha_return_lse` path on Intel.
 
+## Which kernels a model actually uses is a measurement, not a list
+
+vLLM ships hundreds of Triton kernels (447 distinct `@triton.jit` functions across 218
+files). Any one model touches a handful, and on Intel the handful is not the one you would
+guess. Observe it rather than enumerating the library:
+
+```bash
+python scripts/observe_triton_kernels.py --model <repo_id> --in-process --json out.json
+```
+
+It hooks Triton's JIT launch path, runs a short generation, and reports every kernel that
+fired with its call count and the constexpr values it was specialised on -- which are what a
+tuning round would vary.
+
+Measured on Qwen3-0.6B, Arc B580, 2026-09-08: **20 distinct Triton kernels, 305 launches, and
+every one of them in `v1.worker.gpu.*`** -- scheduling, block tables, input batching,
+sampling. None in attention, GEMM, norms or activations. On Intel those go through compiled
+`vllm-xpu-kernels` and oneDNN via torch, so Triton is left doing orchestration. Of the
+op_types the dataset defines, only `sampling` overlapped what the model launched.
+
+The consequence for effort: mapping vLLM's Triton kernels wholesale maps mostly code that
+never touches the compute path. Let the observation decide which ones get a baseline, and
+re-run it per model -- the answer is a property of the model and the backend selection, not
+of the library.
+
 ## oneDNN
 
 Ships with oneAPI; discovered via `FIB_ONEDNN_DIR`. Not a baseline *provider* — it is the
