@@ -132,6 +132,36 @@ can be at parity with the kernel it would actually replace, and then `share x ra
 a win that cannot exist. Take the ratio from a baseline solution wrapping the provider kernel
 (`add-baselines --providers vllm-xpu`), not from the reference column.
 
+**Compare the kernel's runtime against what dispatch costs, before substituting at all.**
+Measured on Arc B580 (fp16 RMSNorm, 64x1536, wall-clock over 3000 calls, 2026-09-08):
+
+| path | us/call |
+| --- | --- |
+| the provider kernel, called directly | 3.24 |
+| the same work through a successful `apply()` | 9.15 |
+| `apply()` on a definition it cannot match | 0.35 |
+
+A successful substitution costs about 5.9us of Python -- resolve, key build, dtype check,
+table and solution lookup, then the `Runnable` invocation -- which is **nearly twice the
+kernel's entire runtime**. So at decode sizes no elementwise kernel can win, however fast it
+is: the replacement machinery costs more than the thing being replaced. Two corollaries:
+
+- A family is worth substituting only where its kernel time is large against ~6us. That is
+  GEMM, attention and prefill-sized elementwise work -- not decode-sized norms and
+  activations, whatever their per-kernel ratio says.
+- A *miss* is nearly free (0.35us), which is why an overhead arm pointed at an empty dataset
+  reports ~0 while a fully-substituting run loses double digits. Those two numbers measure
+  different paths; do not read the first as the cost of the second.
+
+Re-measure this on your own part before relying on it -- it is a property of the dispatch
+path, not of any kernel.
+
+**Beware the timing floor when reading per-kernel numbers.** In the same setup the benchmark
+reports ~47us for a kernel that takes ~3us, because device-event timing has a fixed cost that
+both arms pay. Below that floor the *ratios* are noise: two kernels an order of magnitude
+apart in real work can both report ~50us. Sanity-check against bandwidth -- bytes moved
+divided by the part's achievable GB/s -- before believing a small-batch ratio.
+
 **Check the family is not launch-bound before expecting anything.** Read the recorded
 latencies across the batch sweep: if latency barely moves from the smallest batch to one
 several hundred times larger, the kernel is not doing measurable work at those sizes and the
