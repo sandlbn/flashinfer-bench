@@ -68,8 +68,8 @@ Two questions get asked, and neither consults a table:
 
 | Resolved as | How it was established | Route |
 | --- | --- | --- |
-| **oneDNN** | the op ran and oneDNN logged a primitive | `/optimize-onednn` — the win is in the call, not a replacement kernel |
-| **provider kernel** | a device key, and the binding file found in a local checkout | step 4, trial loop against the bundle |
+| **oneDNN** | the op ran and oneDNN logged a primitive | `/optimize-onednn` — the library's kernel is what the stack already runs, so it is the baseline; the descriptors, attributes, lifetime and decomposition are the axes a caller controls |
+| **provider kernel** | a device key, and the binding file found in a local checkout | "Optimize the one that survives" — the trial loop against the bundle |
 | **Triton** | recorded at the JIT entry point, with source file and line | `/wrap-kernel-for-tuning` — tune in place, no substitution |
 | **Python-registered custom op** | no dispatcher entry at all; the namespace names the package | `/wrap-kernel-for-tuning` — it needs the stack's context to run |
 | **ATen kernel inside PyTorch** | a device key registered in PyTorch's own tree | no local source to edit; measure, or report upstream |

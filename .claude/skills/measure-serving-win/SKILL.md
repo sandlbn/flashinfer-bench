@@ -148,10 +148,12 @@ that before reading the timing.
 - **The ratio is against what the serving stack runs, not the definition's reference.**
   `scripts/rank_vs_provider.py` computes it from the traces on disk against the provider
   baseline (`add-baselines --providers vllm-xpu`) and subtracts the dispatch cost.
-- **Compare the kernel's runtime against what dispatch costs.** A successful substitution
-  costs a fixed amount of Python per call; a miss is nearly free. Read both from
-  `flashinfer_bench.device.calibration.get()`. A family is worth substituting only where
-  its kernel time is large against that cost, whatever its per-kernel ratio.
+- **Compare the kernel's runtime against what dispatch costs.** `apply()` costs a fixed
+  amount of Python per call whatever the kernel costs: read `dispatch_us` from
+  `flashinfer_bench.device.calibration.get()` and multiply it by the call count in "Read the
+  dispatch counters". `None` there means the mechanism could not be measured on this box —
+  treat it as unavailable, never as free. A family is worth substituting only where its
+  kernel time is large against that cost, whatever its per-kernel ratio.
 - **Mind the timing floor.** Device-event timing has a fixed cost (`timing_floor_us` in the
   calibration); below it per-kernel ratios are noise. Sanity-check a small-batch ratio
   against bytes moved divided by the calibration's bandwidth.

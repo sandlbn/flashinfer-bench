@@ -1,6 +1,6 @@
 ---
 name: submit-onboarding-prs
-description: Open the per-definition pair of PRs that publishes a model onboarding — PR 2 to the HuggingFace flashinfer-trace dataset (definition, reference test, baseline solution, workloads, blobs, eval traces) and PR 1 to flashinfer-bench (docs/model_coverage.mdx only). Includes the pre-flight dataset validation gate. Use as Phase 4 of /onboard-model.
+description: Open the per-definition pair of PRs that publishes a model onboarding — PR 2 to the HuggingFace flashinfer-trace dataset (definition, reference test, baseline solution, workloads, blobs, eval traces) and PR 1 to flashinfer-bench (docs/model_coverage.mdx only). Includes the pre-flight dataset validation gate. Use as /onboard-model's "Submit" phase.
 ---
 
 # Submit onboarding PRs
@@ -45,7 +45,7 @@ On Intel, select the backend for the GPU checks:
 | `workload` | Schema, axes > 0, shape inference, blobs present, no solution/evaluation embedded | Re-run `/collect-workloads`; a workload must not carry an evaluation |
 | `solution` | Schema, `entry_point` format, sources, path-field consistency | Fix the solution JSON |
 | `trace` | Has solution + evaluation, solution exists, workload coverage | Re-run `flashinfer-bench run --save-results` |
-| `baseline` | Baseline exists, builds, `PASSED`, covers the workloads | See Step 3 — a missing baseline usually means a signature mismatch |
+| `baseline` | Baseline exists, builds, `PASSED`, covers the workloads | See "PR 2 — the dataset" for what to copy; when `add-baselines` still produces none, compare the wrapper's signature against the definition's inputs and outputs |
 | `benchmark` | Runs baseline + reference on GPU | Fix whichever the report names before publishing |
 
 Reports land in `<dataset>/reports/report-YYYYMMDD-HHMMSS.json`; re-render an old one with
@@ -212,7 +212,7 @@ close and reopen, and never amend a commit that has been reviewed.
 | PR2-3 test missing/red | `/add-reference-tests`, run until green, update the PR body via `HfApi().edit_discussion_comment(...)` — there is no `edit_discussion`; a PR's description is the discussion's **first comment**, so read `get_discussion_details(...).events[0].id` and pass that as `comment_id` |
 | PR2-4/5 workloads or blobs | Re-run `/collect-workloads`; copy the regenerated files in |
 | PR2-6 baseline copies `reference` | Replace with a real wrapper (`add-baselines`), regenerate traces |
-| PR2-7 non-PASSED traces | Diagnose before regenerating — usually a baseline bug or a tolerance issue |
+| PR2-7 non-PASSED traces | Diagnose before regenerating: read the failing trace's `evaluation` for which check failed, then run the baseline and the reference on the same workload to see which of the two moved |
 | PR2-8 log missing/synthetic | Re-collect with the real config; a uniform axis sweep is synthetic |
 | PR2-9 provenance | Append `Model` / `SGLang` / `FlashInfer` SHAs and the entry count |
 

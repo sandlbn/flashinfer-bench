@@ -83,7 +83,8 @@ profile, never from what a tool happened to notice.
 `transformers` runs the eager form, so a fusion the serving stack performs (a gated
 activation as one kernel, a fused residual-add + norm) never shows up as the op the server
 will call. Those surface only from a serving run's dispatch counters, as
-`no-solution <shape>` — `/measure-serving-win` Step 6. Run both.
+`no-solution <shape>` — `/measure-serving-win`, "A `no-solution` line is a work item". Run
+both.
 
 ## Sources
 

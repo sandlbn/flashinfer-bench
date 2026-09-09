@@ -6,17 +6,21 @@ on data still in registers.
 [Xe-Fuse](https://github.com/IntelLabs/Xe-Fuse) is marked **not stable** by IntelLabs. Treat
 it as one solution source among several.
 
-## When to use it
+## When it applies
 
-Try oneDNN post-ops first (`/optimize-onednn`). Reach for Xe-Fuse only when **both** hold:
+There are two ways to express a fused epilogue on this box, and which of them *can* express
+a given fusion is a fact about the epilogue, not a preference:
 
-1. The fusion cannot be expressed as oneDNN post-ops. Post-ops are elementwise or binary on
-   a *single* GEMM's output, so anything needing a lane shuffle — SwiGLU, GeGLU, RoPE on
-   packed qkv — is out of reach.
-2. You have an AOT `sycl_target` and are willing to search tile shapes.
+- oneDNN **post-ops** (`/optimize-onednn`) are elementwise or binary on a *single* GEMM's
+  output. A fusion needing a lane shuffle — SwiGLU, GeGLU, RoPE on packed qkv — cannot be
+  written as one.
+- An Xe-Fuse **EVT** adds pairwise lane ops. It needs an AOT `sycl_target`, and the tile
+  shape is a swept trial parameter, never a table lookup.
 
-Measure its plain GEMM against oneDNN's at your shape first; the fusion has to save more
-than any difference.
+Every path that can express the fusion becomes a candidate; build each and let the benchmark
+order them. Xe-Fuse replaces the GEMM as well as the epilogue, so put its plain GEMM with no
+epilogue in the same harness at the same shape: that arm separates what the fused epilogue
+changed from what the substituted GEMM changed.
 
 ## Setup
 
@@ -124,10 +128,12 @@ written for one is wrong for the other.
 same value and CUTLASS's epilogue stores every lane. The result is `[M, 2d]` with each
 answer written twice; take `out[..., 0::2]`.
 
-This blocks kernel chaining: a compacting copy costs what the fusion saved. Chaining `k2`
-into `k0a` needs a strided A operand on the second GEMM (CuTe row-major `StrideA` carries a
-compile-time `_1` on K, so likely blocked), a compacting store in the visitor (upstream
-change), or accepting the copy. Resolve this before wiring a second fused kernel into an
+This is what a second fused kernel has to consume. Chaining `k2` into `k0a` needs a strided
+A operand on the second GEMM (CuTe row-major `StrideA` carries a compile-time `_1` on K —
+read the stride type the generator emits before assuming it admits a non-unit K stride), a
+compacting store in the visitor (an upstream change), or the compacting copy. Where the copy
+is taken, benchmark the chain against the two kernels run unchained in the same harness: the
+difference is what the copy costs. Resolve this before wiring a second fused kernel into an
 MLP.
 
 ## Adapting a model's weights: transform, don't branch
@@ -147,8 +153,9 @@ kernel(x, B, rms_row_scale(x, eps), out)
 result = deinterleave_output(out)
 ```
 
-Expect relative error on the order of bf16's spacing (`2**-7`) against an fp32 reference;
-an order of magnitude more is a layout error.
+The discriminating check: take the relative error against an fp32 reference and compare it
+against bf16's spacing (`2**-7`). At that order it is the format's own rounding; an order of
+magnitude more is a layout error, never a tolerance to loosen.
 
 Branch on the **fusion** (SwiGLU vs GeGLU vs residual+norm), never on the model layout.
 

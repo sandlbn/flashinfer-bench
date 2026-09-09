@@ -73,7 +73,10 @@ shares a row, so the exit is sub-group uniform.
 
 ### Measuring small kernels
 
-At decode batch sizes launch overhead dominates. Use the accelerator's own timer
+A small kernel's measured time can sit at the launch floor, where nothing inside the kernel
+is being measured; `launch_floor_us` and `timing_floor_us` from
+`flashinfer_bench.device.calibration.get()` say where that is for this part, and a sweep of
+the varying axis that does not move the time confirms it. Use the accelerator's own timer
 (`flashinfer-bench run`, or `get_accelerator(dev).make_timer(dev)`), one process per
 comparison, and report medians. Set a performance power profile first
 (`docs/start/hardware-support.mdx`).
@@ -139,9 +142,11 @@ only after reading index `i`, and pin that property with a test.
 call. The cost is the same whatever the kernel costs; read it from
 `flashinfer_bench.device.calibration.get()` (`scripts/calibrate_part.py` prints it).
 
-**Decision:** large kernels → `apply()` is fine. Elementwise kernels at decode sizes → bind
-once at model load (resolve the solution and install the `Runnable` as the layer's
-forward), or expect no throughput win.
+**Decision:** compare the kernel's own per-call time (unitrace `-d`, avg column) against
+`dispatch_us` from the same calibration. Where the kernel is large against it, `apply()`
+carries the substitution. Where it is not, the dispatch is a fraction of the call: bind once
+at model load instead — resolve the solution and install the `Runnable` as the layer's
+forward — and measure both arms rather than deciding from the shape of the op.
 
 ## Adding to this file
 

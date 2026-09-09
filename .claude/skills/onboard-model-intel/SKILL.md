@@ -5,9 +5,9 @@ description: End-to-end pipeline for supporting a new LLM on Intel GPUs — acqu
 
 # Onboard a model on Intel
 
-End state: definitions in the dataset, references proven correct on `xpu:0`, a profile
-that says where the time goes, and a benchmarked solution for the ops that matter. No CUDA
-anywhere in this path.
+End state: definitions in the dataset, references proven correct on `xpu:0`, a profile that
+ranks kernel families by recoverable device time, and a benchmarked solution for the ops
+that rank. No CUDA anywhere in this path.
 
 | Phase | Produces | Skip when |
 | --- | --- | --- |
@@ -51,8 +51,8 @@ ls tmp/flashinfer-trace/definitions/*/ | grep -E "h<hidden_size>|d<head_dim>"
 
 Naming formulas per op_type are `/extract-kernel-definitions` section B2; `/discover-models`
 does the full classification for a model new to the project. Record, per definition:
-exists in the dataset, has workloads, and which provider is likely to supply a baseline
-(Phase 5 table).
+exists in the dataset, has workloads, and which sources ship a kernel for its op family
+("What ships a kernel for which op family", below).
 
 ## Phase 2: Acquire definitions
 
@@ -97,7 +97,8 @@ for what the op computes; `config.json` plus the TP/EP rules give the constant a
 
 ### Path A (optional): the CUDA harvest
 
-If an NVIDIA box is available, `/onboard-model` Phase 2. Nothing downstream depends on it.
+If an NVIDIA box is available, `/onboard-model`, "Generate definitions". Nothing downstream
+depends on it.
 
 ### Writing the `reference`
 
@@ -146,18 +147,27 @@ the way a serving stack would — profile vLLM-XPU or SGLang-XPU for those.
 
 ## Phase 5: Source the solution
 
-### Decision table
+### What ships a kernel for which op family
 
-| op_type family | Try first | Then | Last resort |
-| --- | --- | --- | --- |
-| `gemm` (dense projections) | **oneDNN** — already the path torch takes | oneDNN **post-ops** for the epilogue | SYCL, only to fix a bad *call* (`/optimize-onednn`) |
-| GEMM + norm/activation fusion | **oneDNN post-ops**, gated on token count (`/optimize-onednn`, "Post-ops, and the shape of what they can express") | Xe-Fuse | hand-written SYCL |
-| `rmsnorm`, `rope`, activations | **`vllm-xpu-kernels`** | `sgl-kernel-xpu` | SYCL — check the deployment traps first |
-| `gqa_paged`, `gqa_ragged`, `mla_paged`, `dsa_paged` | **`sgl-kernel-xpu`** — the only Intel attention kernels | torch SDPA as a correctness floor | SYCL — very large effort |
-| `moe`, GroupGemm, W4A16/W8A16 | **`sgl-kernel-xpu`** | — | — |
-| `gdn`, `mamba_ssu`, any SSD scan | **`/optimize-ssm-scan`** — check for a materialised contraction first | `sgl-kernel-xpu` `gdn_attention` | SYCL |
-| quantization, KV-cache ops | **`vllm-xpu-kernels`** | — | — |
-| anything else | PyTorch eager reference | — | SYCL |
+Which source ships a kernel for an op family is a fact about what is built and registered on
+this box. It carries no order: wire every source that exists as a baseline ("Add baselines"
+below) and let the benchmark rank them.
+
+Source: `providers.md` inventories, `flashinfer-bench providers verify`, and each project's
+own op registration
+
+| op_type family | Sources that ship one | Written by hand when none does |
+| --- | --- | --- |
+| `gemm` (dense projections) | oneDNN — the primitive `F.linear` already executes on this backend; `/optimize-onednn` owns the call | SYCL |
+| GEMM + norm/activation fusion | oneDNN **post-ops** where the epilogue is elementwise or binary on one GEMM's output (`/optimize-onednn`, "Post-ops, and the shape of what they can express"); Xe-Fuse where it needs a lane shuffle (`optimize-intel-kernels/xe-fuse.md`) | SYCL |
+| `rmsnorm`, `rope`, activations | `vllm-xpu-kernels`, `sgl-kernel-xpu` | SYCL — check `providers.md` for which of these are actually registered before concluding none is |
+| `gqa_paged`, `gqa_ragged`, `mla_paged`, `dsa_paged` | `sgl-kernel-xpu` — the only Intel attention kernels; torch SDPA is available as a correctness floor | SYCL |
+| `moe`, GroupGemm, W4A16/W8A16 | `sgl-kernel-xpu` | SYCL |
+| `gdn`, `mamba_ssu`, any SSD scan | `sgl-kernel-xpu`'s `gdn_attention`; vllm-xpu's `gated_delta_rule_non_spec` | SYCL — `/optimize-ssm-scan` owns the recognition rule and the definition |
+| quantization, KV-cache ops | `vllm-xpu-kernels` | SYCL |
+| anything else | nothing; the definition's PyTorch reference is the only implementation | SYCL |
+
+Source: each project's build and packaging, and IntelLabs' own stability marking
 
 | Source | Cost | Risk |
 | --- | --- | --- |

@@ -12,7 +12,7 @@ hardware-agnostic — one that already exists is reused unchanged, never re-deri
 | --- | --- | --- |
 | **A** | Trace-dump from a short SGLang run | An NVIDIA box is available and FlashInfer has a trace template for the op |
 | **B** | Transcribe from model sources + `config.json` | No trace template, or TP/EP variants Path A cannot reach |
-| **C** | Module hooks on a `transformers` run | Intel-only box — see `/onboard-model-intel` Phase 2 |
+| **C** | Module hooks on a `transformers` run | Intel-only box — see `/onboard-model-intel`, "Acquire definitions" |
 
 Path B owns the naming and axis rules that all three paths must agree on.
 
@@ -211,7 +211,7 @@ file and pass `--body-file` rather than inlining it.
 `transformers` run — no CUDA, no SGLang. It emits dataset names directly (`rmsnorm_h{H}`,
 `gemm_n{N}_k{K}` on the B2 conventions), so no transcription step is needed. Verify the
 emitted names before staging rather than assuming either way — the listing command and the
-staging procedure are in `/onboard-model-intel` Phase 2.
+staging procedure are in `/onboard-model-intel`, "Acquire definitions".
 
 ## Failure table
 

@@ -32,26 +32,29 @@ itemsize.
 the full `chunk x chunk x heads x state` intermediate. The target is **removing the
 intermediate**, not a faster reduction.
 
-## Where a kernel can come from, in order
+## Where a kernel can come from
 
-1. **A registered provider kernel** — `sgl-kernel-xpu`'s `gdn_attention`, and vllm-xpu's
-   `gated_delta_rule_non_spec` (bound to `gdn` against the `_l2norm` definition variants).
-   Add them as baselines first (`/onboard-model-intel` Phase 5). Ask the registry for what
-   is bound today; enumerate the source for what exists:
-   ```bash
-   grep -ohE '"[a-z_0-9]*gdn[a-z_0-9]*\(' tmp/sgl-kernel-xpu/src/torch_extension_sycl.cc
-   ```
-   `gdn_attention_workspace_bytes_needed`: this kernel wants a caller-provided workspace,
-   so the wrapper must allocate it.
-2. **An existing definition.** The dataset carries `gdn` and `mamba_ssu`:
-   ```bash
-   ls tmp/flashinfer-trace/definitions/gdn tmp/flashinfer-trace/definitions/mamba_ssu
-   ```
-   Naming (`/extract-kernel-definitions` B2): `mamba_ssu_decode_h{n}_d{d}_s{s}_ng{g}` and
-   `gdn_{decode,mtp,prefill}_qk{q}_v{v}_d{d}_k_last`. Match your config's head/state
-   counts before writing a new one.
-3. **Your own SYCL kernel.** `/optimize-intel-kernels`, "Write a SYCL solution". Fuse multiply and reduce so
-   the intermediate stays in registers.
+Three sources, no order among them: wire every one that exists as a baseline and let the
+benchmark rank them.
+
+- **A registered provider kernel** — `sgl-kernel-xpu`'s `gdn_attention`, and vllm-xpu's
+  `gated_delta_rule_non_spec` (bound to `gdn` against the `_l2norm` definition variants).
+  Add them as baselines (`/onboard-model-intel`, "Source the solution"). Ask the registry
+  for what is bound today; enumerate the source for what exists:
+  ```bash
+  grep -ohE '"[a-z_0-9]*gdn[a-z_0-9]*\(' tmp/sgl-kernel-xpu/src/torch_extension_sycl.cc
+  ```
+  `gdn_attention_workspace_bytes_needed`: this kernel wants a caller-provided workspace,
+  so the wrapper must allocate it.
+- **An existing definition.** The dataset carries `gdn` and `mamba_ssu`:
+  ```bash
+  ls tmp/flashinfer-trace/definitions/gdn tmp/flashinfer-trace/definitions/mamba_ssu
+  ```
+  Naming (`/extract-kernel-definitions` B2): `mamba_ssu_decode_h{n}_d{d}_s{s}_ng{g}` and
+  `gdn_{decode,mtp,prefill}_qk{q}_v{v}_d{d}_k_last`. Match your config's head/state
+  counts against those before writing a new one.
+- **Your own SYCL kernel.** `/optimize-intel-kernels`, "Write a SYCL solution". Fuse
+  multiply and reduce so the intermediate stays in registers.
 
 ## Getting a definition at all
 

@@ -32,66 +32,6 @@
    "text": "- Gemma-style norm scales by `(1 + weight)`, not `weight`."
   },
   {
-   "path": ".claude/skills/add-reference-tests/SKILL.md",
-   "rule": "STEPREF",
-   "text": "That belongs to `onboard-model-intel` Phase 3."
-  },
-  {
-   "path": ".claude/skills/clone-repos/SKILL.md",
-   "rule": "EXPECT",
-   "text": "is not the goal; the wins are in how it is called (`/optimize-onednn`)."
-  },
-  {
-   "path": ".claude/skills/collect-workloads/SKILL.md",
-   "rule": "EXPECT",
-   "text": "| `--num-batches` | 2 | Inference rounds; the budget is usually hit in round 1 |"
-  },
-  {
-   "path": ".claude/skills/collect-workloads/SKILL.md",
-   "rule": "STEPREF",
-   "text": "When no NVIDIA box is available, `onboard-model-intel` Phase 2 Path C emits workloads"
-  },
-  {
-   "path": ".claude/skills/collect-workloads/SKILL.md",
-   "rule": "STEPREF",
-   "text": "`onboard-model-intel` Phase 2 Path C instead (module hooks on a `transformers` run); see"
-  },
-  {
-   "path": ".claude/skills/discover-model-kernels/SKILL.md",
-   "rule": "EXPECT",
-   "text": "| **oneDNN** | the op ran and oneDNN logged a primitive | `/optimize-onednn` \u2014 the win is in the call, not a replacement kernel |"
-  },
-  {
-   "path": ".claude/skills/discover-models/SKILL.md",
-   "rule": "EXPECT",
-   "text": "No hit means `sgl_missing`: record the file that *would* host the call (usually"
-  },
-  {
-   "path": ".claude/skills/discover-models/SKILL.md",
-   "rule": "STEPREF",
-   "text": "baseline (`/onboard-model-intel` Phase 5); `none` \u2192 write a solution"
-  },
-  {
-   "path": ".claude/skills/discover-models/SKILL.md",
-   "rule": "STEPREF",
-   "text": "description: Discover candidate LLMs and produce a kernel inventory \u2014 the definitions a model needs, classified existing/new and by which backend can supply a kernel (FlashInfer on CUDA, vllm-xpu / sgl-kernel-xpu / oneDNN on Intel). Writes the run manifest the rest of the pipeline consumes. Use as Phase 1 of /onboard-model or /onboard-model-intel."
-  },
-  {
-   "path": ".claude/skills/discover-models/SKILL.md",
-   "rule": "STEPREF",
-   "text": "this the manifest cannot drive `/onboard-model-intel` Phase 5."
-  },
-  {
-   "path": ".claude/skills/extract-kernel-definitions/SKILL.md",
-   "rule": "STEPREF",
-   "text": "staging procedure are in `/onboard-model-intel` Phase 2."
-  },
-  {
-   "path": ".claude/skills/extract-kernel-definitions/SKILL.md",
-   "rule": "STEPREF",
-   "text": "| **C** | Module hooks on a `transformers` run | Intel-only box \u2014 see `/onboard-model-intel` Phase 2 |"
-  },
-  {
    "path": ".claude/skills/find-kernel-gaps/SKILL.md",
    "rule": "NAME",
    "text": "Worked example in the dataset: `mamba_ssu/ssd_bc_contraction_c256_h64_s128`, with"
@@ -102,44 +42,14 @@
    "text": "names \u2014 a Mamba2 scan and an RMSNorm produce the same kernel name"
   },
   {
-   "path": ".claude/skills/find-kernel-gaps/SKILL.md",
-   "rule": "STEPREF",
-   "text": "`no-solution <shape>` \u2014 `/measure-serving-win` Step 6. Run both."
-  },
-  {
-   "path": ".claude/skills/measure-serving-win/SKILL.md",
-   "rule": "EXPECT",
-   "text": "costs a fixed amount of Python per call; a miss is nearly free. Read both from"
-  },
-  {
-   "path": ".claude/skills/onboard-model-intel/SKILL.md",
-   "rule": "EXPECT",
-   "text": "that says where the time goes, and a benchmarked solution for the ops that matter. No CUDA"
-  },
-  {
    "path": ".claude/skills/onboard-model-intel/SKILL.md",
    "rule": "NAME",
    "text": "| A hybrid/Mamba model is slow | `/optimize-ssm-scan` |"
   },
   {
-   "path": ".claude/skills/onboard-model-intel/SKILL.md",
-   "rule": "ORDER",
-   "text": "| op_type family | Try first | Then | Last resort |"
-  },
-  {
-   "path": ".claude/skills/onboard-model-intel/SKILL.md",
-   "rule": "STEPREF",
-   "text": "If an NVIDIA box is available, `/onboard-model` Phase 2. Nothing downstream depends on it."
-  },
-  {
    "path": ".claude/skills/onboard-model-intel/providers.md",
    "rule": "NAME",
    "text": "arity is not matching semantics; Gemma's variant needs its own definition first."
-  },
-  {
-   "path": ".claude/skills/optimize-intel-kernels/architectures.md",
-   "rule": "EXPECT",
-   "text": "forward), or expect no throughput win."
   },
   {
    "path": ".claude/skills/optimize-intel-kernels/architectures.md",
@@ -160,26 +70,6 @@
    "path": ".claude/skills/optimize-intel-kernels/xe-fuse.md",
    "rule": "NAME",
    "text": "| `k2_geglu`, `k2v2_geglu` | `D = GeGLU(acc * R[m])` | Gemma-style gated FFN |"
-  },
-  {
-   "path": ".claude/skills/optimize-intel-kernels/xe-fuse.md",
-   "rule": "ORDER",
-   "text": "Try oneDNN post-ops first (`/optimize-onednn`). Reach for Xe-Fuse only when **both** hold:"
-  },
-  {
-   "path": ".claude/skills/optimize-intel-kernels/xe-matrix.md",
-   "rule": "EXPECT",
-   "text": "(16 in practice); x-offset a multiple of 4 elements; width/height/pitch < 2\u00b2\u2074."
-  },
-  {
-   "path": ".claude/skills/optimize-intel-kernels/xe-matrix.md",
-   "rule": "EXPECT",
-   "text": "(`examples/cute/tutorial/xe_gemm.cpp`, \"upconversion sequences are typically faster\")."
-  },
-  {
-   "path": ".claude/skills/optimize-intel-kernels/xe-matrix.md",
-   "rule": "EXPECT",
-   "text": "`torch._scaled_mm` upconvert to fp16 and use the fp16 DPAS, so fp8 is slower than the same"
   },
   {
    "path": ".claude/skills/optimize-intel-kernels/xe-matrix.md",
@@ -282,36 +172,6 @@
    "text": "description: Optimize state-space / SSD scan kernels on Intel GPUs \u2014 Mamba2, GDN, and the hybrid models built on them (Zamba, Granite-hybrid, Falcon-H, Jamba). Use when /profile-intel reports materialised high-rank contractions, or when a hybrid model's time is in aten::sum / aten::mul over rank-5+ tensors."
   },
   {
-   "path": ".claude/skills/optimize-ssm-scan/SKILL.md",
-   "rule": "ORDER",
-   "text": "## Where a kernel can come from, in order"
-  },
-  {
-   "path": ".claude/skills/optimize-ssm-scan/SKILL.md",
-   "rule": "STEPREF",
-   "text": "Add them as baselines first (`/onboard-model-intel` Phase 5). Ask the registry for what"
-  },
-  {
-   "path": ".claude/skills/profile-intel/SKILL.md",
-   "rule": "EXPECT",
-   "text": "| `gemm` | `/optimize-onednn` | oneDNN is already the path `F.linear` takes. The win is in how it is *called* \u2014 layout, primitive caching, post-op fusion, not blocking the host \u2014 never in beating its matmul |"
-  },
-  {
-   "path": ".claude/skills/profile-intel/SKILL.md",
-   "rule": "STEPREF",
-   "text": "| `attention` | `/onboard-model-intel` Phase 5 | `sgl-kernel-xpu` is the only source of Intel attention kernels; wire it as a baseline before writing anything |"
-  },
-  {
-   "path": ".claude/skills/profile-intel/SKILL.md",
-   "rule": "STEPREF",
-   "text": "| `sampling` | `/onboard-model-intel` Phase 5 | `sgl-kernel-xpu` has the family; verify each op is actually built |"
-  },
-  {
-   "path": ".claude/skills/profile-intel/SKILL.md",
-   "rule": "VERDICT",
-   "text": "| Family | Route to | Because |"
-  },
-  {
    "path": ".claude/skills/route-kernel-work/PLAN.md",
    "rule": "BROKENREF",
    "text": "| B | **absent** | `scripts/route_kernel_work.py`: bytes-moved per op, per-mechanism bound, ranking |"
@@ -335,21 +195,6 @@
    "path": ".claude/skills/setup-intel-env/SKILL.md",
    "rule": "NAME",
    "text": "host. On an integrated Xe3.0 part use `vllm-xpu` plus in-tree kernels"
-  },
-  {
-   "path": ".claude/skills/submit-onboarding-prs/SKILL.md",
-   "rule": "EXPECT",
-   "text": "| PR2-7 non-PASSED traces | Diagnose before regenerating \u2014 usually a baseline bug or a tolerance issue |"
-  },
-  {
-   "path": ".claude/skills/submit-onboarding-prs/SKILL.md",
-   "rule": "EXPECT",
-   "text": "| `baseline` | Baseline exists, builds, `PASSED`, covers the workloads | See Step 3 \u2014 a missing baseline usually means a signature mismatch |"
-  },
-  {
-   "path": ".claude/skills/submit-onboarding-prs/SKILL.md",
-   "rule": "STEPREF",
-   "text": "description: Open the per-definition pair of PRs that publishes a model onboarding \u2014 PR 2 to the HuggingFace flashinfer-trace dataset (definition, reference test, baseline solution, workloads, blobs, eval traces) and PR 1 to flashinfer-bench (docs/model_coverage.mdx only). Includes the pre-flight dataset validation gate. Use as Phase 4 of /onboard-model."
   },
   {
    "path": ".claude/skills/track-models/SKILL.md",

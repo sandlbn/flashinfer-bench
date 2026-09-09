@@ -36,8 +36,8 @@ answer, and the point is that it is asked, not assumed.
 
 ## The block programming model
 
-From `AGENTS.md`, and it is the rule that most often breaks a kernel written with CUDA
-instincts:
+From `AGENTS.md`. It is where the model differs from the CUDA thread model, so a kernel
+transcribed from CUDA has to be re-read against it:
 
 - A Triton program operates on logical blocks, not on hardware threads. Scalar values,
   scalar control flow and the origin of a memory descriptor are uniform across the block.

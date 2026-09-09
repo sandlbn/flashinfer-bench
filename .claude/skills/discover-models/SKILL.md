@@ -1,6 +1,6 @@
 ---
 name: discover-models
-description: Discover candidate LLMs and produce a kernel inventory — the definitions a model needs, classified existing/new and by which backend can supply a kernel (FlashInfer on CUDA, vllm-xpu / sgl-kernel-xpu / oneDNN on Intel). Writes the run manifest the rest of the pipeline consumes. Use as Phase 1 of /onboard-model or /onboard-model-intel.
+description: Discover candidate LLMs and produce a kernel inventory — the definitions a model needs, classified existing/new and by which backend can supply a kernel (FlashInfer on CUDA, vllm-xpu / sgl-kernel-xpu / oneDNN on Intel). Writes the run manifest the rest of the pipeline consumes. Use as /onboard-model's "Discover and classify" phase, or /onboard-model-intel's "Inventory the model's kernels".
 ---
 
 # Discover models
@@ -122,7 +122,7 @@ for k in sorted(REGISTRY, key=lambda k: (k.op_type, k.name)):
 Record `intel_status` per definition: `wired` (a baseline exists today), `available`
 (a provider ships the kernel but nothing is registered — see
 `onboard-model-intel/providers.md`), or `none` (needs a SYCL or Triton solution). Without
-this the manifest cannot drive `/onboard-model-intel` Phase 5.
+this the manifest cannot drive `/onboard-model-intel`, "Source the solution".
 
 ## 1f. Does SGLang route through it?
 
@@ -133,9 +133,9 @@ whether workloads can be collected at all.
 grep -rn "<flashinfer_api_name>" tmp/sglang/python/sglang/srt/ | grep -v __pycache__
 ```
 
-No hit means `sgl_missing`: record the file that *would* host the call (usually
-`layers/attention/flashinfer_backend.py` or the matching layer module), so the SGLang PR step
-has a target.
+No hit means `sgl_missing`: record the file that *would* host the call, found by grepping
+`tmp/sglang/python/sglang/srt/layers/` for the layer this definition belongs to, so the
+SGLang PR step has a target.
 
 ## 1g. Write the manifest
 
@@ -190,5 +190,5 @@ Print four buckets, because each routes to a different next step:
 - **new + fi_missing** — manual extraction, plus a FlashInfer kernel-request issue
 
 On Intel the routing is `intel_status` instead: `wired` → benchmark now; `available` → wire a
-baseline (`/onboard-model-intel` Phase 5); `none` → write a solution
+baseline (`/onboard-model-intel`, "Source the solution"); `none` → write a solution
 (`/optimize-intel-kernels`).

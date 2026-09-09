@@ -184,7 +184,7 @@ flashinfer-bench validate-references --local tmp/flashinfer-trace \
     --device xpu:0 --definitions {definition_name}
 ```
 
-That belongs to `onboard-model-intel` Phase 3.
+That belongs to `onboard-model-intel`, "Cross-validate the references on `xpu:0`".
 
 ## Sources
 

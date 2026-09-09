@@ -10,8 +10,8 @@ blobs, from shapes an actual inference run produced — not from shapes someone 
 
 **This path requires NVIDIA.** It drives SGLang with the FlashInfer attention backend, and
 `tools/gpu-lock` allocates through `nvidia-smi`. On an Intel-only box, workloads come from
-`onboard-model-intel` Phase 2 Path C instead (module hooks on a `transformers` run); see
-"On Intel" at the end.
+`onboard-model-intel`, "Acquire definitions", Path C instead (module hooks on a
+`transformers` run); see "On Intel" at the end.
 
 ## Prerequisites
 
@@ -66,7 +66,7 @@ tools/gpu-lock --gpus 8 --exec-timeout 10800 -- \
 | --- | --- | --- |
 | `--dump-count` | 500 | Dump budget per server session |
 | `--workloads-per-batch` | 4 | Workloads appended per batch size |
-| `--num-batches` | 2 | Inference rounds; the budget is usually hit in round 1 |
+| `--num-batches` | 2 | Inference rounds; collection stops at the `--dump-count` budget, whichever round reaches it |
 | `--replace-first` | off | Start the JSONL fresh instead of appending |
 | `--no-push` | off | Collect and sanitize without uploading — use this first |
 | `--no-eval` | off | Skip the eval + trace push |
@@ -166,9 +166,9 @@ definition's reference disagrees with the baseline on real shapes — fix that, 
 Definitions and workloads are hardware-agnostic, so workloads collected on NVIDIA are
 reused unchanged on Intel — never re-collect them per backend.
 
-When no NVIDIA box is available, `onboard-model-intel` Phase 2 Path C emits workloads
-alongside its definitions from module hooks on a `transformers` run. That gives TP=1 shapes;
-TP/EP variants come from Path B arithmetic. The provenance artifact for the PR is then the
+When no NVIDIA box is available, Path C of `onboard-model-intel`, "Acquire definitions",
+emits workloads alongside its definitions from module hooks on a `transformers` run. That
+gives TP=1 shapes; TP/EP variants come from Path B arithmetic. The provenance artifact for the PR is then the
 Path C run log rather than an SGLang collection log.
 
 ## Sources

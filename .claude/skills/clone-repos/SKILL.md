@@ -93,8 +93,9 @@ torch.matmul(a, a.T[:64]); torch.xpu.synchronize()" 2>&1 |
 git clone --depth 1 --branch "v$V" https://github.com/uxlfoundation/oneDNN.git tmp/oneDNN
 ```
 
-For reading, never for building — the runtime comes from oneAPI. Tuning oneDNN's own GEMM
-is not the goal; the wins are in how it is called (`/optimize-onednn`).
+For reading, never for building — the runtime comes from oneAPI. The clone is what
+`ONEDNN_VERBOSE=dispatch` refers to: each dispatch line names a source file and line in this
+tree, and `/optimize-onednn` reads them.
 
 ## Install from source — only on CUDA
 

@@ -56,14 +56,18 @@ and `XE_BDPAS_TT` — the block-scaled MX instruction, i.e. native mxfp8/mxfp4
 dpas is removed").
 
 **fp8 runs on Battlemage by emulation.** sycl-tla's `examples/08_bmg_gemm_f8` and PyTorch's
-`torch._scaled_mm` upconvert to fp16 and use the fp16 DPAS, so fp8 is slower than the same
-GEMM in bf16 here, and bit-exact against an fp32-upcast reference. An FP8 model on this part
-buys memory capacity, not speed; never report it as an fp8 speedup. `Capabilities` lists fp8
-under `emulated_dtypes`, and `validate-references` labels the result
-`[emulated: ... -- latency is not native]`.
+`torch._scaled_mm` upconvert to fp16 and use the fp16 DPAS, and the result is bit-exact
+against an fp32-upcast reference. `Capabilities` lists fp8 under `emulated_dtypes`, and
+`validate-references` labels the result `[emulated: ... -- latency is not native]`: a
+latency measured here is the emulation sequence's, so it is not reportable as an fp8
+result. What the format still buys on this part is the bytes it moves, which `bytes_min`
+already accounts for.
 
-When the source dtype has no DPAS, convert to **fp16** rather than bf16
-(`examples/cute/tutorial/xe_gemm.cpp`, "upconversion sequences are typically faster").
+When the source dtype has no DPAS it has to be converted to one that does, and both fp16
+and bf16 are available above. Which of the two the upconversion sequence costs least in is
+a property of the sequence the compiler emits, not of the format: build the kernel both
+ways and benchmark. sycl-tla's own sequences are in
+`examples/cute/tutorial/xe_gemm.cpp`.
 
 ### Where Intel's Xe2 GEMM tuning is
 
@@ -93,15 +97,16 @@ Hard limits (static-asserted in `cute/arch/copy_xe_2d.hpp`):
 - VNNI only for 8/16-bit; transpose only for 32/64-bit — and on Xe2, transpose width ≤ 8
   for d32, ≤ 4 for d64 (Xe3P+ doubles both)
 
-Address constraints: base pointer **64-byte aligned**; width and pitch multiples of 4 bytes
-(16 in practice); x-offset a multiple of 4 elements; width/height/pitch < 2²⁴.
+Address constraints: base pointer **64-byte aligned**; width and pitch multiples of 4 bytes;
+x-offset a multiple of 4 elements; width/height/pitch < 2²⁴.
 
 Block-2D gives free out-of-bounds zero-fill, so remainder tiles need no load masking. A
 shape that violates the constraints loses the whole mechanism.
 
 When block-2D is unavailable (gathered rows for GQA/MoE, misalignment), the fallback is SLM
 staging with `XE_1D_LDSM` or `XE_1D_LOAD_GLOBAL`, using d16u32/d8u32 messages for narrow
-types — slower, and worth restructuring the data to avoid.
+types. Restructuring the data so the constraints above hold restores block-2D; where both
+forms are buildable, that is a candidate to measure against the fallback.
 
 Create the address payload once and update only X/Y per copy (`prepare_payloads`,
 `copy_with_multi_payloads`, `update_payloads`).
