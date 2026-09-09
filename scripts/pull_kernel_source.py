@@ -22,8 +22,12 @@ a remembered ratio.
 from __future__ import annotations
 
 import argparse
+import os
 import pathlib
 import re
+import json
+import subprocess
+import sys
 from typing import Dict, List, Optional, Tuple
 
 # A registration under one of these keys is not a kernel -- it is a rule for rewriting the
@@ -31,12 +35,76 @@ from typing import Dict, List, Optional, Tuple
 # calls, so discovery has already recorded those separately.
 _DECOMPOSITION_KEYS = ("CompositeImplicitAutograd", "CompositeExplicitAutograd", "Meta")
 
+# A kernel registered inside PyTorch itself is not the end of the answer: for GEMM-shaped
+# work ATen calls oneDNN, and the primitive oneDNN picks -- not the ATen wrapper -- is what
+# runs and what has to be changed. oneDNN says which, if asked.
+_PROBE = """
+import json, sys, torch
+spec = json.loads(sys.argv[1]); op = sys.argv[2]
 
-def dispatch_report(op: str) -> Tuple[List[str], List[str]]:
-    """``(dispatch keys, registration source paths)`` for ``ns::name``, from the dispatcher."""
+
+def mk(a):
+    if isinstance(a, list) and a and a[0] == "T":
+        _, shape, dtype = a
+        f = torch.randn if dtype.startswith(("float", "bfloat")) else torch.ones
+        return f(shape, dtype=getattr(torch, dtype), device=sys.argv[3])
+    if isinstance(a, list):
+        return [mk(i) for i in a]
+    return a
+
+
+ns, name = op.split("::")
+try:
+    getattr(getattr(torch.ops, ns), name)(*[mk(a) for a in spec])
+    torch.__dict__[sys.argv[3].split(":")[0]].synchronize()
+except Exception as exc:
+    print("PROBE_ERROR", type(exc).__name__, str(exc)[:120], file=sys.stderr)
+"""
+
+
+def probe_library(op: str, argspec: List, device: str) -> List[str]:
+    """Run the op once with oneDNN's verbose logging on, and return the primitives it ran.
+
+    A subprocess, because the logging is enabled by an environment variable read at library
+    load, and because an op that faults must not take the resolver down with it.
+    """
+    env = {**os.environ, "ONEDNN_VERBOSE": "1"}
+    try:
+        r = subprocess.run(
+            [sys.executable, "-c", _PROBE, json.dumps(argspec), op, device],
+            capture_output=True,
+            text=True,
+            timeout=180,
+            env=env,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+    out = r.stdout + r.stderr
+    prims = []
+    for line in out.splitlines():
+        if ",primitive,exec," in line:
+            f = line.split(",")
+            # engine, primitive, implementation, ..., problem, time
+            if len(f) > 8:
+                prims.append(f"{f[5]} via {f[6]}  [{f[-2]}]")
+    return sorted(set(prims))
+
+
+def dispatch_report(op: str, overload: str = "") -> Tuple[List[str], List[str]]:
+    """``(dispatch keys, registration source paths)`` for ``ns::name``, from the dispatcher.
+
+    Some ops are only addressable with their overload -- ``aten::index`` dumps nothing,
+    ``aten::index.Tensor`` dumps the truth -- and an empty dump is indistinguishable from an
+    op the dispatcher has never heard of. Try the overload the model actually called before
+    concluding anything from silence.
+    """
     import torch
 
-    dump = torch._C._dispatch_dump(op)
+    dump = ""
+    for name in ([f"{op}.{overload}"] if overload else []) + [op]:
+        dump = torch._C._dispatch_dump(name)
+        if dump:
+            break
     keys, sources = [], []
     for line in dump.splitlines():
         m = re.match(r"^(\w+(?:\[[^\]]*\])?):\s*(.*)$", line.strip())
@@ -90,6 +158,8 @@ def locate(op_name: str, registration_paths: List[str], extra: Optional[List[str
     bare = op_name.split("::")[-1]
     tails = set()
     for rp in registration_paths:
+        if "_meta_registrations" in rp or "RegisterMeta" in rp:
+            continue  # a shape rule, not a kernel
         parts = pathlib.PurePosixPath(rp).parts
         for depth in (3, 2, 1):
             if len(parts) >= depth:
@@ -102,7 +172,12 @@ def locate(op_name: str, registration_paths: List[str], extra: Optional[List[str
             cand = root / tail
             if cand.is_file():
                 binding.append((cand, f"registered here ({tail})"))
-                project_roots.append(root)
+                # Scope to the package, not the directory that holds every package: a
+                # site-packages root turns the search below into a grep over numpy and
+                # pandas for anything sharing the op's name.
+                head = pathlib.PurePosixPath(tail).parts[0]
+                scoped = root / head
+                project_roots.append(scoped if scoped.is_dir() else root)
                 break
 
     # Without a binding site there is no project to scope to, and an unscoped search
@@ -228,42 +303,104 @@ def bundle(
     return d
 
 
+def python_op_source(op: str) -> List[str]:
+    """Locate a custom op that was registered from Python rather than C++.
+
+    ``torch.library`` registrations leave nothing in the dispatcher dump, so the namespace
+    is the only handle -- and it is enough: a namespace belongs to a package, and the
+    package's source declares the op by name.
+    """
+    import importlib
+
+    ns, bare = op.split("::")
+    try:
+        mod = importlib.import_module(ns)
+    except Exception:
+        return []
+    root = pathlib.Path(getattr(mod, "__file__", "") or "").parent
+    if not root.is_dir():
+        return []
+    decl = re.compile(rf'(def |"|\'){re.escape(bare)}\b')
+    hits = []
+    for f in sorted(root.rglob("*.py")):
+        try:
+            if decl.search(f.read_text(errors="ignore")):
+                hits.append(str(f))
+        except OSError:
+            continue
+        if len(hits) >= 3:
+            break
+    return hits
+
+
+def _in_torch(sources: List[str]) -> bool:
+    return any("/pytorch/" in x or "/aten/" in x for x in sources)
+
+
 def report(
     op: str,
     device: str,
     extra: Optional[List[str]],
     out: Optional[pathlib.Path] = None,
     harness: Optional[pathlib.Path] = None,
+    argspec: Optional[List] = None,
+    calls: Optional[int] = None,
+    overload: str = "",
 ) -> Dict[str, object]:
-    keys, sources = dispatch_report(op)
+    """Say what implements ``op`` on ``device``, and where that source is."""
+    keys, sources = dispatch_report(op, overload)
     dev = device_keys(keys, device)
     decomp = [k for k in keys if k.split("[")[0] in _DECOMPOSITION_KEYS]
-    print(f"\n=== {op} ===")
-    print(f"  dispatch keys : {', '.join(keys) if keys else '(none)'}")
-    if dev:
-        print(f"  on {device:8}   : {', '.join(dev)}  <- a real kernel runs here")
-    elif decomp:
-        print(f"  on {device:8}   : none; {decomp[0]} rewrites it into other ops.")
-        print("                  There is no kernel to pull -- optimize what it decomposes to,")
-        print("                  which discovery recorded separately.")
+    head = f"{op}" + (f"   ({calls} calls)" if calls else "")
+    print(f"\n=== {head} ===")
+
+    provider, where, route = "unresolved", [], ""
+    prims = probe_library(op, argspec, device) if argspec is not None else []
+    found = locate(op, sources, extra) if (dev or prims) else []
+    in_torch = _in_torch(sources) or any("site-packages/torch/" in str(f) for f, _ in found)
+
+    if prims:
+        # oneDNN ran. That is true whether the op dispatched straight to it or a
+        # decomposition reached it, and it names the primitive that has to change.
+        provider = "oneDNN"
+        where = [f"primitive: {x}" for x in prims]
+        route = "/optimize-onednn -- the win is in the call, not a replacement kernel"
+    elif not keys:
+        # No dispatcher entry at all: a custom op registered from Python.
+        provider = "Python-registered custom op"
+        where = python_op_source(op) or ["source not located"]
+        route = "/wrap-kernel-for-tuning -- it needs the stack's context to run"
+    elif not dev and decomp:
+        provider = "decomposition"
+        where = [f"{decomp[0]} -- rewritten into ops discovery recorded separately"]
+        route = "no kernel to pull; optimize what it decomposes to"
+    elif not dev:
+        provider = "not on this device"
+        route = "not a target"
+    elif in_torch and not [f for f, _ in found if "site-packages/torch/" not in str(f)]:
+        provider = "ATen kernel inside PyTorch"
+        where = [x for x in sources if "/aten/" in x][:2] or ["(built into torch)"]
+        route = "no local source to edit; measure against the harness, or report upstream"
+    elif found:
+        provider = "provider kernel"
+        where = [f"{f}  ({why})" for f, why in found]
+        route = "/discover-model-kernels step 4 -- trial loop against harness.py"
     else:
-        print(f"  on {device:8}   : nothing registered; this op does not run here")
-    for s in sources:
-        print(f"  registered at : {s}")
-    found = locate(op, sources, extra) if dev else []
-    seen = set()
-    for path, why in found:
-        if path in seen:
-            continue
-        seen.add(path)
-        print(f"  source        : {path}  ({why})")
-    if dev and not found:
-        print("  source        : not on this box. Clone the providing project to tmp/ to")
-        print("                  read it, or optimize against the harness alone.")
-    written = bundle(op, device, dev, sources, found, harness, out) if out and dev else None
-    if written:
-        print(f"  bundled to    : {written}  (harness + source + PROVENANCE.md)")
-    return {"op": op, "keys": keys, "device_keys": dev, "sources": sources}
+        provider = "registered, source not on this box"
+        where = sources[:2]
+        route = "clone the providing project into tmp/ to read it"
+
+    print(f"  implemented by: {provider}")
+    for w in where:
+        print(f"  where         : {w}")
+    print(f"  route         : {route}")
+
+    written = None
+    if out and provider == "provider kernel":
+        written = bundle(op, device, dev, sources, found, harness, out)
+        if written:
+            print(f"  bundled to    : {written}")
+    return {"op": op, "provider": provider, "where": where, "route": route, "bundle": written}
 
 
 def ops_from_harnesses(d: pathlib.Path) -> Dict[str, pathlib.Path]:
@@ -288,10 +425,24 @@ def ops_from_harnesses(d: pathlib.Path) -> Dict[str, pathlib.Path]:
     return {op: f for op, (_, f) in best.items()}
 
 
+def from_report(path: pathlib.Path) -> Tuple[Dict[str, Tuple[int, List, str]], List[Dict]]:
+    """Every op discovery recorded, with the busiest shape's args, plus its Triton kernels."""
+    data = json.loads(path.read_text())
+    best: Dict[str, Tuple[int, List, str]] = {}
+    for row in data.get("ops", []):
+        parts = row["op"].split(".")
+        op = f"{parts[0]}::{parts[1]}"
+        overload = parts[2] if len(parts) > 2 else ""
+        if op not in best or row["calls"] > best[op][0]:
+            best[op] = (row["calls"], row["args"], overload)
+    return best, data.get("triton", [])
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--op", action="append", default=[], help="ns::name, repeatable")
     ap.add_argument("--from-harnesses", help="directory written by harness_from_model.py")
+    ap.add_argument("--from-report", help="discovered.json written by harness_from_model.py")
     ap.add_argument("--device", default="xpu:0")
     ap.add_argument("--search", action="append", default=[], help="extra source root")
     ap.add_argument(
@@ -303,20 +454,40 @@ def main() -> None:
     harnesses: Dict[str, pathlib.Path] = {}
     if args.from_harnesses:
         harnesses = ops_from_harnesses(pathlib.Path(args.from_harnesses))
-    ops = sorted(set(list(args.op) + list(harnesses)))
-    if not ops:
-        ap.error("give --op or --from-harnesses")
+    recorded: Dict[str, Tuple[int, List, str]] = {}
+    triton: List[Dict] = []
+    if args.from_report:
+        recorded, triton = from_report(pathlib.Path(args.from_report))
+    ops = sorted(set(list(args.op) + list(harnesses) + list(recorded)))
+    if not ops and not triton:
+        ap.error("give --op, --from-harnesses or --from-report")
 
     import torch  # noqa: F401  (loads the dispatcher)
 
     out = pathlib.Path(args.bundle) if args.bundle else None
+    results = []
     for op in ops:
-        report(op, args.device, args.search, out, harnesses.get(op))
-    if out:
-        print(f"\nBundles in {out}: each has the harness, the kernel's own source, and a")
-        print("PROVENANCE.md saying what runs and where it came from.")
-    print("\nNext: scripts/kernel_trials.py against the harness for the ops that have a")
-    print("kernel here; the decompositions are a rewrite, not a kernel.")
+        calls, argspec = recorded.get(op, (None, None))
+        results.append(report(op, args.device, args.search, out, harnesses.get(op), argspec, calls))
+
+    # Triton kernels are not dispatcher ops; the JIT knows where their source is.
+    for t in triton:
+        print(f"\n=== {t['kernel']}   ({t['calls']} calls) ===")
+        print("  implemented by: Triton (JIT-compiled at run time)")
+        print(f"  where         : {t['source']}")
+        if t.get("constexprs"):
+            print(f"  constexprs    : {t['constexprs']}")
+        print("  route         : /wrap-kernel-for-tuning -- tune in place, no substitution")
+        results.append({"op": t["kernel"], "provider": "Triton", "route": "wrap"})
+
+    print("\n" + "=" * 78)
+    print(f"{'op':44} {'implemented by':32}")
+    print("-" * 78)
+    for r in sorted(results, key=lambda r: str(r["provider"])):
+        print(f"{str(r['op'])[:43]:44} {str(r['provider'])[:31]:32}")
+    print("=" * 78)
+    print("\nEach line is a kernel that ran. The route says which skill takes it from here;")
+    print("bound it against flashinfer_bench.device.calibration before optimizing any of them.")
 
 
 if __name__ == "__main__":

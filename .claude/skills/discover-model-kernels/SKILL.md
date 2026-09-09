@@ -39,34 +39,50 @@ model saw, and be finite — and discarded with a reason if it fails. Read the d
 Ops that are plumbing (views, copies, allocation) are skipped: harnessing them measures the
 allocator, not a kernel.
 
-## Step 2: Pull the kernel behind each op
+## Step 2: Resolve every op to the kernel that ran
 
 An op name is not a kernel. The dispatcher decides what runs, and the answer changes with
 the device and the installed providers.
 
 ```bash
-python scripts/pull_kernel_source.py --from-harnesses tools/kernel-harness/auto \
+python scripts/pull_kernel_source.py \
+    --from-report tools/kernel-harness/auto/discovered.json \
+    --from-harnesses tools/kernel-harness/auto \
     --bundle tools/kernel-harness/pulled
 ```
 
-This asks `torch._C._dispatch_dump` rather than consulting a table, so the providing
-project falls out of the op itself. The registration path is a build-time path whose tail
-describes the project's own layout, which locates the binding file in a local checkout —
-and the checkout it lands in *is* the providing project, which is what makes the rest of
-the search precise instead of a grep across every repo on the box.
+`--from-report` is what makes this cover the stack rather than a favourite kernel: it reads
+**every** op discovery recorded, not the handful that got harnesses. Resolving one op tells
+you nothing about where the model's time goes.
 
-Two outcomes, and they lead different places:
+Two questions get asked, and neither consults a table:
 
-| Dispatcher says | Meaning | Where to go |
+1. **`torch._C._dispatch_dump`** — which keys are registered, and the source file each
+   registration came from. The providing project falls out of the op itself.
+2. **The op is run once with `ONEDNN_VERBOSE=1`** — because a registration inside PyTorch
+   is not the end of the answer. For GEMM-shaped work ATen calls oneDNN, and the primitive
+   oneDNN picks is what runs. Running it is the only way to know, and it reports the exact
+   primitive and problem: `matmul via jit:gemm:any [4x1024:1024x4096]`.
+
+### What it can conclude, and where each goes
+
+| Resolved as | How it was established | Route |
 | --- | --- | --- |
-| a key for your device (`XPU`, `CUDA`) | a real kernel runs; its source is named | Step 3 |
-| `CompositeImplicitAutograd` only | the op is *rewritten* into other ops | there is no kernel to pull; the ops it decomposes to were recorded separately — optimize those, or fix the call (`/optimize-onednn`) |
-| nothing registered | the op does not run on this device | not a target |
+| **oneDNN** | the op ran and oneDNN logged a primitive | `/optimize-onednn` — the win is in the call, not a replacement kernel |
+| **provider kernel** | a device key, and the binding file found in a local checkout | step 4, trial loop against the bundle |
+| **Triton** | recorded at the JIT entry point, with source file and line | `/wrap-kernel-for-tuning` — tune in place, no substitution |
+| **Python-registered custom op** | no dispatcher entry at all; the namespace names the package | `/wrap-kernel-for-tuning` — it needs the stack's context to run |
+| **ATen kernel inside PyTorch** | a device key registered in PyTorch's own tree | no local source to edit; measure, or report upstream |
+| **decomposition** | only a composite key, and oneDNN logged nothing | optimize what it decomposes to |
 
-The second row is the common surprise: the largest consumer of device time is frequently an
-op with no kernel of its own. `aten::linear` is a decomposition — what actually runs is the
-library the decomposition reaches, and it is that call, not a hand-written replacement, that
-is worth changing.
+The rows that surprise people are the first and the last. The largest consumer of device
+time is routinely an op with no kernel of its own: `aten::linear` is a decomposition, and
+what actually runs is a oneDNN matmul. Hand-writing a replacement for it is wasted work,
+which is why the resolver runs the op instead of stopping at "composite".
+
+A Python-registered op — attention, in most serving stacks — leaves the dispatcher dump
+empty. That reads like "does not run here" unless the resolver falls back to the namespace,
+so a stack's single hottest kernel is exactly the one a naive resolution drops.
 
 If no checkout of the providing project is on the box, the tool says so rather than
 guessing. Clone it to `tmp/` to read the kernel, or optimize against the harness alone.

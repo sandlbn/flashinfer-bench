@@ -21,11 +21,18 @@ from __future__ import annotations
 
 import argparse
 import collections
+import json
 import os
 import pathlib
 from typing import Any, Dict, Tuple
 
 RECORDS: Dict[Tuple[str, tuple], Dict[str, Any]] = {}
+
+# Triton kernels never reach the dispatcher as ops -- they are JIT-compiled Python called
+# straight from the stack -- so a dispatch recorder alone reports a model as having no
+# Triton in it. Record them from the JIT entry point instead, with the source they were
+# compiled from.
+TRITON: Dict[str, Dict[str, Any]] = {}
 
 # Ops that are plumbing rather than arithmetic: harnessing them measures the allocator or
 # the copy engine, not a kernel anyone would optimize. Matched as `namespace.op` against
@@ -65,6 +72,13 @@ _SKIP_OPS = frozenset(
 )
 
 
+def _jsonable(x: Any) -> Any:
+    """Records hold tuples for hashing; JSON needs lists."""
+    if isinstance(x, tuple):
+        return [_jsonable(i) for i in x]
+    return x
+
+
 def _describe(x: Any) -> Any:
     import torch
 
@@ -75,6 +89,43 @@ def _describe(x: Any) -> Any:
     if isinstance(x, (list, tuple)):
         return tuple(_describe(i) for i in x)
     return type(x).__name__
+
+
+def observe_triton():
+    """Patch Triton's JIT entry point to record each kernel and where its source lives.
+
+    Returns a restore callable. Absent Triton is not an error: a stack that compiles none
+    is a fact about the stack, and the report should say so rather than fail.
+    """
+    try:
+        from triton.runtime.jit import JITFunction
+    except Exception:
+        return lambda: None
+
+    original = JITFunction.run
+
+    def run(self, *args, **kwargs):
+        try:
+            fn = self.fn
+            rec = TRITON.setdefault(
+                self.__name__,
+                {
+                    "kernel": self.__name__,
+                    "source": f"{fn.__code__.co_filename}:{fn.__code__.co_firstlineno}",
+                    "calls": 0,
+                    "constexprs": {},
+                },
+            )
+            rec["calls"] += 1
+            for k in ("BLOCK_SIZE", "BLOCK", "num_warps", "num_stages"):
+                if k in kwargs:
+                    rec["constexprs"][k] = kwargs[k]
+        except Exception:
+            pass  # never let observation break the run
+        return original(self, *args, **kwargs)
+
+    JITFunction.run = run
+    return lambda: setattr(JITFunction, "run", original)
 
 
 def record_mode():
@@ -228,18 +279,42 @@ def main() -> None:
     llm.generate(["warm"], warm)
 
     RECORDS.clear()
+    TRITON.clear()
+    restore_triton = observe_triton()
     with record_mode():
         llm.generate(
             [f"Topic {i}." for i in range(args.prompts)],
             SamplingParams(temperature=0.0, max_tokens=args.out_tokens, ignore_eos=True),
         )
+    restore_triton()
 
     ranked = sorted(RECORDS.values(), key=lambda r: -r["calls"])
     by_op = collections.Counter(r["op"] for r in ranked)
-    print(f"\n  {len(RECORDS)} distinct (op, shape) pairs over {len(by_op)} ops\n")
+    print(
+        f"\n  {len(RECORDS)} distinct (op, shape) pairs over {len(by_op)} ops"
+        f", {len(TRITON)} Triton kernel(s)\n"
+    )
 
     out_dir = pathlib.Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Every op, not just the ones harnessed: resolving where each kernel lives is a separate
+    # step, and it cannot resolve what this step did not write down.
+    report = {
+        "model": args.model,
+        "ops": [{"op": r["op"], "calls": r["calls"], "args": _jsonable(r["args"])} for r in ranked],
+        "op_calls": dict(
+            sorted(
+                collections.Counter(
+                    {o: sum(r["calls"] for r in ranked if r["op"] == o) for o in by_op}
+                ).items(),
+                key=lambda kv: -kv[1],
+            )
+        ),
+        "triton": sorted(TRITON.values(), key=lambda t: -t["calls"]),
+    }
+    (out_dir / "discovered.json").write_text(json.dumps(report, indent=2))
+    print(f"  full op list -> {out_dir / 'discovered.json'}\n")
     made, failed = 0, 0
     for record in ranked[: args.top]:
         path = _emit(record, args.model, out_dir)
