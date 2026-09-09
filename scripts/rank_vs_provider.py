@@ -66,7 +66,8 @@ def collect(
             if env.get("hardware_id") != hardware_id:
                 continue
             # Latencies from different timing methodologies are not comparable: the earlier
-            # per-call event timer reported ~8x the true latency for a short kernel, so
+            # per-call event timer charged its own overhead to every call, several times a
+            # short kernel's true latency, so
             # ranking a stale trace against a fresh one invents a win out of the change in
             # measurement. Traces recording no methodology are kept; most predate the field.
             recorded = (env.get("libs") or {}).get("timing")
@@ -118,11 +119,11 @@ def main() -> None:
         "--floor-us",
         type=float,
         default=None,
-        help="Drop workloads where every measurement is below this. Defaults by timer: "
-        "60us for the legacy per-call 'event' methodology, whose overhead really did "
-        "floor short kernels, and 0 for anything that amortizes it -- applying the "
-        "legacy floor to current traces discards exactly the decode-sized data that "
-        "decides deployment.",
+        help="Drop workloads where every measurement is below this. Measured on this part "
+        "when omitted (the calibration's timing floor, with margin); 0 disables it. The "
+        "floor exists to hide measurements dominated by timer overhead, so applying one "
+        "to traces from a timer that amortizes it discards exactly the decode-sized data "
+        "that decides deployment.",
     )
     ap.add_argument(
         "--decode-max-tokens",

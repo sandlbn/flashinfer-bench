@@ -46,7 +46,7 @@ outputs)`, not op_type alone — takes the dtype and constants from the JSON, an
 rather than emitting a test it cannot build correctly:
 
 ```
-no template for gemm_swiglu_merged_k1024_d3072 (op_type=gemm, inputs=('x','w_gate_up'),
+no template for <definition> (op_type=gemm, inputs=('x','w_gate_up'),
 outputs=('up','out')) -- add one rather than hand-writing
 ```
 

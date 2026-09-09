@@ -5,9 +5,9 @@ question: which of the operations actually burning device time are *not represen
 and of those, which are cheap rewrites rather than new kernels.
 
 The distinction matters because the biggest wins found this way were not new kernels. On
-Zamba2-1.2B the top op was an `aten::sum` over a rank-6 tensor costing 27.8% of device time;
-it is a batched GEMM written as broadcast-multiply-then-sum, and rewriting it as `bmm` was
-**107x** faster with no kernel written at all.
+a hybrid SSM model the top op was an `aten::sum` over a rank-6 tensor, the single largest
+consumer of device time; it is a batched GEMM written as broadcast-multiply-then-sum, and
+rewriting it as `bmm` was orders of magnitude faster with no kernel written at all.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ REWRITES = [
         "contraction materialised as broadcast-multiply-then-sum",
         "Express it as `torch.bmm`/`einsum`. G[b,i,j,h]=sum_s A[b,i,h,s]*B[b,j,h,s] is a "
         "batched GEMM; the rank-5+ intermediate exists only because it is not written as "
-        "one. Measured 107x on Zamba2's SSD scan.",
+        "one, and the rewrite is typically orders of magnitude faster.",
     ),
     (
         lambda op, rank, shapes: op.endswith("mul") and rank >= 5,

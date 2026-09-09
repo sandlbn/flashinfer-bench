@@ -194,4 +194,5 @@ GEMM epilogue fusion on CUTLASS-SYCL — `../optimize-intel-kernels/xe-fuse.md`.
 
 ## Hand-written SYCL
 
-`../optimize-intel-kernels/SKILL.md` Step 4a. Worked examples in `examples/sycl/`.
+Writing one is `../optimize-intel-kernels/SKILL.md`, under "Write a SYCL solution".
+Worked examples in `examples/sycl/`.

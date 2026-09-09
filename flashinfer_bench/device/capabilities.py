@@ -44,10 +44,11 @@ class Capabilities:
         unsupported rather than crashing.
     emulated_dtypes : FrozenSet[str]
         Dtypes the runtime executes *correctly* but not natively -- the values are right
-        and the throughput is not representative of the format. Battlemage has no FP8
-        DPAS, so `torch._scaled_mm` upconverts to fp16: measured on Arc B580 at
-        4096x4096x4096 it is bit-exact against an fp32-upcast reference and runs at
-        52.7 TFLOP/s against bf16's 108.9, i.e. 0.48x.
+        and the throughput is not representative of the format. A part with no FP8 DPAS
+        runs `torch._scaled_mm` by upconverting to fp16: the result is bit-exact against
+        an fp32-upcast reference and the throughput is a fraction of bf16's. How large a
+        fraction is a measurement on the part, not a property of the format -- benchmark
+        it and label the trace as emulated.
 
         These are kept separate from ``supported_dtypes`` rather than merged into it
         because the two answer different questions. Excluding them entirely would make an
@@ -89,14 +90,16 @@ class Capabilities:
         like coverage while measuring one width twice.
     vector_bytes : int
         Widest single memory access, in bytes. A memory-bound kernel that reads one
-        element per work-item leaves most of the pipe idle: widening RMSNorm's loads from
-        2 bytes to this value measured 1.35x at prefill batch sizes on Battlemage. Use
+        element per work-item leaves most of the pipe idle; widening an elementwise
+        kernel's loads to this value is worth a measurable fraction at prefill batch
+        sizes (``scripts/kernel_trials.py`` measures it on the part in hand). Use
         :meth:`vector_width` to turn it into an element count for a dtype.
     supports_large_grf : bool
         Whether the device can run kernels in a large register-file mode (256 registers
-        per thread instead of 128). Only meaningful when a kernel actually spills: on
-        Battlemage a CUTLASS tile spilling 8576 bytes/thread went from 8.67 ms to 0.62 ms
-        with it, while a kernel that already fits gains nothing and loses occupancy.
+        per thread instead of 128). Only meaningful when a kernel actually spills -- a
+        large-tile GEMM spilling kilobytes per thread can run an order of magnitude faster
+        with it -- while a kernel that already fits gains nothing and loses occupancy.
+        unitrace's ``Spill Memory Per Thread`` says which case a kernel is.
     extra : Dict[str, Any]
         Device-specific details that have no cross-vendor meaning -- ISA revision,
         subgroup sizes, shared-local-memory budget, EU/SM counts. Kept untyped on

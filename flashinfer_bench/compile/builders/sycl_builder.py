@@ -59,11 +59,11 @@ _LARGE_GRF_ENV = "FIB_SYCL_LARGE_GRF"
 """Set truthy to build AOT kernels in large-GRF mode (256 registers/thread, not 128).
 
 Large tiles spill catastrophically in the default small-GRF mode, and spilling is
-invisible to the correctness gate -- the kernel is right, just slow. An Xe-Fuse ``k2`` at
-tile 256x256x32 on Battlemage spilled 8576 bytes/thread and ran 8.8 ms against oneDNN's
-0.46 ms for the same work. Check ``Spill Memory Per Thread`` in unitrace's kernel
-properties before reaching for this: a smaller tile is usually the better fix, since large
-GRF halves the threads resident per EU.
+invisible to the correctness gate -- the kernel is right, just slow: an Xe-Fuse ``k2`` at
+a 256x256 tile spilled kilobytes per thread and ran an order of magnitude behind oneDNN
+for the same work. Check ``Spill Memory Per Thread`` in unitrace's kernel properties
+before reaching for this: a smaller tile is usually the better fix, since large GRF halves
+the threads resident per EU.
 """
 
 _ONEDNN_ENV = "FIB_ONEDNN_DIR"

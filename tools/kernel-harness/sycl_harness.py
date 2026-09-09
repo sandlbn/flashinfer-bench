@@ -15,13 +15,13 @@ A trial file is then just source plus a few lines:
     class Model(nn.Module):
         def __init__(self):
             super().__init__()
-            self.run = build("rmsnorm_h2560", SOURCE)
+            self.run = build("<definition>", SOURCE)
         def forward(self, x, w):
             out = torch.empty_like(x)
             self.run(x, w, out)
             return out
 
-    get_inputs = inputs_for("rmsnorm_h2560", batch_size=2048)
+    get_inputs = inputs_for("<definition>", batch_size=2048)
 
 oneDNN needs no different path -- it is SYCL with `dependencies=["onednn"]`, which `build`
 takes as an argument.

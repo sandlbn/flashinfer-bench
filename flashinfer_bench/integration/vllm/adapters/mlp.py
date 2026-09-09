@@ -4,48 +4,41 @@ vLLM's MLP is three steps: a merged gate/up projection, a separate ``silu_and_mu
 kernel, then the down projection. Folding the activation into the projection's epilogue
 removes a kernel launch and a round trip through ``[M, 2d]``.
 
-**This adapter is off by default pending an end-to-end A/B.** Set FIB_VLLM_MLP_FUSION=1.
+**This adapter is off by default pending an end-to-end A/B.** Set FIB_VLLM_MLP_FUSION=1,
+and set FIB_VLLM_MLP_MIN_TOKENS to the batch size above which the fused path wins *on the
+part it is deployed on*. There is no built-in threshold: the crossover is a measurement of
+one part, one model shape and one software stack, and a stored one is wrong on the next.
+With fusion enabled and no threshold set, the adapter installs, fuses nothing, and prints a
+histogram of the token counts the scheduler actually hands the MLP at exit -- those are the
+M values to measure the crossover at.
 
-Against the path vLLM actually runs on XPU -- one merged GEMM followed by its own fused
-`torch.ops._C.silu_and_mul` -- on Qwen3-0.6B shapes (k=1024, d=3072, bf16, Arc B580,
-device-event timing, median of 100, 2026-09-06):
-
-    M=512  1.09x   M=1024 0.98x   M=2048 1.16x
-    M=3072 1.21x   M=4096 1.18x   M=8192 1.17x
-
-An earlier revision of this note recorded 0.35x-0.99x and concluded the fusion could not
-win because oneDNN post-ops need two [M,k]x[k,d] matmuls against vLLM's one [M,k]x[k,2d].
-That conclusion was wrong: the solution being measured called `ctx.stream.wait()` after
-every execute, blocking the host on each call. The oneDNN stream wraps PyTorch's own SYCL
-queue, so ordering already holds and the caller synchronizes when it needs the result.
-Removing the block took the same kernel from 0.44x to 2.21x against the reference at m=1.
-Structure was never the problem; a per-call host block was.
-
-**Measured against what vLLM actually runs, not against the reference.** This definition's
+**Measure against what vLLM actually runs, not against the reference.** This definition's
 `reference` computes the projection as *two* GEMMs; vLLM issues *one* merged GEMM and then
 its own fused `silu_and_mul`, so the reference is roughly 2x worse than production before
-any kernel is written and every ratio taken against it inherits that factor.
+any kernel is written and every ratio taken against it inherits that factor. The baseline
+is a harness that calls vLLM's own path (`/wrap-kernel-for-tuning`), timed by
+`scripts/kernel_trials.py`; `scripts/rank_vs_provider.py` reads the crossover out of traces
+once both sides are recorded on this part.
 
-Against vLLM's real path (Arc B580, k=1024 d=3072, bf16, medians of interleaved rounds,
-2026-09-08):
+Two measurement artefacts have produced wrong conclusions here before, and both matter when
+reproducing the crossover:
 
-    M=64    ours 22.7us   vLLM 24.6us   1.09x
-    M=701   ours 109.9us  vLLM 144.4us  1.31x
-    M=2801  ours 464.6us  vLLM 565.2us  1.22x
+- **A per-call host block.** An earlier revision concluded the fusion could not win because
+  oneDNN post-ops need two [M,k]x[k,d] matmuls against vLLM's one [M,k]x[k,2d]. The
+  solution being measured called `ctx.stream.wait()` after every execute. The oneDNN stream
+  wraps PyTorch's own SYCL queue, so ordering already holds and the caller synchronizes when
+  it needs the result; removing the block inverted the comparison. Structure was never the
+  problem.
+- **Sequential timing.** A later revision concluded the fused path loses badly at decode.
+  The cases were timed in sequence rather than interleaved, so the first absorbed the GPU's
+  clock ramp. Interleaving the rounds and taking medians removed it. **Time alternatives in
+  interleaved rounds; a sequential sweep charges the ramp to whichever case runs first.**
 
-An earlier revision of this note recorded 0.53x at M=64 and concluded the fused path loses
-badly at decode. That was a measurement artefact: the cases were timed in sequence rather
-than interleaved, so the first one absorbed the GPU's clock ramp. Interleaving the rounds
-and taking medians removes it, and the two distributions then do not overlap. **Time
-alternatives in interleaved rounds on this part; a sequential sweep charges the ramp to
-whichever case runs first.**
+The floor a perfect fusion would reach is two plain half-GEMMs with no epilogue at all;
+measure that alongside the fused kernel to see what the epilogue itself costs.
 
-There is still headroom rather than a finished kernel: two plain half-GEMMs with no epilogue
-at all measure 17.8us at M=64, so the fused epilogue is costing about 5us over the floor a
-perfect fusion would reach.
-
-The token gate stays because it bounds the risk at sizes nobody has measured, not because
-the fused path was shown to lose.
+The token gate bounds the risk at sizes nobody has measured; below the measured crossover
+vLLM's two kernels are the safer path.
 
 It also takes the merged ``[2d, k]`` weight exactly as vLLM stores it. Splitting it into
 two ``[k, d]`` operands would mean a transposed copy of every MLP weight, which on a small
@@ -60,7 +53,7 @@ import collections
 import logging
 import os
 import sys
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 import torch
 
@@ -70,16 +63,14 @@ from flashinfer_bench.integration.patch_manager import PatchSpec
 logger = logging.getLogger(__name__)
 
 ENABLE_ENV = "FIB_VLLM_MLP_FUSION"
-"""Opt in to MLP fusion. Off by default: measured slower than vLLM at every batch size."""
+"""Opt in to MLP fusion. Off by default: an experiment, not a proven serving win."""
 
 MIN_TOKENS_ENV = "FIB_VLLM_MLP_MIN_TOKENS"
-"""Override the batch size at which fusion switches on, when fusion is enabled at all."""
+"""Batch size at which fusion switches on, measured on the deployed part.
 
-DEFAULT_MIN_TOKENS = 2048
-"""Where the win becomes consistent: ~1.17x at and above 2048, parity at 1024.
-
-Below this the fused path is not a regression either, but the margin is inside measurement
-noise and not worth the dispatch cost.
+Unset means never fuse: the crossover is a property of the part and the shape, so there is
+no default to fall back to. Measure it with ``scripts/kernel_trials.py`` at the token counts
+the exit histogram reports, or read it from traces with ``scripts/rank_vs_provider.py``.
 """
 
 # Every model whose MLP is `gate_up_proj -> act_fn -> down_proj`. Qwen3 imports Qwen2MLP
@@ -137,15 +128,16 @@ def _fusion_enabled() -> bool:
     return os.environ.get(ENABLE_ENV, "").lower() in ("1", "true", "yes", "on")
 
 
-def _min_tokens() -> int:
+def _min_tokens() -> Optional[int]:
+    """The measured crossover, or None when none has been supplied."""
     raw = os.environ.get(MIN_TOKENS_ENV)
     if not raw:
-        return DEFAULT_MIN_TOKENS
+        return None
     try:
         return max(1, int(raw))
     except ValueError:
-        logger.warning("%s=%r is not an integer; using %d", MIN_TOKENS_ENV, raw, DEFAULT_MIN_TOKENS)
-        return DEFAULT_MIN_TOKENS
+        logger.warning("%s=%r is not an integer; fusing nothing", MIN_TOKENS_ENV, raw)
+        return None
 
 
 class GatedMLPAdapter:
@@ -153,10 +145,19 @@ class GatedMLPAdapter:
 
     def targets(self) -> List[PatchSpec]:
         if not _fusion_enabled():
-            # Measured slower than vLLM at every batch size on Battlemage; see the module
-            # docstring. Patching nothing is the difference between an experiment someone
-            # can opt into and a serving stack that is quietly slower for installing this.
+            # Not shown to win end to end; see the module docstring. Patching nothing is
+            # the difference between an experiment someone can opt into and a serving
+            # stack that is quietly slower for installing this.
             return []
+        if _min_tokens() is None:
+            logger.warning(
+                "%s is set but %s is not: no crossover has been measured on this part, so "
+                "the MLP adapter will fuse nothing and report the token counts it saw at "
+                "exit. Measure at those sizes and set %s.",
+                ENABLE_ENV,
+                MIN_TOKENS_ENV,
+                MIN_TOKENS_ENV,
+            )
         return [
             PatchSpec(
                 path=path,
@@ -178,6 +179,11 @@ class GatedMLPAdapter:
                 _SEEN[("skipped", f"{x.dim()}d")] += 1
                 return _fallback()
             tokens = int(x.shape[0])
+            if threshold is None:
+                # No measured crossover on this part: record what the scheduler asked for,
+                # which is where to measure one, and run vLLM's own path.
+                _SEEN[("unmeasured", _bucket(tokens))] += 1
+                return _fallback()
             if tokens < threshold:
                 # Decode and short prefills: vLLM's two kernels are faster here.
                 _SEEN[("deferred", _bucket(tokens))] += 1

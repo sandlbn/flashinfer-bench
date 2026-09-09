@@ -205,9 +205,10 @@ def stub_mlp(monkeypatch):
 class TestMLPThreshold:
     """Fusion is a regression below the crossover, so it must not install unconditionally.
 
-    Measured against vLLM's own path on real Qwen3-0.6B weights (Arc B580): 0.82x at
-    M=64, 1.02x at M=512, 1.22x at M=1102. Decode lives at the small end, which is where
-    a served model spends most of its time -- an unconditional patch would slow it down.
+    Below the crossover the fused path has measured slower than vLLM's own, and decode lives
+    at the small end, which is where a served model spends most of its time -- an
+    unconditional patch would slow it down. The crossover itself is measured per part and
+    supplied through the environment; nothing here stores one.
     """
 
     def test_small_batches_keep_vllms_own_path(self, stub_mlp):
@@ -223,10 +224,10 @@ class TestMLPThreshold:
         monkeypatch.setenv(mlp_mod.MIN_TOKENS_ENV, "128")
         assert mlp_mod._min_tokens() == 128
 
-    def test_a_bad_threshold_falls_back_to_the_measured_default(self, stub_mlp, monkeypatch):
+    def test_a_bad_threshold_fuses_nothing(self, stub_mlp, monkeypatch):
         _, mlp_mod = stub_mlp
         monkeypatch.setenv(mlp_mod.MIN_TOKENS_ENV, "not-a-number")
-        assert mlp_mod._min_tokens() == mlp_mod.DEFAULT_MIN_TOKENS
+        assert mlp_mod._min_tokens() is None
 
     def test_large_batch_with_no_solution_still_falls_back(self, stub_mlp):
         """Above the threshold but with nothing recorded: vLLM's path, not a crash."""
@@ -328,7 +329,9 @@ class TestMLPFusionIsOptIn:
         install_vllm_integrations(force=True)
         assert qwen2.Qwen2MLP.forward is not original
 
-    def test_the_default_threshold_matches_the_measurement(self, stub_mlp):
-        """2048 is where the win becomes consistent (~1.17x); below it the margin is noise."""
+    def test_there_is_no_stored_threshold(self, stub_mlp, monkeypatch):
+        """The crossover is a measurement of one part; unset means fuse nothing, not a guess."""
         _, mlp_mod = stub_mlp
-        assert mlp_mod.DEFAULT_MIN_TOKENS == 2048
+        monkeypatch.delenv(mlp_mod.MIN_TOKENS_ENV, raising=False)
+        assert mlp_mod._min_tokens() is None
+        assert not hasattr(mlp_mod, "DEFAULT_MIN_TOKENS")

@@ -2,10 +2,10 @@
 
 A power-saving platform profile can dominate every number a benchmark produces. On a
 laptop under a ``low-power`` profile, an Intel integrated GPU stays pinned at its maximum
-clock while measured latency sporadically jumps by ~2.8x for hundreds of iterations at a
-time -- the GPU is not throttled, the memory path is. Run-to-run variation of the reported
-median went from ~1% under ``performance`` to ~40-50% under ``power-saver`` on the same
-machine and the same kernel.
+clock while measured latency sporadically jumps by a large factor for hundreds of
+iterations at a time -- the GPU is not throttled, the memory path is. Run-to-run variation
+of the reported median went from negligible under ``performance`` to tens of percent under
+``power-saver`` on the same machine and the same kernel.
 
 That is large enough to swamp any real difference between two solutions, and it is
 invisible in the results: nothing in a trace says the host was throttling. So it is worth

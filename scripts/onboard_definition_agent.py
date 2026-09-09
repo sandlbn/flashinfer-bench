@@ -12,10 +12,10 @@ Three usage modes:
     All parameters provided directly; no discovery phase.
 
     python scripts/onboard_definition_agent.py \
-        --definition gqa_paged_prefill_causal_h40_kv10_d128_ps1 \
+        --definition <definition> \
         --model-path /path/to/model \
-        --model-name llama3-70b \
-        --hf-repo-id meta-llama/Llama-3.1-70B-Instruct \
+        --model-name <model-slug> \
+        --hf-repo-id <org>/<model> \
         --tp 4
 
   Mode 2 — Prompt-only (agent resolves all parameters):
@@ -23,14 +23,14 @@ Three usage modes:
     for the model, and infers all parameters from the prompt.
 
     python scripts/onboard_definition_agent.py \
-        --prompt "onboard gqa_paged_prefill_causal_h40_kv10_d128_ps1 for Llama 3.1 70B at TP=4"
+        --prompt "onboard <definition> for <model> at TP=4"
 
   Mode 3 — Mixed (agent fills in only what's missing):
     Provide some args explicitly; agent resolves the rest from the prompt.
 
     python scripts/onboard_definition_agent.py \
-        --prompt "onboard gqa_paged_prefill_causal_h40_kv10_d128_ps1 for Llama 3.1 70B" \
-        --model-path /path/to/llama-70b \
+        --prompt "onboard <definition> for <model>" \
+        --model-path /path/to/<model> \
         --tp 4
 
 Environment:
@@ -44,7 +44,7 @@ NVIDIA Inference Hub example:
     ANTHROPIC_API_KEY=sk-... python scripts/onboard_definition_agent.py \\
         --api-base-url https://inference-api.nvidia.com/v1 \\
         --claude-model aws/anthropic/bedrock-claude-sonnet-4-6 \\
-        --definition gqa_paged_prefill_causal_h40_kv10_d128_ps1 ...
+        --definition <definition> ...
 """
 
 import argparse
@@ -759,20 +759,20 @@ def main():
             Examples:
               # Prompt-only:
               python scripts/onboard_definition_agent.py \\
-                  --prompt "onboard gqa_paged_prefill_causal_h40_kv10_d128_ps1 for Llama 3.1 70B at TP=4"
+                  --prompt "onboard <definition> for <model> at TP=4"
 
               # Explicit:
               python scripts/onboard_definition_agent.py \\
-                  --definition gqa_paged_prefill_causal_h40_kv10_d128_ps1 \\
-                  --model-path /path/to/llama-70b \\
-                  --model-name llama3-70b \\
-                  --hf-repo-id meta-llama/Llama-3.1-70B-Instruct \\
+                  --definition <definition> \\
+                  --model-path /path/to/<model> \\
+                  --model-name <model-slug> \\
+                  --hf-repo-id <org>/<model> \\
                   --tp 4
 
               # Mixed:
               python scripts/onboard_definition_agent.py \\
-                  --prompt "onboard gqa_paged_prefill_causal_h40_kv10_d128_ps1 for Llama 3.1 70B" \\
-                  --model-path /path/to/llama-70b \\
+                  --prompt "onboard <definition> for <model>" \\
+                  --model-path /path/to/<model> \\
                   --tp 4
         """),
     )
@@ -789,7 +789,7 @@ def main():
     parser.add_argument(
         "--hf-repo-id",
         default=None,
-        help="HuggingFace repo ID (e.g. meta-llama/Llama-3.1-70B-Instruct)",
+        help="HuggingFace repo ID (<org>/<model>)",
     )
     parser.add_argument("--tp", type=int, default=None, help="Tensor parallel size")
     parser.add_argument("--ep", type=int, default=1, help="Expert parallel size (default: 1)")

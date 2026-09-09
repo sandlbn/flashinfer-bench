@@ -102,9 +102,10 @@ class EventTimer(Timer):
     name: ClassVar[str] = "event-batched"
     """Distinct from the earlier "event", which timed one call per region.
 
-    The two are not comparable for short kernels -- the old methodology reported ~8x the
-    true latency for a few-microsecond kernel on Arc B580 -- and traces record this string,
-    so renaming is what keeps a stale measurement from being ranked against a current one.
+    The two are not comparable for short kernels -- the old methodology charged its fixed
+    per-region overhead to every call, which for a few-microsecond kernel is most of the
+    reported number -- and traces record this string, so renaming is what keeps a stale
+    measurement from being ranked against a current one.
     """
 
     def __init__(self, module: Any, l2_bytes: int = 0) -> None:
@@ -134,9 +135,10 @@ class EventTimer(Timer):
             return None
 
     #: Aim for a timed region at least this long, in milliseconds. Event record and the
-    #: surrounding synchronize cost tens of microseconds on some backends, so a region that
-    #: contains a single short call reports mostly that overhead. The residual bias is
-    #: overhead/inner, so 5ms against a ~40us overhead leaves well under a percent while
+    #: surrounding synchronize cost tens of microseconds on some backends (the part's
+    #: ``calibration.timing_floor_us``), so a region that contains a single short call
+    #: reports mostly that overhead. The residual bias is overhead/region, so a region two
+    #: orders of magnitude longer than the overhead leaves well under a percent while
     #: keeping a sweep quick.
     _TARGET_REGION_MS: ClassVar[float] = 5.0
 
@@ -147,10 +149,11 @@ class EventTimer(Timer):
     def _calibrate(self, fn: Any, args: Sequence[Any], device: str) -> int:
         """Calls to place inside one timed region.
 
-        Timing one call per event pair made a ~3us kernel report ~47us, because the fixed
-        per-region cost dominated. That is not a small inaccuracy: it puts every
-        decode-sized elementwise measurement on the same floor, so kernels an order of
-        magnitude apart in real work look identical and ratios between them are noise.
+        Timing one call per event pair made a few-microsecond kernel report an order of
+        magnitude more, because the fixed per-region cost dominated. That is not a small
+        inaccuracy: it puts every decode-sized elementwise measurement on the same floor, so
+        kernels an order of magnitude apart in real work look identical and ratios between
+        them are noise.
         """
         import torch
 
@@ -159,9 +162,9 @@ class EventTimer(Timer):
             start = self._module.Event(enable_timing=True)
             end = self._module.Event(enable_timing=True)
             # Enough calls that the region's own overhead does not dominate the estimate.
-            # With 8, the ~40us overhead added ~5us to a 5us kernel, halving the batch size
-            # chosen and leaving several percent of bias in the result the batching exists
-            # to remove.
+            # With a handful, the fixed overhead spread over them was comparable to a short
+            # kernel itself, halving the batch size chosen and leaving several percent of
+            # bias in the result the batching exists to remove.
             probe = 64
             for _ in range(8):
                 fn(*args)  # the probe must not pay first-call costs it then extrapolates

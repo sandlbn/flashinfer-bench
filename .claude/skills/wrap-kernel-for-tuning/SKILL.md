@@ -51,13 +51,13 @@ SOURCE = r"""...sycl..."""
 class Model(nn.Module):
     def __init__(self):
         super().__init__()
-        self.run = build("rmsnorm_h2560", SOURCE, entry_point="k.cpp::run")
+        self.run = build("<definition>", SOURCE, entry_point="k.cpp::run")
     def forward(self, x, w):
         out = torch.empty_like(x)
         self.run(x, w, out)          # destination-passing, as every in-tree kernel expects
         return out
 
-get_inputs = inputs_for("rmsnorm_h2560", batch_size=4096)
+get_inputs = inputs_for("<definition>", batch_size=4096)
 ```
 
 `build` compiles through the same builder the benchmark uses, so a winning trial is already

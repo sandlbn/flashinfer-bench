@@ -235,7 +235,7 @@ class ApplyRuntime:
         key = builder.build_from_args(input_args)
 
         if not _dtypes_match(definition, input_args):
-            # A definition is named for its shape (`rmsnorm_h1024`), not its dtype, and the
+            # A definition is named for its shape (`<op>_h<width>`), not its dtype, and the
             # lookup key carries axes only. So nothing upstream of here distinguishes an
             # fp16 definition from a bf16 one of the same width, and `use_def_best` skips
             # the key entirely. Dispatching across that difference is not a slow kernel but

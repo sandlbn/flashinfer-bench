@@ -12,8 +12,8 @@ needs no CUDA-only tooling to obtain them.
 Usage
 -----
     python scripts/extract_model_kernels_xpu.py \\
-        --model Qwen/Qwen2.5-0.5B-Instruct \\
-        --output ./qwen-intel-trace \\
+        --model <org>/<model> \\
+        --output ./<model>-intel-trace \\
         --prompt "Write a short poem." --max-new-tokens 32
 """
 
@@ -724,8 +724,8 @@ def _enable_fp8_on_non_cuda(model_name: str) -> None:
     the honest baseline rather than a shortcut.
 
     This is a no-op for an unquantized model, and should be deleted once upstream fixes
-    both. Verified on Arc B580 with Qwen3-4B-Instruct-2507-FP8: coherent output, 4.14 GiB
-    of weights against roughly 8.2 GiB for the same model in bfloat16.
+    both. Verified on an FP8 checkpoint on XPU: coherent output, with the weights resident
+    at about half their bfloat16 footprint.
     """
     import torch
     from transformers import AutoConfig
@@ -785,7 +785,7 @@ def _gemm_fp8_block_definition(
     """Block-scaled FP8 linear, W8A8: both operands are fp8 by the time the GEMM runs.
 
     The activation is quantized too, not passed in bfloat16. A checkpoint declaring
-    ``activation_scheme: dynamic`` -- which every FP8 Qwen3 and Llama does -- quantizes
+    ``activation_scheme: dynamic`` -- which the common FP8 checkpoints do -- quantizes
     each token's K-groups on the fly before the matmul, and transformers'
     ``finegrained_fp8_linear`` and vLLM's ``w8a8_triton_block_scaled_mm`` both do exactly
     that. A definition taking a bfloat16 activation describes W8A16, an operation the
@@ -839,9 +839,9 @@ def _top_shapes(counter, shape_key, limit: int):
     counter is keyed on the token count as well as the shape, so applying
     ``most_common(limit)`` directly makes token counts compete with shapes for the same
     slots: one shape observed at three batch sizes consumes the entire budget, and the
-    model's other projections are dropped without a word. Observed on
-    Qwen3-4B-Instruct-2507-FP8, where it emitted three of five FP8 projections and lost
-    o_proj and down_proj.
+    model's other projections are dropped without a word. Observed on an FP8 checkpoint,
+    where it emitted three of five FP8 projections and lost the attention-output and down
+    projections.
 
     Grouping first also keeps *every* token count for the shapes it does keep, which is
     what the workloads should carry.
@@ -870,7 +870,7 @@ def _write(root: Path, definition: Dict[str, Any], workloads: List[Dict[str, Any
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", default="Qwen/Qwen2.5-0.5B-Instruct")
+    parser.add_argument("--model", required=True, help="HuggingFace repo id or local path.")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--prompt", default="Write a short poem about silicon.")
     parser.add_argument("--max-new-tokens", type=int, default=32)
@@ -909,11 +909,10 @@ def main() -> None:
 
     tokenizer = AutoTokenizer.from_pretrained(args.model, **_hf_kwargs())
     # The model's own configured dtype, not a hardcoded one. A definition is named for
-    # its shape (`rmsnorm_h1024`), so a definition extracted in the wrong precision
+    # its shape (`<op>_h<width>`), so a definition extracted in the wrong precision
     # collides with the right one and there is nothing in the name to tell them apart.
-    # Qwen3-0.6B is bfloat16; extracting it as float16 produced an fp16 `rmsnorm_h1024`
-    # that vLLM then selected for its bf16 model, returning fp16 activations into the next
-    # matmul.
+    # Extracting a bfloat16 model as float16 produced an fp16 norm definition that vLLM
+    # then selected for its bf16 model, returning fp16 activations into the next matmul.
     _bits = _quantization_bits(args.model)
     if _bits == 8:
         # Same reasoning as the 4-bit path: shape comes from metadata, and loading the
@@ -1004,7 +1003,7 @@ def main() -> None:
 
     # A definition is named by width alone, so two norms of the same width differing in
     # dtype or eps collide -- and a plain write silently drops one. Observed on a hybrid
-    # model: a bf16 and an fp32 rmsnorm_h4096 both existed and only the fp32 survived.
+    # model: a bf16 and an fp32 norm of the same width both existed and only the fp32 survived.
     # Disambiguate the minority variants rather than losing them.
     seen_names: Dict[str, Tuple[str, float]] = {}
     for (hidden, dtype, eps), token_counts in sorted(by_hidden.items()):

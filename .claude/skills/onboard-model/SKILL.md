@@ -113,14 +113,14 @@ never rewrite — later phases must not lose earlier fields.
 
 ```json
 {
-  "model_slug": "qwen3-235b-a22b",
-  "hf_repo_id": "Qwen/Qwen3-235B-A22B",
+  "model_slug": "<model-slug>",
+  "hf_repo_id": "<org>/<model>",
   "date": "2026-04-27",
   "repo_shas": {"sglang": "abc1234", "flashinfer": "def5678",
                 "sgl_cookbook": "ghi9012", "flashinfer_trace": "jkl3456"},
   "kernels": [
     {
-      "definition_name": "gqa_paged_decode_h40_kv8_d128_ps1",
+      "definition_name": "<definition>",
       "op_type": "gqa_paged",
       "phase1_status": "new",
       "fi_status": "fi_supported",

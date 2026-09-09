@@ -88,7 +88,7 @@ def achievable_speedups(local: str, hardware_id: str) -> dict:
 
     Traces are grouped by `hardware_id` and never compared across devices -- an Intel
     speedup and an NVIDIA speedup are not the same quantity, and mixing them here produced
-    a confident 0.42x for paged attention that was pure cross-hardware noise.
+    a confident-looking regression for paged attention that was pure cross-hardware noise.
 
     Two evidence sources, in order:
       1. best solution vs the vendor baseline, where a baseline exists;
@@ -143,9 +143,10 @@ def achievable_speedups(local: str, hardware_id: str) -> dict:
                 best[key]["reference"] = ref
 
     # Weight by workload size. A ratio measured at batch=1 is not evidence: repeated runs
-    # of the same rmsnorm workload varied 74% at batch=1 and 0% at batch=8192, and the
-    # median over all workloads read 1.09x where the measurable ones read 1.01x. Small
-    # kernels at decode sizes are launch-bound, so the numbers there are scheduler noise.
+    # of the same norm workload scattered by tens of percent at batch=1 and not at all at
+    # prefill sizes, and the median over all workloads read as a win where the measurable
+    # ones read as parity. Small kernels at decode sizes are launch-bound, so the numbers
+    # there are scheduler noise.
     # Take the largest workload per definition, which is the one that is actually resolvable.
     per_def = defaultdict(dict)
     for (op, d, w), v in best.items():
@@ -168,8 +169,8 @@ def high_rank_contractions(prof, total_us: float, min_ndim: int = 5):
 
     A state-space scan (Mamba2/SSD, GDN) is written in `transformers` as a broadcast
     multiply followed by a sum over 6-D tensors, materialising an intermediate that a fused
-    chunked scan never creates -- on Zamba2-1.2B one such `aten::sum` over
-    [1,1,256,256,64,128] was 27.8% of device time in 38 calls.
+    chunked scan never creates -- on a hybrid model one such `aten::sum` over a rank-6
+    tensor was the single largest consumer of device time.
 
     This cannot be spotted from kernel names: that scan and an ordinary RMSNorm both appear
     as `ReduceKernel<1, ReduceOp<float>>`. Only the operand rank separates them, and rank is

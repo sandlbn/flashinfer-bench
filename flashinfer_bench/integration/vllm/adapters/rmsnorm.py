@@ -98,9 +98,9 @@ class RMSNormAdapter:
             # vLLM's fused form returns (normed, new_residual) and callers rely on both.
             # Prefer the definition that returns the summed residual too. The single-output
             # form forces `x + residual` to be recomputed here, a whole extra pass over
-            # [tokens, hidden] that costs more than the kernel saves: measured on Arc B580
-            # at 4096x1024, the kernel alone is 54.5us against vLLM's 103.9us, and the
-            # recomputation takes it to 115.8us -- a 2.6x win turned into a loss.
+            # [tokens, hidden] that costs more than the kernel saves: at prefill sizes the
+            # recomputation alone exceeded the kernel's entire margin over vLLM's, turning
+            # a clear win into a loss.
             # This fallback must NOT run `orig`. vLLM's fused kernel is in place: it
             # overwrites `x` with the norm and `residual` with the sum. Running it here
             # would consume both buffers, and the second attempt below would then dispatch

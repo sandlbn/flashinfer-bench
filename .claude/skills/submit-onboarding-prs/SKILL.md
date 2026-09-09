@@ -77,7 +77,7 @@ cp tmp/flashinfer-trace/definitions/{op_type}/{name}.json        $D/definitions/
 cp tmp/flashinfer-trace/tests/references/test_{name}.py          $D/tests/references/
 # Baselines exist in two layouts (flat `{name}__{provider}.json` and a per-definition
 # subdir); loading is recursive, so copy whichever is present:
-# `-path "*{name}*"` over-matches: for rmsnorm_h2048 it also pulls fused_add_rmsnorm_h2048.
+# `-path "*{name}*"` over-matches: for `<op>_h<N>` it also pulls `fused_add_<op>_h<N>`.
 # Anchor on the path separator so only this definition's own files are taken.
 find tmp/flashinfer-trace/solutions \
      \( -path "*/{name}/*" -o -name '{name}__*.json' \) -name '*.json' -exec bash -c \

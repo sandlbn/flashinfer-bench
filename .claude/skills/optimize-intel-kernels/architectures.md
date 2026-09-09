@@ -92,7 +92,7 @@ that is correct but not bit-identical fails the default gate.
 
 ### A definition's name carries its shape, not its dtype
 
-`rmsnorm_h1024` from an fp16 run and `rmsnorm_h1024` as served in bf16 are the same name.
+`<op>_h<width>` from an fp16 run and `<op>_h<width>` as served in bf16 are the same name.
 The apply index keys on axes alone, and `on_miss_policy="use_def_best"` skips the key
 entirely.
 

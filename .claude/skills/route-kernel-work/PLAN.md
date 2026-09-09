@@ -5,18 +5,23 @@ outcome was decided before any kernel was written.
 
 ## The problem this exists to fix
 
-We picked `fused_add_rmsnorm_residual_h1024` by hand, wrote a SYCL kernel that is genuinely
-**2.11x** faster than vLLM's own (4.69us vs 9.90us), passed every correctness gate, and
-measured **-11.99%** serving throughput on Qwen3-0.6B.
+We picked a fused-norm definition by hand, wrote a SYCL kernel that was genuinely about
+twice as fast as vLLM's own, passed every correctness gate, and measured a serving
+throughput **regression** on the model it came from.
 
-Nothing in that sequence was a mistake in execution. The kernel is good. The target was
+Nothing in that sequence was a mistake in execution. The kernel was good. The target was
 wrong, and it was knowable that it was wrong before the first line of SYCL:
 
 ```
-saves   9.90 - 4.69 = 5.21us per call
-costs   6.02us per call        <- calibration.dispatch_us, measured on this part
-net     -0.81us per call, at 0.4% substitution, against a 5.13% interception tax
+saves   provider_us - ours_us            per call   <- both from the provider harness
+costs   calibration.get().dispatch_us    per call   <- measured on this part
+net     saves - costs, times the share of calls that substitute, against the
+        interception tax the overhead arm measures
 ```
+
+On that run `saves` was smaller than `costs`, so no kernel however fast could have won
+through `apply()`. The figures themselves live in the trial log and the serving report,
+not here: they are one part's, and were stale within a day.
 
 A router is the component that computes those four lines *first*, from measurement, given
 only the constraints. Here the constraints are **a model and a serving stack** (vLLM).
@@ -77,9 +82,10 @@ Two things it must get right:
   ratio measured there will motivate work that returns nothing.
 
 The general shape of the Intel answer falls out of this arithmetic rather than being
-asserted: GEMM is ~82% and already oneDNN, so `current ~ achievable` and the ceiling is
-thin; elementwise has ratio headroom but each call is smaller than a substitution costs.
-The router recomputes that per part instead of us re-learning it per kernel.
+asserted: where the profile shows GEMM dominant and already in oneDNN, `current ~
+achievable` and the ceiling is thin; where elementwise has ratio headroom, each call may
+still be smaller than a substitution costs. The router recomputes that per part and per
+model instead of us re-learning it per kernel.
 
 ## Stage C — route to a producer by capability probe
 
@@ -101,8 +107,8 @@ oneDNN before hand-writing a GEMM".
 
 `scripts/kernel_trials.py`. Correctness gates timing; both arms warmed then interleaved;
 branch back to best on regression. The baseline is the **provider harness** for that
-signature, never the definition's PyTorch reference — an 8.95x against the reference and a
-2.11x against the provider were the same kernel.
+signature, never the definition's PyTorch reference — a large ratio against the reference
+and a much smaller one against the provider were the same kernel.
 
 ## Stage E — admit per shape
 

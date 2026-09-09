@@ -11,8 +11,8 @@ Three usage modes:
     All parameters provided directly; no discovery phase.
 
     python scripts/collect_workloads_agent.py \
-        --model-path /path/to/deepseek-v3 \
-        --definitions mla_ragged_prefill_causal_h16_qk192_vo128 \
+        --model-path /path/to/<model> \
+        --definitions <definition> \
         --tp 8 --quantization fp8 \
         --max-attempts 3
 
@@ -21,15 +21,15 @@ Three usage modes:
     the definition name, model snapshot path, and TP from the prompt.
 
     python scripts/collect_workloads_agent.py \
-        --prompt "collect mla_ragged workloads for DeepSeek V3"
+        --prompt "collect <op_type> workloads for <model>"
 
   Mode 3 — Mixed (agent fills in only what's missing):
     Provide some args explicitly; agent resolves the rest from the prompt.
     Useful when the model is not in the HuggingFace cache and needs an explicit path.
 
     python scripts/collect_workloads_agent.py \
-        --prompt "collect mla_ragged for DeepSeek V3" \
-        --model-path /path/to/deepseek-v3
+        --prompt "collect <op_type> for <model>" \
+        --model-path /path/to/<model>
 
 Environment:
     ANTHROPIC_API_KEY  — required
@@ -257,7 +257,7 @@ TOOLS = [
         "name": "find_model_path",
         "description": (
             "Search the HuggingFace hub cache for a model by name. "
-            "Use to resolve a model name (e.g. 'DeepSeek-V3') to a local snapshot path."
+            "Use to resolve a model name (the repo's model id) to a local snapshot path."
         ),
         "input_schema": {
             "type": "object",
@@ -544,18 +544,18 @@ def main():
             Examples:
               # Explicit (fastest — no discovery phase):
               python collect_workloads_agent.py \\
-                --model-path /cache/DeepSeek-V3/snapshots/abc123 \\
-                --definitions mla_ragged_prefill_causal_h16_qk192_vo128 \\
+                --model-path /path/to/hf-cache/<model>/snapshots/<sha> \\
+                --definitions <definition> \\
                 --tp 8
 
               # Prompt-only (agent resolves all parameters):
               python collect_workloads_agent.py \\
-                --prompt "collect mla_ragged workloads for DeepSeek V3"
+                --prompt "collect <op_type> workloads for <model>"
 
               # Mixed (agent fills in only what's missing):
               python collect_workloads_agent.py \\
-                --prompt "collect mla_ragged for DeepSeek V3" \\
-                --model-path /path/to/deepseek-v3
+                --prompt "collect <op_type> for <model>" \\
+                --model-path /path/to/<model>
         """),
     )
     parser.add_argument(

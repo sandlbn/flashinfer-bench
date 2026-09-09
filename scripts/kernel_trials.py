@@ -260,7 +260,7 @@ def cmd_benchmark(args) -> None:
         f"   spread {result['spread'] * 100:.1f}%"
     )
     # Only a *difference* smaller than the scatter is unmeasured. Comparing the signed gain
-    # against the spread reported a 100x regression as "inside noise", which is the opposite
+    # against the spread reported a gross regression as "inside noise", which is the opposite
     # of what the check is for.
     if abs(result["speedup"] - 1) < result["spread"]:
         print(

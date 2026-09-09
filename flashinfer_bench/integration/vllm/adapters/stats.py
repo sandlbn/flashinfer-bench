@@ -6,9 +6,9 @@ clears the correctness gate, a runtime key that matches no recorded workload. Ea
 falls back silently and correctly, and the run then measures vLLM against vLLM.
 
 That happened three times in one session on this machine. A vLLM A/B was reported as
-"0.996x, noise" when in fact the tolerance gate had rejected every bf16 solution and
+parity-within-noise when in fact the tolerance gate had rejected every bf16 solution and
 nothing was ever substituted; a later run substituted exactly one kernel of the three that
-were patched, because Qwen3-0.6B is hidden=1024 and the dataset has no `rmsnorm_h1024`.
+were patched, because the dataset had no definition at the served model's hidden size.
 Both looked like a result and were an absence of one.
 
 So each adapter records the outcome of every call, and the counts print to stderr at exit

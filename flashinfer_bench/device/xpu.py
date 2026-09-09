@@ -32,8 +32,8 @@ _RECOMMENDED_WARMUP_RUNS = 200
 
 Discrete Arc parts ramp clocks from idle, and the first couple of hundred iterations run
 measurably slower than the steady state. Integrated parts show no such ramp -- latency is
-flat from the first iteration -- but they do take sporadic excursions to roughly 2.5x
-while the package shifts power between CPU and GPU, which no amount of warmup removes.
+flat from the first iteration -- but they do take large sporadic excursions while the
+package shifts power between CPU and GPU, which no amount of warmup removes.
 The higher default costs milliseconds and protects the discrete case; it is only a
 default, so any config layer or CLI flag overrides it.
 """
@@ -50,11 +50,11 @@ _PART_PROFILES: Dict[str, Dict[str, object]] = {
     #
     # FP8 is emulated, not native. CUTLASS-SYCL guards every fp8 and block-scaled-MX
     # (BDPAS) atom behind SYCL_INTEL_TARGET == 35 (Crescent Island), so on Xe2 the fp8
-    # path upconverts to fp16 and runs the fp16 DPAS. Measured on Arc B580 at
-    # 4096x4096x4096: torch._scaled_mm is bit-exact against an fp32-upcast reference and
-    # reaches 52.7 TFLOP/s against bf16's 108.9 (0.48x). It runs and it is correct, so
-    # refusing it would block onboarding an FP8 model for no reason -- but a latency
-    # measured here is the emulation's, not the format's.
+    # path upconverts to fp16 and runs the fp16 DPAS. torch._scaled_mm is bit-exact
+    # against an fp32-upcast reference and runs at a fraction of bf16 throughput. It runs
+    # and it is correct, so refusing it would block onboarding an FP8 model for no reason
+    # -- but a latency measured here is the emulation's, not the format's, and the
+    # fraction is something to benchmark, not to quote.
     "INTEL_ARC_B580": {
         "l2_bytes": 18 * _MIB,
         "sycl_target": "bmg",

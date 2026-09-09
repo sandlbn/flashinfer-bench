@@ -2,8 +2,9 @@
 
 Latencies measured with different timers are not comparable, and the dataset validator
 treats a mix on one part as an error. When a timer is corrected, the old numbers are not
-merely different but wrong -- the per-call event timer reported about 8x the true latency
-for a short kernel -- so there is nothing to preserve by keeping them beside the new ones.
+merely different but wrong -- the per-call event timer charged its own overhead to every
+call, several times a short kernel's true latency -- so there is nothing to preserve by
+keeping them beside the new ones.
 
 Only (definition, hardware) groups holding *both* methodologies are touched, and only the
 superseded traces in them are removed. A part measured entirely with an older timer is left

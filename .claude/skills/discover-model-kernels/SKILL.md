@@ -134,9 +134,9 @@ Two things this gets right that a table of "norm fuses into GEMM" would not:
 - **A view between two ops is not a gap.** Discovery carries the real producer through
   reshapes, or every GEMM→activation edge would be recorded as `view→activation`.
 - **A real op between them is a gap.** If the model splits the projection before norming
-  it — Qwen3 norms each head, so the edge is `split_with_sizes→rms_norm`, not
+  it — per-head q/k norms make the edge `split_with_sizes→rms_norm`, not
   `linear→rms_norm` — the epilogue cannot see that operand and the preset does not apply.
-  The same model family without per-head norms would match, which is precisely why this is
+  The same architecture without per-head norms would match, which is precisely why this is
   measured per model rather than asserted per architecture.
 
 Report the reachable share, not a ratio: a fusion is worth the elementwise time it absorbs.

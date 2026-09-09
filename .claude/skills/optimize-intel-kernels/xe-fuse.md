@@ -61,7 +61,7 @@ python tmp/Xe-Fuse/autotune/generate_kernel.py --preset k2 --m M --n N --k K -o 
 # 3. Write the reference to match the kernel's real layout (see below), then:
 flashinfer-bench validate-references --local tmp/flashinfer-trace --device xpu:0 --definitions <name>
 
-# 4. Check register spill BEFORE benchmarking — optimize-intel-kernels SKILL.md, Step 5
+# 4. Check register spill BEFORE benchmarking — SKILL.md, "check the failure mode"
 unitrace -d -v -o prof python <script>.py   # end with current_stream().synchronize()
 
 # 5. Benchmark

@@ -40,9 +40,10 @@ _SYCL_SCALARS: Dict[str, str] = {
 _VEC_WIDTHS: Dict[str, int] = {"bfloat16": 8, "float16": 8, "float32": 4}
 """Elements per access, chosen so one load is 16 bytes.
 
-Sixteen bytes is the widest single access the memory pipe takes. A memory-bound kernel
-reading one element per work-item leaves most of that idle, which measured as a 1.35x
-penalty at prefill batch sizes on Battlemage.
+Sixteen bytes is the widest single access the memory pipe takes (``Capabilities.vector_bytes``
+on a known device; a generated solution is shared, so it cannot query one). A memory-bound
+kernel reading one element per work-item leaves most of that idle, which measures as a
+clear penalty at prefill batch sizes.
 """
 
 
@@ -73,8 +74,9 @@ def _sub_group(definition: Definition) -> str:
 
 def _num_stages(definition: Definition) -> str:
     """Pipeline depth. CUDA uses this for async-copy pipelining, which Intel lacks; a
-    measured sweep on Battlemage found 2 at or near the optimum across shapes and never
-    worse than 1, while 3 regressed badly at small batch (0.0168 ms vs 0.0082 ms).
+    sweep on Intel found 2 at or near the optimum across shapes and never worse than 1,
+    while 3 regressed badly at small batch. Re-sweep with ``scripts/kernel_trials.py``
+    before carrying this to a new part.
     """
     return "2"
 
@@ -345,10 +347,10 @@ _RMSNORM_SYCL = r"""// RMSNorm in SYCL for Intel GPUs. Generated from a template
 //
 // The access pattern is what matters. Reading one element per work-item leaves most of
 // the memory pipe idle, and this kernel is bandwidth-bound at any interesting batch size;
-// loading $vec_size elements at a time makes each access 16 bytes and measured 1.35x
-// faster at prefill sizes on Battlemage. The row is deliberately re-read for the rescale
-// rather than cached across the reduction -- caching it measured within noise, and the
-// registers cost occupancy.
+// loading $vec_size elements at a time makes each access 16 bytes, which measured clearly
+// faster at prefill sizes. The row is deliberately re-read for the rescale rather than
+// cached across the reduction -- caching it measured within noise, and the registers cost
+// occupancy.
 
 #include <sycl/sycl.hpp>
 #include <tvm/ffi/container/tensor.h>
@@ -537,8 +539,9 @@ _FUSED_ADD_RMSNORM_RESIDUAL_SYCL = r"""// Fused residual-add + RMSNorm in SYCL f
 // opposite. Every caller that fuses a residual add needs the new residual for its next
 // block -- vLLM's own kernel updates it in place for exactly this reason -- so discarding
 // it forces the caller to recompute `x + residual` in eager PyTorch: a whole extra pass
-// over [batch, hidden], which measured 54.5us -> 115.8us at 4096x1024 and handed back a
-// 2.6x kernel win. Storing a value already in registers costs one store.
+// over [batch, hidden], which at prefill sizes more than doubled the call and handed back
+// the kernel's entire win over the provider. Storing a value already in registers costs
+// one store.
 //
 // Same access rules as the plain norm: $vec_size elements per load so each access is 16
 // bytes, sub-group pinned to 32, work-group sized to the row.
@@ -1224,9 +1227,9 @@ _GEMM_SWIGLU_ONEDNN_SYCL = r"""// Fused GEMM + SwiGLU via oneDNN post-ops.
 // binary_mul by `up`. Post-ops apply in declaration order.
 //
 // This keeps oneDNN's matmul rather than replacing it. A CUTLASS-SYCL fused kernel lost to
-// the unfused path here not because fusion is wrong but because its GEMM is ~45% slower
-// than oneDNN on this part -- fusion saved a 1.17 ms activation kernel and paid ~2.4 ms
-// more on the matmul.
+// the unfused path here not because fusion is wrong but because its GEMM was markedly
+// slower than oneDNN's on the part it was tried on -- what fusion saved on the activation
+// kernel it paid back twice over on the matmul.
 
 #include <sycl/sycl.hpp>
 
@@ -1345,8 +1348,8 @@ void GemmSwiGLUOneDnn(tvm::ffi::TensorView x, tvm::ffi::TensorView wg, tvm::ffi:
 
   // No stream.wait(): the oneDNN stream is built over PyTorch's own queue, so this work is
   // ordered against everything else on it and the caller synchronizes when it needs the
-  // result. Blocking here is pure host-side latency on every launch -- measured
-  // 0.44x -> 2.21x at M=1 on Arc B580 once removed.
+  // result. Blocking here is pure host-side latency on every launch -- removing it took
+  // this kernel from losing to the reference at M=1 to beating it several-fold.
 }
 
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(gemm_swiglu_onednn_sycl, GemmSwiGLUOneDnn);

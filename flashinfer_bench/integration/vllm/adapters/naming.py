@@ -1,6 +1,6 @@
 """Definition names an adapter should try for a given tensor dtype.
 
-A definition is named for its shape -- ``rmsnorm_h1536`` -- but shape does not identify
+A definition is named for its shape -- ``rmsnorm_h<width>`` -- but shape does not identify
 the operation on its own. Two models at the same hidden size can run in different
 precisions, and ``apply()`` refuses a solution whose declared dtype differs from the
 tensors it is handed (an fp16 kernel returning fp16 activations into a bf16 model kills the

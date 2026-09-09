@@ -21,7 +21,7 @@ a candidate that is fast and wrong never records a latency.
 Usage
 -----
     python scripts/optimize_model_kernels_xpu.py \\
-        --model Qwen/Qwen2.5-0.5B-Instruct --output ./run --definition rmsnorm_h896_float16
+        --model <org>/<model> --output ./run --definition <definition>
 """
 
 from __future__ import annotations
@@ -294,7 +294,7 @@ def _import_from_dataset(dataset: Path, root: Path, name: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", default="Qwen/Qwen2.5-0.5B-Instruct")
+    parser.add_argument("--model", required=True, help="HuggingFace repo id or local path.")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--device", default="xpu:0")
     parser.add_argument("--definition", default=None, help="Definition to optimize.")

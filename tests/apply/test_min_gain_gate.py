@@ -1,9 +1,11 @@
 """A solution must beat the provider by more than substituting costs, not merely beat it.
 
 Resolving a definition, building a key, checking dtypes and invoking the Runnable cost real
-time on every call, and that cost does not shrink with the kernel. Measured at ~5.9us on
-Arc B580 against a ~5us elementwise kernel, so a solution can be three times faster than the
-provider's and still lose the exchange -- which is what several families measured end to end.
+time on every call, and that cost does not shrink with the kernel. On a part where it is
+comparable to an elementwise kernel's whole runtime, a solution can be three times faster
+than the provider's and still lose the exchange -- which is what several families measured
+end to end. The gate value used below is a fixture, not a measurement; the real one comes
+from ``flashinfer_bench.device.calibration``.
 """
 
 from typing import List

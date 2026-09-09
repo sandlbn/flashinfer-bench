@@ -7,7 +7,7 @@ Usage:
 
     python collect_workloads.py sglang \
         --model-path /path/to/model \
-        --definitions mla_paged_decode_h16_ckv512_kpe64_ps1 rmsnorm_h7168 \
+        --definitions <definition> [<definition> ...] \
         --num-samples 100
 """
 
@@ -787,7 +787,7 @@ def run_sglang_mode(
         if cpu_offload_gb > 0:
             server_cmd += ["--cpu-offload-gb", str(int(cpu_offload_gb))]
             # With CPU offloading, model uses most GPU memory. Use mem-fraction-static=0.95
-            # so 5% (~9GB on B200) stays as dynamic memory for FlashInfer workspace buffers,
+            # so 5% stays as dynamic memory for FlashInfer workspace buffers,
             # while the remaining static budget covers model + KV cache.
             server_cmd += ["--mem-fraction-static", "0.95"]
         if mem_fraction_static is not None and cpu_offload_gb == 0:
@@ -1357,7 +1357,7 @@ def main():
         action="store_true",
         help=(
             "Pass --skip-const-axis-check to sanitize_dumps.py. Use when collecting "
-            "from TP=1 SGLang for a TP=2 definition (e.g. h20 from Qwen3-14B TP=1)."
+            "from TP=1 SGLang for a TP=2 definition (a head count halved by TP)."
         ),
     )
     sglang_p.add_argument(

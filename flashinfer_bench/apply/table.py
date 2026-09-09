@@ -325,12 +325,13 @@ class ApplyTable:
 
         The provider baseline is what runs when we decline, so it -- not the definition's
         reference -- is what a substitution has to beat. And it has to beat it by more than
-        the substitution costs: a kernel three times faster than the provider's still loses
-        the exchange when the kernel is 5us and dispatch is 6us.
+        the substitution costs (``min_gain_ms``, from the part's calibration): a kernel
+        several times faster than the provider's still loses the exchange when the
+        provider's whole runtime is smaller than the dispatch cost.
 
-        Keys with no provider trace are kept. There is nothing to compare against, and
-        dropping them would silently disable substitution for every definition whose
-        baseline has simply not been generated yet.
+        Keys with no provider trace on this part are dropped too. With the gate on, absence
+        of a comparator is not evidence that substituting pays; the log names them so the
+        baseline can be generated and the key judged.
         """
         provider_latency: Dict[ApplyKey, float] = {}
         for t in traces:
@@ -478,8 +479,9 @@ class ApplyTable:
         # serving engine. Dropping them leaves the definition with no entry, which falls
         # back cleanly, instead of selecting something unusable.
         # Latencies from different timing methodologies are not comparable -- the earlier
-        # per-call event timing reported ~8x the true latency for a short kernel -- so a
-        # stale trace ranked against a fresh one manufactures a win out of the measurement
+        # per-call event timing charged its own fixed overhead to every call, several times
+        # a short kernel's true latency -- so a stale trace ranked against a fresh one
+        # manufactures a win out of the measurement
         # change alone. Keep only what this machine's timer would produce; traces recording
         # no methodology are kept, since most predate the field.
         current_timing = cls._current_timing(hardware_id)
