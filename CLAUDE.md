@@ -355,10 +355,15 @@ reason against the external dataset
   well (`authored_callsite` / `authored_apply` rows). Language is chosen from the candidate's
   measured regime. Carries `architectures.md` (per-part traps), `xe-matrix.md` (DPAS-backed
   kernels), `xe-fuse.md` and `references/triton-xpu.md` (what the Intel Triton checkout says
-  about writing kernels). Per-part *values* are queried from `Capabilities` and the
+  about writing kernels) and `references/xe-forge-knowledge.md` (an index into the vendor's
+  pattern corpus under `tmp/Xe-Forge/`: what to take, what to leave, and where it disagrees
+  with what this part measured). Per-part *values* are queried from `Capabilities` and the
   calibration, not tabulated
-- **optimize-onednn**: A slow oneDNN GEMM on Intel — `ONEDNN_VERBOSE` and dispatch output,
-  resolving a rejection to the gate in oneDNN's source, the call-level fixes
+- **optimize-onednn**: Tuning the library GEMM call on Intel — `ONEDNN_VERBOSE`, dispatch
+  and selector output, resolving a rejection to the gate in oneDNN's source, classifying the
+  shape, then the axes a *caller* controls (descriptors, attributes, primitive lifetime,
+  decomposition, synchronization, implementation selection, library build). Its worked
+  findings live in `references/illustrations.md`, one instance each
 - **optimize-ssm-scan**: State-space / SSD scan kernels for hybrid models on Intel; use
   when profiling reports materialised high-rank contractions
 
@@ -367,6 +372,12 @@ by design and nothing routes to them until the owner accepts them:
 `optimize-model-kernels/` (`PLAN.md`, the end-to-end pipeline skill the stages above are
 to become) and `route-kernel-work/` (`PLAN.md`, `RUN.md`: choosing among candidates by
 measured ceiling; `scripts/bound_candidates.py` implements the bounding it describes).
+
+`optimize-model-kernels/references/` is the exception: `read-the-numbers.md` (the regime
+classification, implemented by `scripts/bound_candidates.py`), `mechanisms.md` (what each
+regime admits, as generators), `tools.md` (the question each instrument answers) and
+`gates.md` (the printed key contract, every gate, and who decides what) are live shared
+references, written once and linked by name from the optimization skills.
 
 `.claude/skills/SKILLS-REWRITE-PLAN.md` is the accepted plan the skill rewrites follow: a
 skill stores a measurement and a way to reason from it, never a conclusion reached once on

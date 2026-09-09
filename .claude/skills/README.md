@@ -134,12 +134,25 @@ Grouped by what they are for. "Hands to" is the skill or artifact the procedure 
 | --- | --- | --- |
 | `/discover-model-kernels` | choosing anything to optimize; the entry point | the routed worklist; then `/wrap-kernel-for-tuning`, `/optimize-onednn`, `/find-kernel-gaps` per row's class |
 | `/wrap-kernel-for-tuning` | the kernel lives inside a serving stack and must be tuned where it runs, or a harness came out of discovery | the trial loop; `/measure-serving-win` |
-| `/optimize-onednn` | the resolver's class for a candidate is the library, or a profile says GEMM is slow | `/measure-serving-win` |
-| `/optimize-intel-kernels` | writing a SYCL or Triton solution for an existing definition, or porting a CUDA Triton solution | `/measure-serving-win`; `/submit-onboarding-prs` for a solution that belongs in the dataset |
+| `/optimize-onednn` | the resolver's class for a candidate is the library, or a profile says GEMM is slow: the axes a *caller* controls | `/measure-serving-win` |
+| `/optimize-intel-kernels` | writing a SYCL or Triton kernel: for an existing definition, for a CUDA Triton solution being ported, or for an op the routing accepted as `authored_callsite` / `authored_apply` | `/measure-serving-win`; `/submit-onboarding-prs` for a solution that belongs in the dataset |
 | `/find-kernel-gaps` | device time sits in ops no definition covers, or the model is not a plain transformer | `/extract-kernel-definitions` for a real kernel; `/optimize-ssm-scan` for a scan; `/measure-serving-win` |
 | `/optimize-ssm-scan` | the gap is a state-space or SSD scan | `/extract-kernel-definitions`, `/optimize-intel-kernels` |
 | `/measure-serving-win` | before claiming any win; converts a per-kernel ratio into a serving number, or proves there is none | the `no-solution` counters, which `measure-serving-win/references/fill-serving-gaps.md` turns back into stage 1 input |
 | `/compare-implementations` | a gate needs to know whether an alternative implementation is competitive for an op class on this part, before search effort is spent on it | the calibrated input the routing reads; `/optimize-intel-kernels` to write the alternative |
+
+### Shared references, linked from every optimization skill
+
+These four files under `optimize-model-kernels/references/` are written once and cited by
+name from the skills, so two agents reading the same profile reach the same row. They are
+live procedure, unlike the plan documents in the next-but-one table.
+
+| File | What it owns |
+| --- | --- |
+| `optimize-model-kernels/references/read-the-numbers.md` | the regime classification: its inputs and the command for each, the derived quantities, the rows and the comparison that selects each, and the field names to record. `scripts/bound_candidates.py` implements it, and `bound.json` carries the result per candidate |
+| `optimize-model-kernels/references/mechanisms.md` | what each regime admits as a candidate change, as generators: the principle, the measurement that says it applies, and the measurement that says it worked. Nothing in it is ranked |
+| `optimize-model-kernels/references/tools.md` | one entry per instrument: the question only it answers, how it is invoked, and the conditions under which its numbers can be trusted |
+| `optimize-model-kernels/references/gates.md` | the key contract a trial prints, how a loop branches on it, every gate and what enforces it, the conditions that close a row, and who decides what |
 
 ### Intel box: setup and profiling
 
@@ -169,7 +182,7 @@ These are not routable and an agent must not treat them as procedure to execute:
 | Document | What it is |
 | --- | --- |
 | `SKILLS-REWRITE-PLAN.md` | the design the skills are being rewritten to; its "Shared conventions" section is the source of the rules below, and its section on deriving the mechanism the way oneDNN derives an implementation is the specification `bound_candidates.py` implements |
-| `optimize-model-kernels/PLAN.md` | the end-to-end pipeline skill, awaiting acceptance; becomes a `SKILL.md` when its open gaps are closed |
+| `optimize-model-kernels/PLAN.md` | the end-to-end pipeline skill, awaiting acceptance; becomes a `SKILL.md` when its open gaps are closed. Its `references/` directory is **not** a plan document -- those four files are live and are linked from the skills, as the table above says |
 | `route-kernel-work/PLAN.md`, `route-kernel-work/RUN.md` | the router's design and its one-command run plan; stage 4 above is the part of it that now exists |
 | `lint-baseline.json` | the recorded violation set the linter checks new edits against |
 

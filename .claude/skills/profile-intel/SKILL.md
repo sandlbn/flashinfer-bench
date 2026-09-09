@@ -60,7 +60,7 @@ target is chosen, `/wrap-kernel-for-tuning` is how it gets optimized.
 | `gemm` | `/optimize-onednn` | oneDNN is already the path `F.linear` takes. The win is in how it is *called* — layout, primitive caching, post-op fusion, not blocking the host — never in beating its matmul |
 | `attention` | `/onboard-model-intel` Phase 5 | `sgl-kernel-xpu` is the only source of Intel attention kernels; wire it as a baseline before writing anything |
 | `norm` | `/optimize-intel-kernels` | memory-bound; vectorized loads and multi-row work-groups |
-| `elementwise` | `/optimize-intel-kernels` | **try fusing into the producing GEMM's epilogue first** (`/optimize-onednn` Fix 3) |
+| `elementwise` | `/optimize-intel-kernels` | the model's own producer-consumer edges say whether the elementwise op can be folded into the producing GEMM's epilogue (`scripts/fusion_candidates.py`); `/optimize-onednn`, "Post-ops, and the shape of what they can express" |
 | `rope` | `/optimize-intel-kernels` | `vllm-xpu-kernels` ships `rotary_embedding`; benchmark against it first |
 | `sampling` | `/onboard-model-intel` Phase 5 | `sgl-kernel-xpu` has the family; verify each op is actually built |
 | `data movement` | no kernel to write | a large copy or concat is an avoidable materialisation; fix the layout or fuse the producer |

@@ -50,7 +50,7 @@ intermediate**, not a faster reduction.
    Naming (`/extract-kernel-definitions` B2): `mamba_ssu_decode_h{n}_d{d}_s{s}_ng{g}` and
    `gdn_{decode,mtp,prefill}_qk{q}_v{v}_d{d}_k_last`. Match your config's head/state
    counts before writing a new one.
-3. **Your own SYCL kernel.** `/optimize-intel-kernels` Step 4a. Fuse multiply and reduce so
+3. **Your own SYCL kernel.** `/optimize-intel-kernels`, "Write a SYCL solution". Fuse multiply and reduce so
    the intermediate stays in registers.
 
 ## Getting a definition at all

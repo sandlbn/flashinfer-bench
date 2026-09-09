@@ -158,7 +158,7 @@ Branch on the **fusion** (SwiGLU vs GeGLU vs residual+norm), never on the model 
 | --- | --- |
 | Compile wants `cuda_runtime_api.h` | Add `-DCUTLASS_ENABLE_SYCL -DSYCL_INTEL_TARGET` |
 | `RequiresExtension: ... SPIR-V extension` | Add the `-spirv-ext` flags, or declare the `xe-fuse` dependency and let `SyclBuilder` do it |
-| Correct but far slower than oneDNN | Register spill — `optimize-intel-kernels` Step 5: large GRF **or** a smaller tile, never both |
+| Correct, and `SPILLS` reports a count | Register pressure — `optimize-intel-kernels`, "Build, and check the failure mode for your language"; each candidate measured alone |
 | Output is garbage, no error | Interleaved vs split-half, or the `[K, N]` layout — re-derive with candidate references |
 | Output has the right values in the wrong places | Take `out[..., 0::2]` |
 | Fused MLP no faster than unfused | A compacting copy between chained kernels — see the chaining constraint |

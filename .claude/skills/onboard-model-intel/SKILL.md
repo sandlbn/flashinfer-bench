@@ -151,7 +151,7 @@ the way a serving stack would — profile vLLM-XPU or SGLang-XPU for those.
 | op_type family | Try first | Then | Last resort |
 | --- | --- | --- | --- |
 | `gemm` (dense projections) | **oneDNN** — already the path torch takes | oneDNN **post-ops** for the epilogue | SYCL, only to fix a bad *call* (`/optimize-onednn`) |
-| GEMM + norm/activation fusion | **oneDNN post-ops**, gated on token count (`/optimize-onednn` Fix 3) | Xe-Fuse | hand-written SYCL |
+| GEMM + norm/activation fusion | **oneDNN post-ops**, gated on token count (`/optimize-onednn`, "Post-ops, and the shape of what they can express") | Xe-Fuse | hand-written SYCL |
 | `rmsnorm`, `rope`, activations | **`vllm-xpu-kernels`** | `sgl-kernel-xpu` | SYCL — check the deployment traps first |
 | `gqa_paged`, `gqa_ragged`, `mla_paged`, `dsa_paged` | **`sgl-kernel-xpu`** — the only Intel attention kernels | torch SDPA as a correctness floor | SYCL — very large effort |
 | `moe`, GroupGemm, W4A16/W8A16 | **`sgl-kernel-xpu`** | — | — |

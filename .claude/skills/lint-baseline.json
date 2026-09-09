@@ -113,11 +113,6 @@
   },
   {
    "path": ".claude/skills/onboard-model-intel/SKILL.md",
-   "rule": "ENUM",
-   "text": "| GEMM + norm/activation fusion | **oneDNN post-ops**, gated on token count (`/optimize-onednn` Fix 3) | Xe-Fuse | hand-written SYCL |"
-  },
-  {
-   "path": ".claude/skills/onboard-model-intel/SKILL.md",
    "rule": "EXPECT",
    "text": "that says where the time goes, and a benchmarked solution for the ops that matter. No CUDA"
   },
@@ -140,36 +135,6 @@
    "path": ".claude/skills/onboard-model-intel/providers.md",
    "rule": "NAME",
    "text": "arity is not matching semantics; Gemma's variant needs its own definition first."
-  },
-  {
-   "path": ".claude/skills/optimize-intel-kernels/SKILL.md",
-   "rule": "ENUM",
-   "text": "Levers, in order of value:"
-  },
-  {
-   "path": ".claude/skills/optimize-intel-kernels/SKILL.md",
-   "rule": "EXPECT",
-   "text": "It will not find a fusion or remove a materialisation \u2014 for those see `/find-kernel-gaps`."
-  },
-  {
-   "path": ".claude/skills/optimize-intel-kernels/SKILL.md",
-   "rule": "ORDER",
-   "text": "Levers, in order of value:"
-  },
-  {
-   "path": ".claude/skills/optimize-intel-kernels/SKILL.md",
-   "rule": "STEPREF",
-   "text": "- **Route by op_type** using the decision table in `onboard-model-intel/SKILL.md` Phase 5."
-  },
-  {
-   "path": ".claude/skills/optimize-intel-kernels/SKILL.md",
-   "rule": "STEPREF",
-   "text": "Traces from `--save-results` are the deliverable. Publishing them is `onboard-model-intel`"
-  },
-  {
-   "path": ".claude/skills/optimize-intel-kernels/SKILL.md",
-   "rule": "STEPREF",
-   "text": "| `NO_WORKLOAD` | Attach a workload first \u2014 `onboard-model-intel` Phase 2 |"
   },
   {
    "path": ".claude/skills/optimize-intel-kernels/architectures.md",
@@ -200,11 +165,6 @@
    "path": ".claude/skills/optimize-intel-kernels/xe-fuse.md",
    "rule": "ORDER",
    "text": "Try oneDNN post-ops first (`/optimize-onednn`). Reach for Xe-Fuse only when **both** hold:"
-  },
-  {
-   "path": ".claude/skills/optimize-intel-kernels/xe-fuse.md",
-   "rule": "STEPREF",
-   "text": "| Correct but far slower than oneDNN | Register spill \u2014 `optimize-intel-kernels` Step 5: large GRF **or** a smaller tile, never both |"
   },
   {
    "path": ".claude/skills/optimize-intel-kernels/xe-matrix.md",
@@ -312,111 +272,6 @@
    "text": "7. **Doc mismatch.** `PROVENANCE.md` and `discover-model-kernels` Step 4 print"
   },
   {
-   "path": ".claude/skills/optimize-onednn/SKILL.md",
-   "rule": "ENUM",
-   "text": "## Fix 1: Weight layout"
-  },
-  {
-   "path": ".claude/skills/optimize-onednn/SKILL.md",
-   "rule": "ENUM",
-   "text": "## Fix 2: Primitive caching"
-  },
-  {
-   "path": ".claude/skills/optimize-onednn/SKILL.md",
-   "rule": "ENUM",
-   "text": "## Fix 3: Post-ops \u2014 fuse without leaving oneDNN"
-  },
-  {
-   "path": ".claude/skills/optimize-onednn/SKILL.md",
-   "rule": "ENUM",
-   "text": "## Fix 4: Do not block the host on every call"
-  },
-  {
-   "path": ".claude/skills/optimize-onednn/SKILL.md",
-   "rule": "ENUM",
-   "text": "Fix 4 before measuring this."
-  },
-  {
-   "path": ".claude/skills/optimize-onednn/SKILL.md",
-   "rule": "ENUM",
-   "text": "| Fix 1 | Weight layout | when dispatch says `unsupported format tag` |"
-  },
-  {
-   "path": ".claude/skills/optimize-onednn/SKILL.md",
-   "rule": "ENUM",
-   "text": "| Fix 2 | Primitive caching | when `create:` appears in a steady-state loop |"
-  },
-  {
-   "path": ".claude/skills/optimize-onednn/SKILL.md",
-   "rule": "ENUM",
-   "text": "| Fix 3 | Post-op fusion | when an elementwise op follows the GEMM |"
-  },
-  {
-   "path": ".claude/skills/optimize-onednn/SKILL.md",
-   "rule": "ENUM",
-   "text": "| Fix 4 | Remove the per-call host block | **check first if a oneDNN solution is slower than torch** |"
-  },
-  {
-   "path": ".claude/skills/optimize-onednn/SKILL.md",
-   "rule": "ENUM",
-   "text": "| Fix 5 | Tile/strategy catalog entry | the call is clean and the GEMM is still slow \u2014 `references/strategy-catalog.md` |"
-  },
-  {
-   "path": ".claude/skills/optimize-onednn/SKILL.md",
-   "rule": "ENUM",
-   "text": "| `unsupported format tag` | Rejected because of **your** memory descriptor \u2014 Fix 1 |"
-  },
-  {
-   "path": ".claude/skills/optimize-onednn/SKILL.md",
-   "rule": "EXPECT",
-   "text": "- **Implementation** \u2014 `jit:gemm:any` is the generic Xe GEMM generator and is the correct"
-  },
-  {
-   "path": ".claude/skills/optimize-onednn/SKILL.md",
-   "rule": "EXPECT",
-   "text": "Then: is a naive SYCL kernel competitive? If yes, oneDNN is not the problem"
-  },
-  {
-   "path": ".claude/skills/optimize-onednn/SKILL.md",
-   "rule": "EXPECT",
-   "text": "Xe-Fuse's interleaving traps apply. The fusion wins only above a token count that depends"
-  },
-  {
-   "path": ".claude/skills/optimize-onednn/SKILL.md",
-   "rule": "EXPECT",
-   "text": "library. Do not try to beat oneDNN's matmul \u2014 the wins are in how it is called."
-  },
-  {
-   "path": ".claude/skills/optimize-onednn/SKILL.md",
-   "rule": "EXPECT",
-   "text": "which is faster depends on M: it can reverse between M=1 and mid-range M. Measure it for the"
-  },
-  {
-   "path": ".claude/skills/optimize-onednn/SKILL.md",
-   "rule": "NAME",
-   "text": "implementation on Battlemage. `jit:xe_hp:gemm:any` is the Xe-HP/PVC systolic path and"
-  },
-  {
-   "path": ".claude/skills/optimize-onednn/SKILL.md",
-   "rule": "ORDER",
-   "text": "| `all` | everything | last resort |"
-  },
-  {
-   "path": ".claude/skills/optimize-onednn/SKILL.md",
-   "rule": "STEPREF",
-   "text": "(`optimize-intel-kernels` Step 4a). Does layout matter for these shapes? Time"
-  },
-  {
-   "path": ".claude/skills/optimize-onednn/references/strategy-catalog.md",
-   "rule": "ENUM",
-   "text": "# Fix 5: The tile/strategy the selector chose is wrong for your shape"
-  },
-  {
-   "path": ".claude/skills/optimize-onednn/references/strategy-catalog.md",
-   "rule": "ENUM",
-   "text": "Fixes 1-4 change how you *call* oneDNN. This changes what kernel it *generates* \u2014 for your"
-  },
-  {
    "path": ".claude/skills/optimize-ssm-scan/SKILL.md",
    "rule": "NAME",
    "text": "You cannot see this from kernel names: a Mamba2 scan and an RMSNorm both surface as"
@@ -434,17 +289,7 @@
   {
    "path": ".claude/skills/optimize-ssm-scan/SKILL.md",
    "rule": "STEPREF",
-   "text": "3. **Your own SYCL kernel.** `/optimize-intel-kernels` Step 4a. Fuse multiply and reduce so"
-  },
-  {
-   "path": ".claude/skills/optimize-ssm-scan/SKILL.md",
-   "rule": "STEPREF",
    "text": "Add them as baselines first (`/onboard-model-intel` Phase 5). Ask the registry for what"
-  },
-  {
-   "path": ".claude/skills/profile-intel/SKILL.md",
-   "rule": "ENUM",
-   "text": "| `elementwise` | `/optimize-intel-kernels` | **try fusing into the producing GEMM's epilogue first** (`/optimize-onednn` Fix 3) |"
   },
   {
    "path": ".claude/skills/profile-intel/SKILL.md",

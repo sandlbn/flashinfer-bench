@@ -518,3 +518,58 @@ def test_onednn_provenance_next_step_parses_against_the_real_cli(tmp_path):
         assert args.cmd == "init"
         assert args.name == "aten_linear"
         assert args.baseline.endswith("harness.py")
+
+
+# ---------------------------------------------------------------------------------------
+# Resolving a provider op at all: the ops exist in a process only once whatever registers
+# them has been imported. Without that the dispatcher dump is empty, every provider op is
+# classed as a Python-registered custom op with no source, and `--bundle` writes nothing --
+# which is indistinguishable from the provider not being installed, and is what kept
+# `provider_patch` rejected at `source_present` for every candidate.
+# ---------------------------------------------------------------------------------------
+
+
+def _harness(path, providers):
+    path.write_text(
+        'OP = "_C.rms_norm.default"\nCALLS = 1\n'
+        f"PROVIDERS = {providers!r}\n"
+        "class Model:\n    pass\n\n\ndef get_inputs():\n    return []\n"
+    )
+
+
+def test_providers_come_from_the_harnesses_and_deepest_first(tmp_path):
+    pks = _load("pull_kernel_source")
+    _harness(tmp_path / "a.py", ["pkg", "pkg.ext._C"])
+    _harness(tmp_path / "b.py", ["pkg.ext._C", "other"])
+    # Deepest first: importing a package does not import the extension submodule that
+    # carries the registrations, so the submodule has to be tried in its own right.
+    assert pks.providers_from_harnesses(tmp_path) == ["pkg.ext._C", "other", "pkg"]
+
+
+def test_providers_are_ignored_when_a_harness_declares_none(tmp_path):
+    pks = _load("pull_kernel_source")
+    (tmp_path / "plain.py").write_text('OP = "aten.linear.default"\n')
+    assert pks.providers_from_harnesses(tmp_path) == []
+
+
+def test_import_providers_reports_what_loaded_and_skips_what_cannot(tmp_path):
+    pks = _load("pull_kernel_source")
+    # A module this box does not have is not an error: the ops it would have registered
+    # are then honestly unresolved, and the resolver still reports on everything else.
+    assert pks.import_providers(["json", "no_such_module_for_this_test"]) == ["json"]
+
+
+def test_resolution_imports_the_harnesses_providers_before_resolving(tmp_path, monkeypatch):
+    """The wiring itself: a run must import them before it reads the dispatcher, or every
+    provider op resolves as unregistered and no bundle is written for it."""
+    pks = _load("pull_kernel_source")
+    _harness(tmp_path / "a.py", ["pkg.ext._C"])
+
+    order = []
+    monkeypatch.setattr(pks, "import_providers", lambda names: order.append(list(names)) or [])
+    stub = {"op": "x", "provider": "p", "share": None}
+    monkeypatch.setattr(pks, "report", lambda *a, **k: order.append("resolved") or stub)
+    monkeypatch.setattr(sys, "argv", ["pull_kernel_source.py", "--from-harnesses", str(tmp_path)])
+    pks.main()
+
+    assert order == [["pkg.ext._C"], "resolved"]

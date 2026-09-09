@@ -51,3 +51,5 @@ and the gates follow.
 | What is special about this Intel part? | `.claude/skills/optimize-intel-kernels/architectures.md` |
 | Is my GEMM slow because of how it is *called*? | `/optimize-onednn` |
 | How do I harness and tune a kernel in place? | `/wrap-kernel-for-tuning` |
+| Which regime is this kernel in, and what does that admit? | `.claude/skills/optimize-model-kernels/references/read-the-numbers.md`, then `mechanisms.md` beside it |
+| What has a number got to clear before it counts? | `.claude/skills/optimize-model-kernels/references/gates.md`, which owns the rules on this page in full |

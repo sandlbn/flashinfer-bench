@@ -25,8 +25,10 @@ that reproduces the selection -- see the oneDNN section below.
 from __future__ import annotations
 
 import argparse
+import ast
 import dataclasses
 import fnmatch
+import importlib
 import json
 import os
 import pathlib
@@ -1718,6 +1720,49 @@ def ops_from_harnesses(d: pathlib.Path) -> Dict[str, pathlib.Path]:
     return {op: f for op, (_, f) in best.items()}
 
 
+def providers_from_harnesses(d: pathlib.Path) -> List[str]:
+    """The modules the generated harnesses record as registering their ops.
+
+    An op exists in a process only once the extension that registers it has been imported,
+    and ``torch._C._dispatch_dump`` is the resolver's whole source of truth about a class.
+    A resolver that imported nothing but torch sees no dispatcher entry for any provider op
+    and classes every one of them as a Python-registered custom op with no source -- which
+    reads exactly like a provider that is not installed, and leaves ``--bundle`` with
+    nothing to write. The harnesses already carry the answer in ``PROVIDERS``, recorded by
+    ``scripts/harness_from_model.py`` from the stack that ran the op; this reads it rather
+    than guessing a package name from the namespace.
+    """
+    names: List[str] = []
+    for f in sorted(d.glob("*.py")):
+        m = re.search(r"^PROVIDERS = (\[[^\n]*\])$", f.read_text(), re.M)
+        if not m:
+            continue
+        try:
+            names.extend(ast.literal_eval(m.group(1)))
+        except (SyntaxError, ValueError):
+            continue
+    # Deepest first: the extension submodule registers the ops, and importing its package
+    # alone does not.
+    return sorted(set(names), key=lambda n: (-n.count("."), n))
+
+
+def import_providers(names: Iterable[str]) -> List[str]:
+    """Import what will register ops here, and report what actually loaded.
+
+    Best effort by design: a module that is absent or fails to import is one this box does
+    not have, and the ops it would have registered are then honestly unresolved rather than
+    a crash in the resolver.
+    """
+    loaded: List[str] = []
+    for name in names:
+        try:
+            importlib.import_module(name)
+        except Exception:
+            continue
+        loaded.append(name)
+    return loaded
+
+
 def share_lookup(path: pathlib.Path):
     """Charge an op the device time of the kernels it launches.
 
@@ -1784,6 +1829,20 @@ def main() -> None:
         ap.error("give --op, --from-harnesses or --from-report")
 
     import torch  # noqa: F401  (loads the dispatcher)
+
+    # Then whatever registers the ops. Without this the dispatcher dump is empty for every
+    # provider op and the run classes them all as Python-registered with no source.
+    if args.from_harnesses:
+        loaded = import_providers(providers_from_harnesses(pathlib.Path(args.from_harnesses)))
+        print(f"  providers     : {', '.join(loaded) or 'none loaded'}")
+    else:
+        # discovered.json does not record what registers an op; only the harnesses do. Say
+        # so, because the symptom of running without them is every provider op resolving as
+        # a Python-registered custom op with no source -- which reads as "not installed".
+        print(
+            "  providers     : none imported (no --from-harnesses); ops whose provider is "
+            "not already loaded here will resolve as unregistered"
+        )
 
     out = pathlib.Path(args.bundle) if args.bundle else None
     results = []
