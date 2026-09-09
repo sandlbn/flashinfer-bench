@@ -1,10 +1,12 @@
-"""ai-bench Model that calls vLLM's unified attention *in place* -- nothing is extracted.
+"""Tuning harness that calls vLLM's unified attention *in place* -- nothing is extracted.
 
 Lifting a kernel out of a serving stack is the step that silently goes wrong: the signature
 is long, several arguments derive from engine objects, and a reconstruction that is subtly
 off still runs and still benchmarks. None of that is necessary to evaluate the kernel. The
-ai-bench contract is a `Model` with `forward`, `get_inputs` and `get_init_inputs`, and
-`forward` is free to import the production kernel and call it.
+harness contract is three names -- `Model`, `get_inputs`, `get_init_inputs` -- and `forward`
+is free to import the production kernel and call it. `scripts/kernel_trials.py` runs this
+file directly, so no benchmarking package is required; the shape matches the KernelBench
+convention only so a harness stays portable to those runners.
 
 So the baseline here *is* the kernel vLLM runs, imported from vLLM, at shapes taken from a
 real definition in the dataset. An optimizer working on this file replaces the body with its

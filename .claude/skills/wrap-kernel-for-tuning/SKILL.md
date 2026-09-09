@@ -1,6 +1,6 @@
 ---
 name: wrap-kernel-for-tuning
-description: Make a kernel that lives inside a serving stack measurable and optimizable without extracting it — an ai-bench Model that imports and calls the production kernel, plus the three checks that prove the harness did not change the problem. Use before optimizing any vLLM or SGLang kernel, and whenever a tuning loop needs a baseline that is the real thing rather than a copy.
+description: Make a kernel that lives inside a serving stack measurable and optimizable without extracting it — a small harness that imports and calls the production kernel, the three checks that prove the harness did not change the problem, and the trial loop that searches from there. Use before optimizing any vLLM or SGLang kernel, and whenever a tuning loop needs a baseline that is the real thing rather than a copy.
 ---
 
 # Wrap a production kernel for tuning
@@ -15,7 +15,10 @@ production kernel is already callable.
 
 ## The contract
 
-`ai-bench` (and Xe-Forge's trial loop on top of it) wants one file:
+Three names in one file. Nothing else, and no benchmarking package required -- the loop
+below imports the file and calls it, so a harness stays usable whatever happens to any
+external runner. The shape matches the KernelBench convention, which costs nothing and makes
+a harness portable to those runners, but nothing here depends on them.
 
 ```python
 class Model(nn.Module):
@@ -75,12 +78,41 @@ think. Fix that before optimizing anything.
 
 ## Running the loop
 
+Read `tools/kernel-harness/knowledge/README.md` before the first trial. It is short and it
+is not a style guide: it carries the measured numbers that decide whether a direction is
+worth a trial — what a substitution costs, where the instrument's floor is, which directions
+have already been tried here and what came of them.
+
+`scripts/kernel_trials.py` is the loop. Trials form a tree: each records its parent and the
+strategy that produced it, so a regression branches back to the best node instead of
+compounding forward.
+
+```bash
+python scripts/kernel_trials.py init      <name> <harness.py>
+python scripts/kernel_trials.py save      <name> <candidate.py> --parent t2 --strategy "..."
+python scripts/kernel_trials.py benchmark <name> <candidate.py> --trial t3
+python scripts/kernel_trials.py status    <name>      # the tree, and which node to branch from
+python scripts/kernel_trials.py finalize  <name> <output.py>
+```
+
+`benchmark` is the only sanctioned way to get a number, and it is built so the searcher
+cannot get it wrong:
+
+- **Correctness gates timing.** A candidate that is wrong, wrongly shaped, or non-finite
+  never records a latency.
+- **Both arms are warmed before either is timed**, then timed in interleaved rounds with the
+  median reported. A GPU that has been idle ramps its clocks, so a sequential sweep charges
+  the ramp to whichever case runs first -- that inverted one comparison in this repo from
+  0.53x to 1.09x.
+- **Many calls per timed region**, so per-call launch and event overhead amortizes rather
+  than becoming the measurement. Timing one call at a time reported a 4.9us kernel as 40.8us.
+- **A difference smaller than the candidate's own scatter is flagged**, in either direction.
+
 Discipline that matters more than the search strategy:
 
-- **Never write your own benchmark script.** Use the harness's benchmark command. Every
-  measurement error in this repo's Intel work came from ad-hoc timing — a clock ramp
-  inverted one comparison from 0.53x to 1.09x, and a per-call event pair reported a 4.9us
-  kernel as 40.8us.
+- **Never write your own benchmark script.** Use `kernel_trials.py benchmark`. Every
+  measurement error in this repo's Intel work came from ad-hoc timing, and each one was
+  discovered only because something else contradicted it.
 - **Run every trial the budget allows.** Stopping at a plateau ends the search where it is
   hardest, which is where the interesting rewrites are.
 - **Branch, do not walk.** Improved, continue from here; regressed, go back to the best
@@ -111,7 +143,10 @@ layout usually is.
 
 ## Sources
 
-- `tools/aibench/vllm_unified_attention.py` — a worked wrapper, with its spec YAML beside it
+- `tools/kernel-harness/knowledge/README.md` — what a trial should know before it starts
+- `scripts/kernel_trials.py` — the trial loop: correctness-gated, interleaved benchmark,
+  trial tree with parents and strategies
+- `tools/kernel-harness/vllm_unified_attention.py` — a worked wrapper, with its spec YAML beside it
 - `scripts/capture_triton_kernel.py` — records a real launch when shapes must come from
   production rather than from a definition. It captures but does **not** verify the capture
   replays; treat its output as a starting point
