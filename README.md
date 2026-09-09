@@ -70,3 +70,7 @@ Our collaborators include:
 [<img src="https://raw.githubusercontent.com/mlc-ai/XGrammar-web-assets/refs/heads/main/repo/bosch.svg" height=50/>](https://www.bosch.com/)
 
 </div>
+
+## Kernel optimization on Intel GPUs
+
+The agent-facing pipeline — discovering which kernels a model actually runs, resolving each to the code that implements it, pricing every way of delivering a change, and proving a win end to end — is documented in [`.claude/skills/README.md`](.claude/skills/README.md).

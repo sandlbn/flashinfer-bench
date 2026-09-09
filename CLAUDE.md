@@ -315,6 +315,10 @@ reason against the external dataset
 
 ### Agent and skill workflows
 
+`.claude/skills/README.md` is the orientation for all of it: the pipeline as a flow, why routing prices delivery mechanisms rather than choosing kernels, how to read a
+rejection chain, which skill to reach for, and which measurements are trustworthy.
+Read it before the individual skills.
+
 `.claude/skills/` holds one directory per skill, each with a `SKILL.md`. The frontmatter
 `description` is the routing text; the summaries below are orientation only.
 
@@ -363,7 +367,7 @@ reason against the external dataset
   and selector output, resolving a rejection to the gate in oneDNN's source, classifying the
   shape, then the axes a *caller* controls (descriptors, attributes, primitive lifetime,
   decomposition, synchronization, implementation selection, library build). Its worked
-  findings live in `references/illustrations.md`, one instance each
+  findings live in `.claude/skills/optimize-onednn/references/illustrations.md`, one instance each
 - **optimize-ssm-scan**: State-space / SSD scan kernels for hybrid models on Intel; use
   when profiling reports materialised high-rank contractions
 
