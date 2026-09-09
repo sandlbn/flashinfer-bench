@@ -13,6 +13,23 @@ import pytest
 from flashinfer_bench.integration import providers as prov
 
 
+@pytest.fixture
+def with_pip(monkeypatch):
+    """Pretend this interpreter has pip, so command-shape tests see a command.
+
+    The dev venv here has no pip, and without this every install_command call would be
+    the refusal instead -- which has its own tests in TestInstallerChoice.
+    """
+    monkeypatch.setattr(prov, "_has_pip", lambda: True)
+    monkeypatch.delenv(prov.INSTALLER_ENV_VAR, raising=False)
+
+
+@pytest.fixture
+def without_pip(monkeypatch):
+    monkeypatch.setattr(prov, "_has_pip", lambda: False)
+    monkeypatch.delenv(prov.INSTALLER_ENV_VAR, raising=False)
+
+
 class TestSpecTable:
     def test_every_spec_is_addressable_by_name(self):
         for spec in prov.SPECS:
@@ -41,18 +58,13 @@ class TestSpecTable:
 
 
 class TestInstallCommands:
-    def test_a_wheel_provider_is_a_plain_install(self):
-        """Which installer runs depends on the environment; the package does not.
-
-        Asserting `python -m pip` here is what hid the uv case: this virtualenv has no
-        pip at all, so that spelling fails before it installs anything.
-        """
+    def test_a_wheel_provider_is_a_plain_pip_install(self, with_pip):
+        """The default installer is this interpreter's pip and nothing else."""
         command = prov.install_command(prov.get_spec("vllm-xpu"))
-        assert "install" in command
+        assert command[:4] == [sys.executable, "-m", "pip", "install"]
         assert "vllm-xpu-kernels" in command
-        assert command[0] in (sys.executable, prov.shutil.which("uv"))
 
-    def test_a_source_build_carries_the_architecture(self):
+    def test_a_source_build_carries_the_architecture(self, with_pip):
         command = prov.install_command(prov.get_spec("sgl-kernel-xpu"), target="bmg")
         assert "--config-settings=cmake.define.DPCPP_SYCL_TARGET=bmg" in command
         assert "--no-build-isolation" in command
@@ -67,13 +79,26 @@ class TestInstallCommands:
             prov.install_command(prov.get_spec("xe-fuse"))
         assert "FIB_XE_FUSE_DIR" in str(e.value)
 
-    def test_dry_run_does_not_execute(self, monkeypatch):
+    def test_dry_run_does_not_execute(self, with_pip, monkeypatch):
         def explode(*a, **k):  # pragma: no cover - must never be reached
             raise AssertionError("dry run executed a subprocess")
 
         monkeypatch.setattr(prov.subprocess, "run", explode)
         command, code = prov.install("vllm-xpu", dry_run=True)
-        assert code == 0 and "pip" in command
+        assert code == 0 and command[:3] == [sys.executable, "-m", "pip"]
+
+    def test_dry_run_with_uv_opt_in_shows_the_uv_command_without_running_it(
+        self, without_pip, monkeypatch
+    ):
+        """`--installer uv --dry-run` is the sanctioned way to see the uv command."""
+
+        def explode(*a, **k):  # pragma: no cover - must never be reached
+            raise AssertionError("dry run executed a subprocess")
+
+        monkeypatch.setattr(prov.subprocess, "run", explode)
+        monkeypatch.setattr(prov.shutil, "which", lambda name: f"/usr/bin/{name}")
+        command, code = prov.install("vllm-xpu", dry_run=True, installer="uv")
+        assert code == 0 and command[:3] == ["/usr/bin/uv", "pip", "install"]
 
 
 class TestArchitectureDerivation:
@@ -104,7 +129,7 @@ class TestArchitectureDerivation:
             prov.install_command(prov.get_spec("sgl-kernel-xpu"))
         assert "--target" in str(e.value)
 
-    def test_an_explicit_target_needs_no_device(self, monkeypatch):
+    def test_an_explicit_target_needs_no_device(self, with_pip, monkeypatch):
         def explode(*a, **k):  # pragma: no cover - must never be reached
             raise AssertionError("consulted the device despite an explicit target")
 
@@ -144,36 +169,133 @@ class TestProvenance:
         assert prov.provider_version(spec)
 
 
-class TestEnvironmentHandling:
-    """Both of these were real failures: the documented recipes did not run here."""
+class TestInstallerChoice:
+    """The library never runs an installer the caller did not ask for.
 
-    def test_uv_is_used_when_the_environment_has_no_pip(self, monkeypatch):
-        """A uv-managed virtualenv has no pip module; `python -m pip` dies there."""
-        monkeypatch.setattr(prov.importlib.util, "find_spec", lambda name: None)
-        monkeypatch.setattr(prov.shutil, "which", lambda name: "/usr/bin/uv")
+    The defect this guards against was real: on a box whose venvs have no pip module,
+    `install_command` used to fall back to `uv pip install` on its own. uv resolves the
+    provider's dependencies against PyPI and can replace an Intel XPU torch with the
+    default CUDA build -- silently, and undone only by a long manual reinstall.
+    """
+
+    def test_pip_is_used_when_present(self, with_pip):
         command = prov.install_command(prov.get_spec("vllm-xpu"))
+        assert command[:3] == [sys.executable, "-m", "pip"]
+
+    def test_no_pip_declines_rather_than_falling_back(self, without_pip, monkeypatch):
+        """uv on PATH must make no difference to what happens by default."""
+        monkeypatch.setattr(prov.shutil, "which", lambda name: "/usr/bin/uv")
+        with pytest.raises(prov.ProviderError) as e:
+            prov.install_command(prov.get_spec("vllm-xpu"))
+        msg = str(e.value)
+        assert "Declined" in msg
+        # The caller must not need the source to know what to run: package, environment,
+        # reason, and the opt-in are all in the message.
+        assert "vllm-xpu-kernels" in msg
+        assert sys.prefix in msg and sys.executable in msg
+        assert "CUDA" in msg and "no `pip` module" in msg
+        assert "--installer uv" in msg and prov.INSTALLER_ENV_VAR in msg
+
+    def test_declining_never_runs_anything(self, without_pip, monkeypatch):
+        def explode(*a, **k):  # pragma: no cover - must never be reached
+            raise AssertionError("a refusal ran a subprocess")
+
+        monkeypatch.setattr(prov.subprocess, "run", explode)
+        monkeypatch.setattr(prov.shutil, "which", lambda name: "/usr/bin/uv")
+        with pytest.raises(prov.ProviderError):
+            prov.install("vllm-xpu")
+
+    def test_source_build_prerequisites_are_also_declined(self, without_pip, monkeypatch):
+        """The build-requirements pre-install is a second installer call; same rule."""
+        monkeypatch.setattr(prov.shutil, "which", lambda name: f"/usr/bin/{name}")
+        with pytest.raises(prov.ProviderError) as e:
+            prov.install("sgl-kernel-xpu", target="bmg", dry_run=True)
+        assert "Declined" in str(e.value)
+
+    def test_uv_runs_only_when_named(self, without_pip, monkeypatch):
+        monkeypatch.setattr(prov.shutil, "which", lambda name: "/usr/bin/uv")
+        command = prov.install_command(prov.get_spec("vllm-xpu"), installer="uv")
         assert command[0] == "/usr/bin/uv"
         # uv must be told which interpreter to install into, not left to infer it.
         assert "--python" in command and sys.executable in command
 
-    def test_pip_is_preferred_when_present(self, monkeypatch):
-        monkeypatch.setattr(prov.importlib.util, "find_spec", lambda name: object())
+    def test_the_environment_variable_is_an_explicit_opt_in_too(self, without_pip, monkeypatch):
+        monkeypatch.setattr(prov.shutil, "which", lambda name: "/usr/bin/uv")
+        monkeypatch.setenv(prov.INSTALLER_ENV_VAR, "uv")
         command = prov.install_command(prov.get_spec("vllm-xpu"))
+        assert command[0] == "/usr/bin/uv"
+
+    def test_the_argument_beats_the_environment_variable(self, with_pip, monkeypatch):
+        monkeypatch.setattr(prov.shutil, "which", lambda name: "/usr/bin/uv")
+        monkeypatch.setenv(prov.INSTALLER_ENV_VAR, "uv")
+        command = prov.install_command(prov.get_spec("vllm-xpu"), installer="pip")
         assert command[:3] == [sys.executable, "-m", "pip"]
 
-    def test_no_installer_at_all_says_so(self, monkeypatch):
-        monkeypatch.setattr(prov.importlib.util, "find_spec", lambda name: None)
+    def test_uv_requested_but_absent_says_so(self, without_pip, monkeypatch):
         monkeypatch.setattr(prov.shutil, "which", lambda name: None)
         with pytest.raises(prov.ProviderError) as e:
-            prov.install_command(prov.get_spec("vllm-xpu"))
-        assert "uv" in str(e.value) and "pip" in str(e.value)
+            prov.install_command(prov.get_spec("vllm-xpu"), installer="uv")
+        assert "uv" in str(e.value) and sys.prefix in str(e.value)
 
-    def test_a_no_isolation_build_declares_its_backend(self):
+    def test_an_unknown_installer_is_rejected(self, with_pip):
+        with pytest.raises(prov.ProviderError) as e:
+            prov.install_command(prov.get_spec("vllm-xpu"), installer="conda")
+        assert "conda" in str(e.value) and "pip" in str(e.value)
+
+    def test_a_no_isolation_build_declares_its_backend(self, with_pip):
         """--no-build-isolation means nothing installs the build backend for you."""
         spec = prov.get_spec("sgl-kernel-xpu")
         command = prov.install_command(spec, target="bmg")
         assert "--no-build-isolation" in command
         assert "scikit-build-core" in spec.build_requires
+
+
+class TestCli:
+    """The CLI surface: --dry-run prints, a refusal is the message and exit 1."""
+
+    def _run(self, argv, monkeypatch, capsys):
+        from flashinfer_bench.cli.main import cli
+
+        monkeypatch.setattr(sys, "argv", ["flashinfer-bench", *argv])
+        try:
+            cli()
+        except SystemExit as e:
+            return e.code, capsys.readouterr()
+        return 0, capsys.readouterr()
+
+    def test_dry_run_prints_the_pip_command(self, with_pip, monkeypatch, capsys):
+        def explode(*a, **k):  # pragma: no cover - must never be reached
+            raise AssertionError("dry run executed a subprocess")
+
+        monkeypatch.setattr(prov.subprocess, "run", explode)
+        code, out = self._run(
+            ["providers", "install", "vllm-xpu", "--dry-run"], monkeypatch, capsys
+        )
+        assert code in (0, None)
+        assert out.out.strip() == f"{sys.executable} -m pip install vllm-xpu-kernels"
+
+    def test_default_without_pip_declines_and_tells_the_user_what_to_do(
+        self, without_pip, monkeypatch, capsys, caplog
+    ):
+        def explode(*a, **k):  # pragma: no cover - must never be reached
+            raise AssertionError("a refusal ran a subprocess")
+
+        monkeypatch.setattr(prov.subprocess, "run", explode)
+        monkeypatch.setattr(prov.shutil, "which", lambda name: "/usr/bin/uv")
+        code, _ = self._run(["providers", "install", "vllm-xpu"], monkeypatch, capsys)
+        assert code == 1
+        assert "Declined to install vllm-xpu-kernels" in caplog.text
+        assert "--installer uv" in caplog.text
+
+    def test_installer_flag_is_the_only_route_to_uv(self, without_pip, monkeypatch, capsys):
+        monkeypatch.setattr(prov.shutil, "which", lambda name: f"/usr/bin/{name}")
+        code, out = self._run(
+            ["providers", "install", "vllm-xpu", "--installer", "uv", "--dry-run"],
+            monkeypatch,
+            capsys,
+        )
+        assert code in (0, None)
+        assert out.out.startswith("/usr/bin/uv pip install --python ")
 
 
 class TestDistributionNames:

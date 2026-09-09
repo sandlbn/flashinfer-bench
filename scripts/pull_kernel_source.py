@@ -362,14 +362,7 @@ def bundle(
     if harness and harness.is_file():
         shutil.copy2(harness, d / "harness.py")
 
-    import torch
-
-    try:
-        schema = str(
-            getattr(torch.ops, op.split("::")[0]).__getattr__(op.split("::")[1]).default._schema
-        )
-    except Exception:
-        schema = "(not resolvable)"
+    schema = op_schema(op) or "(not resolvable)"
     files_md = (
         "\n".join(f"- `source/{rel}` ({n} lines) -- {why}" for rel, why, n in copied)
         or "- (none found on this box)"
@@ -387,6 +380,23 @@ def bundle(
         )
     )
     return d
+
+
+def op_schema(op: str) -> Optional[str]:
+    """The dispatcher's schema string for ``ns::name``, or None if it cannot be resolved.
+
+    The schema is what says which arguments an op mutates (``Tensor(a!)``) and whether it
+    returns a tensor -- the two facts a bytes-moved lower bound needs and the shapes alone
+    do not carry.
+    """
+    import torch
+
+    try:
+        return str(
+            getattr(torch.ops, op.split("::")[0]).__getattr__(op.split("::")[1]).default._schema
+        )
+    except Exception:
+        return None
 
 
 def python_op_source(op: str) -> List[str]:
@@ -500,8 +510,12 @@ def report(
         "provider": provider,
         "where": where,
         "route": route,
-        "bundle": written,
+        "bundle": str(written) if written else None,
         "share": share_pct,
+        "schema": op_schema(op) if (dev or prims or not keys) else None,
+        "launched": launched,
+        "primitives": prims,
+        "dispatch_keys": keys,
     }
 
 
@@ -572,6 +586,11 @@ def main() -> None:
         "--bundle",
         help="write harness + kernel source + provenance per op into this directory",
     )
+    ap.add_argument(
+        "--json",
+        help="also write every op's resolution (class, source, schema, launched kernels) "
+        "here, for scripts/bound_candidates.py",
+    )
     args = ap.parse_args()
 
     harnesses: Dict[str, pathlib.Path] = {}
@@ -615,7 +634,25 @@ def main() -> None:
         if t.get("constexprs"):
             print(f"  constexprs    : {t['constexprs']}")
         print("  route         : /wrap-kernel-for-tuning -- tune in place, no substitution")
-        results.append({"op": t["kernel"], "provider": "Triton", "route": "wrap"})
+        results.append(
+            {
+                "op": t["kernel"],
+                "provider": "Triton",
+                "where": [t["source"]],
+                "route": "wrap",
+                "bundle": None,
+                "share": None,
+                "schema": None,
+                "launched": [t["kernel"]],
+                "primitives": [],
+                "dispatch_keys": [],
+            }
+        )
+
+    if args.json:
+        out_json = pathlib.Path(args.json)
+        out_json.parent.mkdir(parents=True, exist_ok=True)
+        out_json.write_text(json.dumps({"device": args.device, "ops": results}, indent=2) + "\n")
 
     print("\n" + "=" * 86)
     print(f"{'share':>8}  {'op':42} {'implemented by':32}")

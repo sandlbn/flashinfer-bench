@@ -102,14 +102,19 @@ is not the goal; the wins are in how it is called (`/optimize-onednn`).
 the clone is still useful, because the Intel skills only *read* these trees (to grep
 signatures and reference implementations) and never import them.
 
+Both lines are installs: the owner approves them first, and they go into the activated dev
+venv (`.venv`) — `CLAUDE.md`, "Python Environments".
+
 ```bash
+source .venv/bin/activate
 ( cd tmp/flashinfer && python -m pip install --no-build-isolation -e . -v )
 ( cd tmp/sglang    && python -m pip install -e python )
 ```
 
-Subshells keep the working directory unchanged. In a `uv`-managed venv use
-`uv pip install` — `python -m pip` is not present, and `pip show` will report installed
-packages as missing.
+Subshells keep the working directory unchanged. A uv-managed venv has no `pip` module
+(`No module named pip`); bootstrapping one with `python -m ensurepip` is itself an install
+the owner approves, and never `uv pip install` in its place. Verify an install with
+`python -c "import <module>"` — `pip show` reports installed packages as missing.
 
 ## Record the SHAs
 
@@ -143,4 +148,4 @@ python -c "import sglang, flashinfer; print(sglang.__version__, flashinfer.__ver
 | Blobs are text pointers, not tensors | LFS not pulled | `git -C tmp/flashinfer-trace lfs pull` |
 | HF clone asks for credentials | Not logged in | `hf auth login` |
 | FlashInfer build fails on `nvcc` | Intel-only box | Expected — skip the install step; the clone is enough |
-| `python -m pip: No module named pip` | uv-managed venv | Use `uv pip install` |
+| `python -m pip: No module named pip` | uv-managed venv; `pip` is absent by design | Ask the owner to install, naming the package and `.venv`; never `uv pip install` |

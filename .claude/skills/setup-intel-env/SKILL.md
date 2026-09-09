@@ -6,7 +6,9 @@ description: Bring an Intel GPU box from nothing to running flashinfer-bench —
 # Set up an Intel GPU box
 
 Each step ends in a command that prints the expected value or says what is missing. Do them
-in order. Ask before installing system packages (oneAPI, drivers).
+in order. Installing anything — system packages (oneAPI, drivers) and Python packages alike —
+is the owner's action: ask first, naming the package and the environment it goes into
+(`CLAUDE.md`, "Python Environments").
 
 ## Step 1: GPU and driver
 
@@ -23,32 +25,38 @@ If `torch.xpu.is_available()` is False, stop — `docs/start/hardware-support.md
 
 ## Step 2: PyTorch with XPU support
 
-```bash
-uv pip install torch --index-url https://download.pytorch.org/whl/xpu
-```
-
-Use one environment manager throughout. In a uv venv `pip` is absent, so verify with
-`python -c "import <module>"`, never `pip show`.
-
-### Never `uv run` in this venv
-
-`pyproject.toml` pins plain `torch` with no index override, so `uv run` re-syncs the venv
-and replaces the XPU wheels with CUDA ones, and installs upstream `triton` over
-`triton-xpu` (they share the `triton` namespace, so `triton.backends.intel` stops
-importing and every Triton solution reports `COMPILE_ERROR`). Activate the venv and call
-tools directly, or use `uv run --no-sync`. Activating also puts `.venv/bin` on `PATH`,
-which the SYCL builder needs for `ninja`.
-
-To repair a venv this has hit:
+torch-xpu is installed by the owner into the dev venv (`.venv`). This step verifies it and
+installs nothing:
 
 ```bash
-uv pip install --index-url https://download.pytorch.org/whl/xpu "torch==<ver>+xpu"
-uv pip uninstall triton                     # removes the shared triton/_C/ ...
-uv pip install --force-reinstall --index-url https://download.pytorch.org/whl/xpu \
-    "triton-xpu==<ver>"                     # ... so triton-xpu must be reinstalled after
+source .venv/bin/activate
 python -c "import torch, triton; print(torch.__version__, torch.xpu.is_available(), list(triton.backends.backends))"
 # want: <ver>+xpu True ['amd', 'intel', 'nvidia']
 ```
+
+Any other output — no `+xpu` suffix, `False`, or `intel` missing from the backends — means
+the venv never had the XPU wheels or has been re-synced (below). Stop and ask the owner to
+install `torch==<ver>+xpu` and `triton-xpu==<ver>` from
+`https://download.pytorch.org/whl/xpu` into `.venv`. Neither venv has `pip`, so verify with
+`python -c "import <module>"`, never `pip show`.
+
+### Never `uv run` or `uv pip` in these venvs
+
+The rule is in `CLAUDE.md`, "Python Environments"; this is the mechanism. `pyproject.toml`
+pins plain `torch` with no index override, so `uv run` (and `uv sync`) re-syncs the venv and
+replaces the XPU wheels with CUDA ones, and installs upstream `triton` over `triton-xpu`
+(they share the `triton` namespace, so `triton.backends.intel` stops importing and every
+Triton solution reports `COMPILE_ERROR`). `uv pip install` resolves a package's
+dependencies against PyPI and does the same whenever a requirement is not met by the
+installed `+xpu` wheels. Activate the venv and call tools directly; there is no safe flag,
+so never `uv run --no-sync` either. Activating also puts `.venv/bin` on `PATH`, which the
+SYCL builder needs for `ninja`.
+
+The check above detects the damage. The repair is an install and therefore the owner's:
+report the check's output and stop. What the owner reinstalls into `.venv`, in this order:
+`torch==<ver>+xpu`; then upstream `triton` removed (it owns the shared `triton/_C/`); then
+`triton-xpu==<ver>` — both wheels from `https://download.pytorch.org/whl/xpu`. Re-run the
+check afterwards.
 
 ## Step 3: oneAPI DPC++ (the SYCL compiler)
 
@@ -78,11 +86,24 @@ flashinfer-bench providers list
 | `xe-fuse` | GEMM epilogue fusion on CUTLASS-SYCL (not stable, per IntelLabs) | **checkout** | [IntelLabs/Xe-Fuse](https://github.com/IntelLabs/Xe-Fuse) |
 | `sycl-tla` | CUTLASS with SYCL bindings; required by Xe-Fuse | **checkout** | [intel/sycl-tla](https://github.com/intel/sycl-tla) |
 
+`providers install` is an install, so it is the owner's action. It runs `python -m pip`
+in the active interpreter and nothing else by default. On an interpreter without `pip` —
+both venvs here — it does not run: it prints `Declined to install <package> into <venv>
+…` naming the package, the venv and interpreter, the reason (a uv resolve can replace the
+XPU torch with a CUDA build), the manual recipe, and the opt-in, then exits 1. There is no
+automatic fallback to uv; `--installer uv` (or `FIB_PROVIDER_INSTALLER=uv`) is the only
+route to it, and that is the command `CLAUDE.md`, "Python Environments" forbids an agent to
+run. So preview, and hand the command to the owner naming the venv it targets:
+
 ```bash
-flashinfer-bench providers install vllm-xpu
-flashinfer-bench providers install sgl-kernel-xpu --target bmg   # or --device xpu:0
-flashinfer-bench providers install <name> --dry-run              # print the command only
+source .venv/bin/activate
+flashinfer-bench providers install vllm-xpu --dry-run                       # pip command, or the refusal
+flashinfer-bench providers install vllm-xpu --installer uv --dry-run        # the uv command; printed, not run
+flashinfer-bench providers install sgl-kernel-xpu --target bmg --dry-run    # or --device xpu:0
 ```
+
+Without `--dry-run`, `--installer uv` runs uv. Never pass it yourself; it exists so the
+owner can make that choice explicitly.
 
 `install` handles the `wheel` and `source` kinds only. The checkout providers are used from
 a source tree:
@@ -198,6 +219,7 @@ python scripts/calibrate_part.py     # per-part constants the deploy gates read
 | `SyclBuilder.is_available()` False | `source setvars.sh` or set `FIB_SYCL_COMPILER` |
 | `cannot find -ldnnl` | `export FIB_ONEDNN_DIR=/opt/intel/oneapi/dnnl/latest` |
 | `pip show` says a package is missing but it imports | Trust the import; use `providers list` |
+| `torch.__version__` lacks `+xpu`, or `intel` missing from `triton.backends.backends` | The venv was re-synced; the owner reinstalls (the Step 2 check names the wheels); stop until it passes |
 | `sgl-kernel-xpu` build aborts | Reduce build parallelism, add swap, or build elsewhere |
 | `sgl-kernel-xpu` refuses to build | Part is not `bmg`/`cri`; use `vllm-xpu` and `--in-tree` baselines |
 | Provider imports but a kernel call fails | `providers verify`; treat as not installed |

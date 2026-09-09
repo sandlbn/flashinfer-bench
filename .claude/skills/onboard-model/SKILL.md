@@ -92,7 +92,7 @@ gh pr create --repo sgl-project/sglang \
   --body-file .claude/skills/onboard-model/sglang-integration-pr.md
 ```
 
-Do **not** idle until it merges: `pip install -e tmp/sglang/python` on the PR branch (the repo root has no `pyproject.toml`; the package lives under `python/`) and collect
+Do **not** idle until it merges: with the dev venv active, `python -m pip install -e tmp/sglang/python` on the PR branch (an install — owner approval first; the repo root has no `pyproject.toml`; the package lives under `python/`) and collect
 workloads locally now. Only the dataset PR waits on the merge.
 
 Set `phase3_status=done` when the workload JSONL is non-empty and the baseline eval is all

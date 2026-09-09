@@ -360,35 +360,102 @@ def _resolve_sycl_target(device: Optional[str]) -> str:
     return caps.sycl_target
 
 
-def _pip_install(args: List[str]) -> List[str]:
-    """An install command that works in this interpreter's environment.
+INSTALLER_ENV_VAR = "FIB_PROVIDER_INSTALLER"
+"""Environment variable naming the installer to use when no ``installer`` is passed."""
 
-    A uv-managed virtualenv has no ``pip`` module at all -- ``python -m pip`` there fails
-    with "No module named pip" -- so uv is preferred when present and told explicitly which
-    interpreter to install into, rather than letting it guess from the working directory.
+INSTALLERS: Tuple[str, ...] = ("pip", "uv")
+"""The installers this module knows how to spell a command for."""
+
+
+def _has_pip() -> bool:
+    """Whether ``python -m pip`` exists in this interpreter."""
+    return importlib.util.find_spec("pip") is not None
+
+
+def _choose_installer(installer: Optional[str]) -> str:
+    """Which installer the caller asked for: the argument, else the environment, else pip.
+
+    There is deliberately no "auto". Falling back from the installer an environment was
+    built with to a different one is the hazard this module used to have: on a box whose
+    torch is an Intel XPU wheel, ``uv pip install`` resolves the provider's dependencies
+    against PyPI and can replace that torch with the default CUDA build. Nothing about that
+    is visible at the time, and undoing it is a long manual reinstall. So uv is only used
+    when named -- by ``installer`` or by ``FIB_PROVIDER_INSTALLER`` -- and never by default.
     """
-    if importlib.util.find_spec("pip") is not None:
-        return [sys.executable, "-m", "pip", "install", *args]
-    uv = shutil.which("uv")
-    if uv is not None:
-        return [uv, "pip", "install", "--python", sys.executable, *args]
-    raise ProviderError(
-        f"Neither pip nor uv is available to install into {sys.executable}. Install pip "
-        f"into this environment, or put uv on PATH."
+    choice = installer or os.environ.get(INSTALLER_ENV_VAR) or "pip"
+    if choice not in INSTALLERS:
+        raise ProviderError(
+            f"Unknown installer '{choice}'. Known: {', '.join(INSTALLERS)}. "
+            f"(Given by --installer or {INSTALLER_ENV_VAR}.)"
+        )
+    return choice
+
+
+def _declined_message(packages: List[str]) -> str:
+    """What a caller is told when the default installer is not there.
+
+    A refusal is only useful if it says exactly what to run instead: the packages, the
+    environment they belong in (a box can hold several venvs and they are not
+    interchangeable), why this command did not do it, and how to opt in if that is the
+    intended decision.
+    """
+    pkgs = " ".join(packages)
+    return (
+        f"Declined to install {pkgs} into {sys.prefix} (interpreter {sys.executable}): "
+        f"that environment has no `pip` module, and this command does not substitute "
+        f"another installer on its own. `uv pip install` would resolve dependencies against "
+        f"PyPI and can replace a torch built for Intel XPU with the default CUDA build; "
+        f"recovering from that is a manual reinstall. To install it yourself, activate "
+        f"{sys.prefix} and run an installer of your choosing for: {pkgs} (with pip that is "
+        f"`python -m ensurepip` once, then `python -m pip install --no-deps {pkgs}`). To let "
+        f"this command use uv for that environment anyway, pass --installer uv (or set "
+        f"{INSTALLER_ENV_VAR}=uv); preview the command first with --installer uv --dry-run."
     )
 
 
+def _pip_install(args: List[str], installer: Optional[str] = None) -> List[str]:
+    """The install command for ``args`` using the installer the caller chose.
+
+    ``pip`` (the default) is ``python -m pip install`` in this interpreter and nothing else:
+    when the interpreter has no pip module the result is a ``ProviderError`` telling the
+    caller what to run, not a different package manager. ``uv`` is used only when named,
+    and is told explicitly which interpreter to install into rather than left to infer it
+    from the working directory.
+    """
+    packages = [a for a in args if not a.startswith("-")]
+    choice = _choose_installer(installer)
+    if choice == "pip":
+        if not _has_pip():
+            raise ProviderError(_declined_message(packages))
+        return [sys.executable, "-m", "pip", "install", *args]
+    uv = shutil.which("uv")
+    if uv is None:
+        raise ProviderError(
+            f"--installer uv was requested but no `uv` executable is on PATH, so "
+            f"{' '.join(packages)} was not installed into {sys.prefix}. Put uv on PATH, or "
+            f"install the package into that environment yourself."
+        )
+    return [uv, "pip", "install", "--python", sys.executable, *args]
+
+
 def install_command(
-    spec: ProviderSpec, target: Optional[str] = None, device: Optional[str] = None
+    spec: ProviderSpec,
+    target: Optional[str] = None,
+    device: Optional[str] = None,
+    installer: Optional[str] = None,
 ) -> List[str]:
-    """The command that acquires ``spec``, or a ``ProviderError`` explaining why not."""
+    """The command that acquires ``spec``, or a ``ProviderError`` explaining why not.
+
+    ``installer`` is ``"pip"`` or ``"uv"``; ``None`` reads ``FIB_PROVIDER_INSTALLER`` and
+    otherwise means pip. See :func:`_choose_installer` for why there is no automatic choice.
+    """
     if spec.kind == "system":
         raise ProviderError(
             f"'{spec.name}' is a system library and is not installed by this command. It "
             f"ships with oneAPI; set {spec.env_var} if it lives somewhere non-standard."
         )
     if spec.kind == "wheel":
-        return _pip_install([spec.distribution or spec.name])
+        return _pip_install([spec.distribution or spec.name], installer)
     if spec.kind == "checkout":
         raise ProviderError(
             f"'{spec.name}' is used from a source checkout, not installed. Clone "
@@ -404,7 +471,8 @@ def install_command(
                 "--no-build-isolation",
                 f"--config-settings=cmake.define.DPCPP_SYCL_TARGET={arch}",
                 f"git+{spec.repo}",
-            ]
+            ],
+            installer,
         )
     raise ProviderError(f"Unknown acquisition kind '{spec.kind}' for '{spec.name}'.")
 
@@ -415,15 +483,21 @@ def install(
     device: Optional[str] = None,
     dry_run: bool = False,
     env: Optional[Dict[str, str]] = None,
+    installer: Optional[str] = None,
 ) -> Tuple[List[str], int]:
     """Acquire one provider. Returns the command run and its exit status.
 
     ``dry_run`` reports the command without running it, which matters here because one of
-    these builds costs tens of minutes and several GiB.
+    these builds costs tens of minutes and several GiB. ``installer`` selects the package
+    manager (``"pip"`` or ``"uv"``); left unset it is ``FIB_PROVIDER_INSTALLER`` or pip, and
+    an environment with no pip gets a refusal saying what to run rather than a substitute.
     """
     spec = get_spec(name)
-    command = install_command(spec, target=target, device=device)
+    command = install_command(spec, target=target, device=device, installer=installer)
+    prereq = _pip_install(list(spec.build_requires), installer) if spec.build_requires else None
     if dry_run:
+        if prereq is not None:
+            logger.info("Would first install build requirements: %s", " ".join(prereq))
         return command, 0
 
     run_env = dict(os.environ)
@@ -435,8 +509,7 @@ def install(
         # uncapped parallel build is the usual way to trip it.
         run_env.setdefault("MAX_JOBS", "2")
 
-    if spec.build_requires:
-        prereq = _pip_install(list(spec.build_requires))
+    if prereq is not None:
         logger.info("Installing build requirements: %s", ", ".join(spec.build_requires))
         completed = subprocess.run(prereq, env=run_env)
         if completed.returncode != 0:

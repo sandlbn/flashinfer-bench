@@ -406,7 +406,11 @@ def providers_cmd(args: argparse.Namespace) -> None:
     if args.provider_action == "install":
         try:
             command, code = prov.install(
-                args.name, target=args.target, device=args.device, dry_run=args.dry_run
+                args.name,
+                target=args.target,
+                device=args.device,
+                dry_run=args.dry_run,
+                installer=args.installer,
             )
         except prov.ProviderError as e:
             # A refusal here is the useful outcome: it explains why before a multi-GiB
@@ -1009,6 +1013,18 @@ def cli():
     )
     install_parser.add_argument(
         "--dry-run", action="store_true", help="Print the command without running it."
+    )
+    install_parser.add_argument(
+        "--installer",
+        choices=["pip", "uv"],
+        default=None,
+        help=(
+            "Package manager to run. Default: pip (python -m pip in this interpreter), or "
+            "FIB_PROVIDER_INSTALLER if set. An environment with no pip is refused with "
+            "instructions, never silently switched to uv: `uv pip install` resolves against "
+            "PyPI and can replace an Intel XPU torch with a CUDA build. Pass 'uv' only when "
+            "that is your decision; preview with --installer uv --dry-run."
+        ),
     )
     providers_parser.add_argument(
         "--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"]

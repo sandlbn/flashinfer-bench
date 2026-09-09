@@ -1361,9 +1361,19 @@ def main():
         ),
     )
     sglang_p.add_argument(
+        "--install-latest",
+        action="store_true",
+        help=(
+            "Phase 0: pip install the latest SGLang and FlashInfer into this interpreter "
+            "(editable from tmp/, else -U from PyPI) before collecting. Off by default: "
+            "installing is the environment owner's decision, and a dependency resolve can "
+            "replace the installed torch. Only pass this when that is what you want."
+        ),
+    )
+    sglang_p.add_argument(
         "--skip-install",
         action="store_true",
-        help="Skip Phase 0 package install (use when env already has correct versions)",
+        help="Deprecated no-op: Phase 0 install is already skipped unless --install-latest.",
     )
     sglang_p.add_argument(
         "--eval-baseline",
@@ -1392,10 +1402,10 @@ def main():
 
     args = parser.parse_args()
 
-    if not getattr(args, "skip_install", False):
+    if getattr(args, "install_latest", False):
         _install_latest_packages()
     else:
-        print("Phase 0: Skipping package install (--skip-install)")
+        print("Phase 0: Skipping package install (pass --install-latest to enable)")
         subprocess.run(
             [
                 sys.executable,
