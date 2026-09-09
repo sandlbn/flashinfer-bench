@@ -50,16 +50,11 @@ no template for gemm_swiglu_merged_k1024_d3072 (op_type=gemm, inputs=('x','w_gat
 outputs=('up','out')) -- add one rather than hand-writing
 ```
 
-Two things that keying on `op_type` alone got wrong, and which the signature fixes: a
-three-input `fused_add_rmsnorm` was handed the two-input RMSNorm template and failed with
-`run() missing 1 required positional argument`, and a definition with two outputs could not
-be compared at all. A generator that emits a wrong test is worse than one that refuses.
-
 Adding a template is a `build()` branch in that script keyed on the signature. Prefer that to
 hand-writing, so the next definition of the same shape is free.
 
 **Hand-writing, when no template fits:** copy the nearest const-axis match rather than
-starting blank — the reference tests (count with `ls tests/references/ | wc -l`) exist and are near-identical by op_type.
+starting blank — the existing reference tests are near-identical by op_type.
 
 ```bash
 ls tmp/flashinfer-trace/tests/references/test_{op_type}_*.py
@@ -69,9 +64,8 @@ Then update the module constants, the definition name, the shapes, and the toler
 
 ## Step 3: Test the definition's own reference, not a retyped copy
 
-This is the failure the test exists to prevent: a test that validates a function which
-happens to be correct while the definition ships a different one. Load the reference from
-the JSON, which is what most of the existing files do:
+Load the reference from the JSON rather than retyping it, so the test cannot validate a
+function the definition does not ship:
 
 ```python
 import math
@@ -194,7 +188,6 @@ That belongs to `onboard-model-intel` Phase 3.
 
 ## Sources
 
-- `tmp/flashinfer-trace/tests/references/` — the worked examples (`ls ... | wc -l` for
-  the current count); copy the nearest
+- `tmp/flashinfer-trace/tests/references/` — the worked examples; copy the nearest
 - `tmp/flashinfer/tests/` — how each FlashInfer wrapper is really called
 - `docs/flashinfer-trace/definition.mdx` — the definition schema

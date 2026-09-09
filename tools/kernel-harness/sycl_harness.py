@@ -30,6 +30,7 @@ takes as an argument.
 from __future__ import annotations
 
 import pathlib
+import re
 from typing import Any, Callable, List
 
 DATASET = pathlib.Path("tmp/flashinfer-trace")
@@ -44,12 +45,33 @@ def _definition(name: str):
     return trace_set.definitions[name]
 
 
+_EXPORT = re.compile(r"TVM_FFI_DLL_EXPORT_TYPED_FUNC\s*\(\s*([A-Za-z_]\w*)")
+
+
+def _entry_point_of(source: str, path: str) -> str:
+    """Read the exported symbol out of the source rather than being told it.
+
+    The name is already stated once, in the export macro. Taking it as an argument makes it
+    a second place to be wrong, and being wrong there fails at build time with a message
+    about a missing symbol rather than about the mismatch.
+    """
+    names = _EXPORT.findall(source)
+    if not names:
+        raise SystemExit(
+            "No TVM_FFI_DLL_EXPORT_TYPED_FUNC(...) found; the kernel exports no entry point."
+        )
+    if len(names) > 1:
+        raise SystemExit(f"Source exports {names}; keep one entry point per trial.")
+    return f"{path}::{names[0]}"
+
+
 def build(
     definition_name: str,
     source: str,
-    entry_point: str = "kernel.cpp::run",
+    entry_point: str | None = None,
     dependencies: List[str] | None = None,
     language: str = "sycl",
+    source_path: str = "kernel.cpp",
 ) -> Callable[..., Any]:
     """Compile `source` against a dataset definition and return the callable.
 
@@ -61,6 +83,7 @@ def build(
     from flashinfer_bench.data import Solution
 
     definition = _definition(definition_name)
+    entry_point = entry_point or _entry_point_of(source, source_path)
     path = entry_point.split("::")[0]
     solution = Solution.model_validate(
         {

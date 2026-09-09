@@ -61,3 +61,6 @@ sglang_*.jsonl
 .agent-prompt.md
 .claude/agents.json
 .claude/architect-loop.local.md
+
+# unitrace chrome-trace dumps, written into CWD by --chrome-kernel-logging
+python.*.json

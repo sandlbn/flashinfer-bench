@@ -72,7 +72,7 @@ export FIB_SYCL_TLA_DIR=$PWD/tmp/sycl-tla
 
 | Repo | Read it for | Skill |
 | --- | --- | --- |
-| `sgl-kernel-xpu` | the ~100 registered ops and their C++ signatures | `onboard-model-intel/providers.md` |
+| `sgl-kernel-xpu` | registered ops and their C++ signatures | `onboard-model-intel/providers.md` |
 | `vllm-xpu-kernels` | torch custom-op schemas | `onboard-model-intel/providers.md` |
 | `Xe-Fuse` | `autotune/generate_kernel.py`, presets, EVT vocabulary | `optimize-intel-kernels/xe-fuse.md` |
 | `sycl-tla` | CUTLASS-SYCL headers Xe-Fuse compiles against | `optimize-intel-kernels/xe-fuse.md` |
@@ -93,10 +93,8 @@ torch.matmul(a, a.T[:64]); torch.xpu.synchronize()" 2>&1 |
 git clone --depth 1 --branch "v$V" https://github.com/uxlfoundation/oneDNN.git tmp/oneDNN
 ```
 
-~99 MB. This is for reading, never for building — the runtime comes from oneAPI. Optimizing
-oneDNN's GEMM itself is not worth it: measured on Arc B580 it reaches ~100 TFLOP/s bf16,
-about 90% of the part's XMX peak. The wins are in how it is *called*
-(`/optimize-onednn`), not in its kernels.
+For reading, never for building — the runtime comes from oneAPI. Tuning oneDNN's own GEMM
+is not the goal; the wins are in how it is called (`/optimize-onednn`).
 
 ## Install from source — only on CUDA
 

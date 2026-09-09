@@ -1,15 +1,12 @@
 # Intel kernel providers: inventories and signatures
 
 What each provider contains, how to read a kernel's real signature, and how to prove it is
-actually built. **Installation, costs and GitHub locations are in `/setup-intel-env`** — do
-not duplicate them here.
-
-Wiring a provider kernel in as a baseline is `SKILL.md` Phase 5. This file is the reference
-you consult while doing it.
+built. Installation is `/setup-intel-env`. Wiring a provider kernel in as a baseline is
+`references/wiring-baselines.md`.
 
 ## What is wired up right now
 
-Never trust a hand-written list of registered baselines — it rots. Ask the registry:
+Ask the registry; never trust a written list:
 
 ```bash
 python -c "
@@ -19,8 +16,7 @@ for k in sorted(REGISTRY, key=lambda k: (k.provider, k.op_type, k.name)):
 "
 ```
 
-Everything in the inventories below that the registry does not list is unwired — and the
-unwired part is most of the value: attention, MLA, GEMM, quantization and KV-cache ops.
+Everything in the inventories below that the registry does not list is unwired.
 
 ## vllm-xpu-kernels
 
@@ -35,16 +31,14 @@ Registered as torch custom ops under `torch.ops._C`.
 | KV cache | `reshape_and_cache`, `concat_and_cache_mla`, `gather_cache` | `gqa_paged`, `mla_paged` |
 | Attention glue | `merge_attn_states`, `topk_per_row` | `gqa_paged`, `sampling` |
 
-### Inventory and signatures
-
-**49 ops** are registered. Enumerate them from source:
+Enumerate the registered ops from source:
 
 ```bash
 grep -ohE '"[a-z_0-9]+\(' tmp/vllm-xpu-kernels/csrc/torch_bindings.cpp \
   | sed 's/"//;s/(//' | sort -u
 ```
 
-The schema is also introspectable at runtime — prefer it, and never infer from a header:
+Read the schema at runtime rather than inferring it from a header:
 
 ```python
 import torch, vllm_xpu_kernels._C  # noqa: F401  -- registers torch.ops._C
@@ -57,19 +51,14 @@ wrapper, and clone any input the op mutates so repeated benchmark trials see ide
 
 ### `gemma_rms_norm` is deliberately not registered
 
-It takes byte-identical arguments to `rms_norm` and scales by `(1 + weight)`. Registered
-against a plain RMSNorm definition it produced a baseline that ran cleanly and computed the
-wrong thing. **Matching arity is not matching semantics.** Gemma's variant needs its own
-definition first. The module docstring of `flashinfer_bench/integration/xpu_kernels.py`
-carries the full rule.
+It takes byte-identical arguments to `rms_norm` and scales by `(1 + weight)`. Matching
+arity is not matching semantics; Gemma's variant needs its own definition first.
 
-### Failure modes
-
-| Symptom | Cause | Fix |
-|---|---|---|
-| `torch.ops._C` has no such op | `_C` extension never imported | `import vllm_xpu_kernels._C` first; every registry wrapper does |
-| Baseline runs but fails correctness | Semantics differ from the definition | The registry entry is wrong, not the kernel — give the variant its own definition |
-| Baseline never appears | Signature mismatch | Silence is the expected symptom; `SKILL.md` Phase 5 |
+| Symptom | Fix |
+|---|---|
+| `torch.ops._C` has no such op | `import vllm_xpu_kernels._C` first |
+| Baseline runs but fails correctness | The registry entry is wrong, not the kernel — give the variant its own definition |
+| Baseline never appears | Signature mismatch — `references/wiring-baselines.md` |
 
 ## sgl-kernel-xpu
 
@@ -84,17 +73,14 @@ An ordinary Python package (`sgl_kernel`). Builds per architecture: `bmg` and `c
 | Linear attention | `GdnAttn` | `gdn` |
 | Elementwise | rope, norms, activations | `rmsnorm`, `rope` |
 
-The table understates it — **108 ops** are registered. Enumerate them from the one file
-that registers them (note `.cc`, not `.cpp` — a `--include=*.cpp` filter finds almost
-nothing):
+Enumerate the registered ops from the one file that registers them (`.cc`, not `.cpp`):
 
 ```bash
 grep -ohE '"[a-z_0-9]+\(' tmp/sgl-kernel-xpu/src/torch_extension_sycl.cc \
   | sed 's/"//;s/(//' | sort -u
 ```
 
-To see which of those already have a registry entry — and therefore which are still worth
-wiring — ask the registry rather than reading a list that ages:
+Registry coverage by op_type, to see what is still unwired:
 
 ```bash
 python -c "
@@ -105,13 +91,12 @@ for op, n in sorted(collections.Counter(k.op_type for k in REGISTRY).items()):
 "
 ```
 
-Families with no entry at that moment are the backlog. KV-cache movement
-(`store_cache`, `transfer_kv_per_layer`, `transfer_kv_all_layer`) has no dataset op_type at
-all, so it needs a definition before a kernel can bind to anything.
+KV-cache movement (`store_cache`, `transfer_kv_per_layer`, `transfer_kv_all_layer`) has no
+dataset op_type, so it needs a definition before a kernel can bind.
 
 ### `mha_fwd` covers the paged KV cache
 
-It is a unified attention kernel that reads the cache directly:
+It reads the cache directly:
 
 ```cpp
 const at::Tensor& k,                            // (num_pages, page_size, h_k, d) when paged
@@ -120,119 +105,82 @@ at::Tensor& out, std::optional<at::Tensor>& softmax_lse
 ```
 
 which is the `gqa_paged` signature the dataset models as
-`(q, k_cache, v_cache, kv_indptr, kv_indices, sm_scale) -> (output, lse)`.
+`(q, k_cache, v_cache, kv_indptr, kv_indices, sm_scale) -> (output, lse)`. The standalone
+cache *write* (`reshape_and_cache`) is a different op with no definition.
 
-Do not conflate this with the standalone cache *write* (`reshape_and_cache`), which has no
-definition — conflating them makes the paged path look unreachable when it is not.
+The wrapper's work is translating paging representations: FlashInfer-style
+`kv_indptr`/`kv_indices` into `mha_fwd`'s `page_table` matrix plus `cu_seqlens_k`. Verify
+numerically against the definition's reference before registering it.
 
-The wrapper's real work is translating paging representations: FlashInfer-style
-`kv_indptr`/`kv_indices` against `mha_fwd`'s `page_table` matrix plus `cu_seqlens_k`. That is
-exactly the kind of impedance mismatch that runs cleanly and computes the wrong thing —
-verify numerically against the definition's reference before registering it.
+### What is built on XPU
 
-### What is actually built, measured on Arc B580
-
-Probed by calling each with valid inputs on `sgl-kernel-xpu` 0.11.0. The Python surface is
-shared with the CUDA build, so this is the only way to know.
+The Python surface is shared with the CUDA build, so the only proof is a call:
+`flashinfer-bench providers verify --local tmp/flashinfer-trace --device xpu:0`. Known
+constraints of the XPU build:
 
 | Op | On XPU |
 | --- | --- |
-| `flash_attn_varlen_func` (FMHA prefill) | **works** |
-| `flash_attn_with_kvcache` (paged decode) | **works, page_size 64 or 128 only** |
-| `silu_and_mul` | works |
-| `topk_softmax` | works |
-| `awq_dequantize` (INT4 weight dequant) | works |
-| `causal_conv1d_fn_xpu` | works |
-| `fp8_blockwise_scaled_mm` | **not built** -- no op registered |
-| `top_k_top_p_sampling_from_probs` | **not built** (`top_p_sampling_from_probs` missing) |
+| `flash_attn_varlen_func` (FMHA prefill) | works |
+| `flash_attn_with_kvcache` (paged decode) | works, **page_size 64 or 128 only** — `ps1` definitions cannot bind |
+| `silu_and_mul`, `topk_softmax`, `awq_dequantize`, `causal_conv1d_fn_xpu` | work |
+| `fp8_blockwise_scaled_mm` | not built |
+| `top_k_top_p_sampling_from_probs` | not built (`top_p_sampling_from_probs` missing) |
 
-The page-size constraint matters for wiring `gqa_paged`: 16, 32 and 256 are all rejected
-with `Unsupported page size for decode attention`, and the dataset carries `ps1` and `ps64`
-definitions -- only the `ps64` ones can bind.
+### Paged GQA decode wrapper contract
 
-### Paged GQA decode is wired, and it is worth a lot
+`flash_attn_with_kvcache` is registered against the `gqa_paged_decode_*_ps64` definitions.
+Three things the wrapper must get right, none of which fail loudly:
 
-`flash_attn_with_kvcache` is registered against the nine `gqa_paged_decode_*_ps64`
-definitions. Measured against the definitions' own reference on real dataset workloads:
-**8.6x to 45.6x**.
+- **Paging representation.** The definition carries FlashInfer's ragged form (`kv_indices`
+  with `kv_indptr` row offsets); the kernel wants a dense `[batch, max_pages]` page table
+  plus a token count per sequence. The count is `(pages - 1) * page_size + kv_last_page_len`;
+  `pages * page_size` attends to uninitialised tail entries.
+- **`lse` is natural log; the definitions are log2.** Divide by `ln(2)`.
+- **`lse` comes back transposed**, `[heads, tokens]` against the declared `[tokens, heads]`.
 
-Three things the wrapper has to get right, none of which fail loudly:
+The kernel's `causal=True` is bottom-right aligned, which matches the reference's
+`delta = kv_len - q_len`; no adjustment needed.
 
-- **Paging representation.** The definition carries FlashInfer's ragged form -- `kv_indices`
-  with `kv_indptr` row offsets -- and the kernel wants a dense `[batch, max_pages]` page
-  table plus a token count per sequence. The count is
-  `(pages - 1) * page_size + kv_last_page_len`; using `pages * page_size` attends to
-  uninitialised tail entries.
-- **`lse` is natural log, the definitions are log2.** Passing it through unconverted is a
-  silent 1.44x error on an output nothing else checks. Dividing by `ln(2)` matches the
-  reference to 9.5e-07.
-- **`lse` comes back transposed**, `[heads, tokens]` against the declared
-  `[tokens, heads]`.
+### The causal × lse limitation
 
-Causal alignment needs no adjustment: the kernel's `causal=True` is bottom-right aligned,
-which is what the reference's `delta = kv_len - q_len` computes. Verified to 3.3e-03.
+The XPU build refuses `return_softmax_lse` together with causal masking. The attention
+output is correct; only `lse` is unavailable. Definitions that are causal *and* declare
+`lse` therefore cannot bind under strict signature matching.
 
-### The causal x lse limitation, and how it was worked around
-
-The XPU build refuses `return_softmax_lse` together with causal masking
-(`return_softmax_lse is only supported without causal/local masking`). The attention output
-alone is correct; only `lse` is unavailable. Since most ragged/prefill definitions are causal
-*and* declare `lse` as an output, strict signature matching left them unbindable.
-
-The resolution is a `_no_lse` definition variant: the same operation declaring only
-`output`. Those bind, and the registry now covers `gqa_ragged`, `gqa_paged`, `mla_ragged`,
-`mla_paged`, `dsa_paged` and `gdn`. Definitions that still declare `lse` remain unbound by
-design -- recomputing it in the wrapper means materialising the attention matrix, which
-costs more than the kernel saves.
-
-Check the current split rather than trusting a count here:
+Convention: a `_no_lse` definition variant — the same operation declaring only `output`.
+Those bind, across `gqa_ragged`, `gqa_paged`, `mla_ragged`, `mla_paged`, `dsa_paged` and
+`gdn`. Definitions that still declare `lse` stay unbound by design; recomputing `lse` in the
+wrapper means materialising the attention matrix. Check the current split:
 
 ```bash
-ls tmp/flashinfer-trace/definitions/<op_type>/ | wc -l          # total
-ls tmp/flashinfer-trace/definitions/<op_type>/*_no_lse*.json | wc -l   # output-only
+ls tmp/flashinfer-trace/definitions/<op_type>/ | wc -l                    # total
+ls tmp/flashinfer-trace/definitions/<op_type>/*_no_lse*.json | wc -l      # output-only
 ```
 
-Still genuinely unavailable:
+The limitation is upstream; it also affects SGLang's own `mha_return_lse` path on Intel.
 
-- **Page size 1** is rejected outright by the paged kernels.
-- **`fp8_blockwise_scaled_mm`** (sgl) is not built on XPU.
+## Which Triton kernels a model actually uses is a measurement, not a list
 
-This limitation is upstream, not ours: it also breaks SGLang's own DeepSeek
-`mha_return_lse` path on Intel.
-
-## Which kernels a model actually uses is a measurement, not a list
-
-vLLM ships hundreds of Triton kernels (447 distinct `@triton.jit` functions across 218
-files). Any one model touches a handful, and on Intel the handful is not the one you would
-guess. Observe it rather than enumerating the library:
+vLLM ships many Triton kernels; a model touches a handful, and on Intel the compute path
+(attention, GEMM, norms, activations) goes through compiled `vllm-xpu-kernels` and oneDNN,
+leaving Triton doing orchestration (`v1.worker.gpu.*`). Observe rather than enumerate, and
+re-run per model:
 
 ```bash
 python scripts/observe_triton_kernels.py --model <repo_id> --in-process --json out.json
 ```
 
 It hooks Triton's JIT launch path, runs a short generation, and reports every kernel that
-fired with its call count and the constexpr values it was specialised on -- which are what a
-tuning round would vary.
-
-Measured on Qwen3-0.6B, Arc B580, 2026-09-08: **20 distinct Triton kernels, 305 launches, and
-every one of them in `v1.worker.gpu.*`** -- scheduling, block tables, input batching,
-sampling. None in attention, GEMM, norms or activations. On Intel those go through compiled
-`vllm-xpu-kernels` and oneDNN via torch, so Triton is left doing orchestration. Of the
-op_types the dataset defines, only `sampling` overlapped what the model launched.
-
-The consequence for effort: mapping vLLM's Triton kernels wholesale maps mostly code that
-never touches the compute path. Let the observation decide which ones get a baseline, and
-re-run it per model -- the answer is a property of the model and the backend selection, not
-of the library.
+fired with its call count and the constexpr values it was specialised on. Let the
+observation decide which ones get a baseline.
 
 ## oneDNN
 
-Ships with oneAPI; discovered via `FIB_ONEDNN_DIR`. Not a baseline *provider* — it is the
-library your own SYCL solutions link against, and the thing `F.linear` already calls on XPU.
+Ships with oneAPI; discovered via `FIB_ONEDNN_DIR`. Not a baseline provider — it is the
+library your own SYCL solutions link against, and what `F.linear` already calls on XPU.
+Diagnosing the call is `/optimize-onednn`.
 
-Diagnosing and fixing the oneDNN GEMM call is `/optimize-onednn`.
-
-For definitions with no upstream baseline, generate one from the in-tree templates instead:
+For definitions with no upstream baseline, generate one from the in-tree templates:
 
 ```bash
 flashinfer-bench add-baselines --local tmp/flashinfer-trace --in-tree --definitions <name>
@@ -242,9 +190,8 @@ Templates live in `flashinfer_bench/integration/intree_kernels.py`, one per lang
 
 ## Xe-Fuse and sycl-tla
 
-GEMM epilogue fusion on CUTLASS-SYCL. See `../optimize-intel-kernels/xe-fuse.md` for when it
-is worth using, the layout traps, and the build flags.
+GEMM epilogue fusion on CUTLASS-SYCL — `../optimize-intel-kernels/xe-fuse.md`.
 
 ## Hand-written SYCL
 
-`../optimize-intel-kernels/SKILL.md` Step 4a owns this. Worked examples in `examples/sycl/`.
+`../optimize-intel-kernels/SKILL.md` Step 4a. Worked examples in `examples/sycl/`.

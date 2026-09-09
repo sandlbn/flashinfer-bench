@@ -5,8 +5,8 @@ PyTorch implementation that exists to decide *correctness*. It is not what a ser
 runs, and it is frequently much worse: a norm reference makes several passes over memory, a
 gated-MLP reference computes two separate projections where the server issues one merged
 GEMM. Ratios taken against it overstate the win by whatever that gap happens to be, and
-kernels recorded at 2-3x have measured at parity or worse against the kernel they would
-actually replace.
+kernels have measured at parity or worse against the kernel they would actually replace
+despite a large ratio against the reference.
 
 The comparison that decides deployment is against the provider baseline (`vllm-xpu`,
 `sgl-kernel-xpu`), which `add-baselines` already writes and the benchmark already times on
@@ -14,8 +14,9 @@ the same workloads. This computes it from traces on disk; it runs no kernels.
 
 Two things the raw ratio does not tell you, and this does:
 
-* **The saving has to clear what a substitution costs.** A 2.6x win on a 4us kernel saves
-  2.5us and costs ~5.9us of dispatch to obtain -- a net loss.
+* **The saving has to clear what a substitution costs.** That cost does not shrink with the
+  kernel, so a large ratio on a small kernel still loses the exchange. The figure is measured
+  on this part by `flashinfer_bench.device.calibration`, not carried here.
 * **The saving is bimodal.** A few microseconds at decode sizes and hundreds at prefill
   sizes, so a single median lands between the clusters and describes neither. Serving spends
   most of its calls at decode, which is why that column decides.
@@ -109,9 +110,9 @@ def main() -> None:
     ap.add_argument(
         "--dispatch-us",
         type=float,
-        default=5.91,
-        help="Cost of one successful apply() substitution, measured on Arc B580. "
-        "Re-measure on your part; 0 ignores it.",
+        default=None,
+        help="Cost of one successful apply() substitution. Measured on this part when "
+        "omitted; 0 ignores it.",
     )
     ap.add_argument(
         "--floor-us",
@@ -147,11 +148,28 @@ def main() -> None:
         timing = accel.make_timer(accel.list_devices()[0]).name
     except Exception:
         pass
+    # Both thresholds are properties of this part, so they are measured rather than
+    # carried as constants -- a constant is wrong on the next chip and stale on this one.
+    calibration = None
+    if args.dispatch_us is None or args.floor_us is None:
+        from flashinfer_bench.device.calibration import get as get_calibration
+
+        calibration = get_calibration()
+    if args.dispatch_us is None:
+        args.dispatch_us = calibration.dispatch_us if calibration else 0.0
+        if calibration is None:
+            print("  note: substitution cost could not be measured here; not gating on it.")
+    if args.floor_us is None and calibration is not None:
+        args.floor_us = calibration.timing_floor_us * 1.5
+
     if args.floor_us is None:
         # The floor exists to hide measurements dominated by timer overhead. Only the old
         # per-call event timer had overhead worth hiding; keeping its floor for a timer that
         # amortizes it would throw away every decode-sized comparison as "unmeasurable".
-        args.floor_us = 60.0 if timing == "event" else 0.0
+        # No constant: the floor is a property of this part and this timer, so it is
+        # measured. Only the superseded per-call methodology had a floor worth hiding, and
+        # even that is measured rather than assumed.
+        args.floor_us = (calibration.timing_floor_us * 1.5) if calibration else 0.0
 
     data = collect(args.dataset, hardware_id, timing)
     dispatch_ms = args.dispatch_us / 1000.0

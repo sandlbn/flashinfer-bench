@@ -23,6 +23,7 @@ import ctypes
 import glob
 import logging
 import os
+import sys
 import shutil
 import threading
 from contextlib import contextmanager
@@ -183,6 +184,23 @@ def _compiler_env(compiler: str) -> Iterator[None]:
                 os.environ.pop("CXX", None)
             else:
                 os.environ["CXX"] = previous
+
+
+def _ensure_build_tools_on_path() -> None:
+    """Put the running interpreter's bin/ on PATH before invoking the compiler driver.
+
+    `ninja` ships as a console script in the environment that installed it, so a process
+    started as `/path/to/venv/bin/python script.py` -- which is how every harness and
+    subprocess here starts one -- has the package importable but the executable off PATH.
+    The build then fails with FileNotFoundError: 'ninja', which reads as a broken solution
+    rather than an invisible toolchain, and each caller that hits it fixes it locally. It
+    has surfaced three separate times in this repo; fixing it where the compiler is invoked
+    means no caller has to know.
+    """
+    bindir = str(Path(sys.executable).parent)
+    parts = os.environ.get("PATH", "").split(os.pathsep)
+    if bindir not in parts:
+        os.environ["PATH"] = os.pathsep.join([bindir, *parts])
 
 
 class SyclBuilder(Builder):
@@ -426,6 +444,7 @@ class SyclBuilder(Builder):
         BuildError
             If no compiler is available, compilation fails, or the entry point is missing.
         """
+        _ensure_build_tools_on_path()
         import tvm_ffi
         import tvm_ffi.cpp
 

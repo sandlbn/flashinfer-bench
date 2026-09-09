@@ -75,8 +75,7 @@ Standard serving configuration: **TP={N}**.
 ```
 
 Do **not** overwrite an existing model section unless refreshing. When refreshing, re-check
-every ✅/❌, then update the coverage line **and** the Summary row together — they disagreeing
-is the most common defect in this file.
+every ✅/❌, then update the coverage line **and** the Summary row together.
 
 ## Format rules
 

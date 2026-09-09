@@ -67,7 +67,7 @@ engine.shutdown()
 PY
 ```
 
-Requirements that are not obvious and each cost a silent empty dump:
+Each of these missing produces an empty dump:
 
 - **Env vars must be set before `import flashinfer` / `import sglang`.** The
   `@flashinfer_api` decorator binds at import.
