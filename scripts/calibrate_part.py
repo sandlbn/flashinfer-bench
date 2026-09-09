@@ -9,6 +9,12 @@ win, without saying anything.
 Run this first on a new part. It prints the values, and the flags that carry them.
 
     python scripts/calibrate_part.py
+    python scripts/calibrate_part.py --pattern 256:4096     # bandwidth of a strided read
+
+Every device-side number here is taken through ``flashinfer_bench.device.calibration`` so
+this script and the gates that consume the record cannot disagree, and each is accepted
+only once its rounds settle; a number that never settles prints as ``unavailable`` rather
+than as whatever the clock ramp produced.
 """
 
 from __future__ import annotations
@@ -16,7 +22,7 @@ from __future__ import annotations
 import argparse
 import statistics
 import time
-from typing import Callable, List
+from typing import Callable, List, Tuple
 
 import torch
 
@@ -74,48 +80,31 @@ def timing_floor(device: str, rounds: int) -> float:
     return max(0.0, statistics.median(singles) - batched)
 
 
-def dispatch_cost(device: str, dataset: str, rounds: int) -> float | None:
-    """What one successful apply() substitution costs on top of the kernel.
+def dispatch_cost(device: str, dataset: str) -> float | None:
+    """What one apply() call costs on top of the kernel it dispatches to, in microseconds.
 
-    Returns None when no definition on this dataset both matches this part and has a
-    solution -- the number cannot be invented, and a gate set from a guess is worse than a
-    gate left off.
+    Delegates to ``flashinfer_bench.device.calibration`` so that this script and the deploy
+    gate cannot disagree about the number. The measurement is host-side -- the kernel is
+    stubbed out for its duration -- so it does not depend on the GPU's clock state, which
+    is what made an earlier version of it here read anywhere from zero to its true value.
+
+    Returns None when it could not be measured: no definition on this dataset that apply()
+    can dispatch here, or rounds that did not agree (another process on the box). The
+    number is not invented in either case -- the deploy gate is built on it.
     """
-    from flashinfer_bench.apply import ApplyConfig, apply, enable_apply
-    from flashinfer_bench.apply.runtime import ApplyRuntime
+    from flashinfer_bench.device import calibration
 
-    hidden = 1024
-    x = torch.randn(64, hidden, dtype=torch.bfloat16, device=device)
-    w = torch.randn(hidden, dtype=torch.bfloat16, device=device)
+    return calibration.measure_dispatch_us(device, dataset)
 
-    ApplyRuntime._stack.clear()
-    runtime = enable_apply(
-        dataset, ApplyConfig(max_atol=0.02, max_rtol=0.02, on_miss_policy="use_def_best")
-    )
+
+def _parse_pattern(text: str) -> Tuple[int, int]:
     try:
-        name = f"rmsnorm_h{hidden}"
-        hit = apply(name, kwargs={"hidden_states": x, "weight": w}, fallback=lambda **k: None)
-        if hit is None:
-            return None
-        direct = None
-        try:
-            import vllm_xpu_kernels._C  # noqa: F401
-
-            out = torch.empty_like(x)
-            direct = _median_of(lambda: torch.ops._C.rms_norm(out, x, w, 1e-6), device, 300, rounds)
-        except Exception:
-            return None
-        through = _median_of(
-            lambda: apply(
-                name, kwargs={"hidden_states": x, "weight": w}, fallback=lambda **k: None
-            ),
-            device,
-            300,
-            rounds,
-        )
-        return max(0.0, through - direct)
-    finally:
-        runtime.stop()
+        run, stride = (int(x) for x in text.split(":"))
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"pattern must be RUN_BYTES:STRIDE_BYTES, got {text!r}"
+        ) from exc
+    return run, stride
 
 
 def main() -> None:
@@ -124,7 +113,18 @@ def main() -> None:
     ap.add_argument("--dataset", default="tmp/flashinfer-trace")
     ap.add_argument("--rounds", type=int, default=5)
     ap.add_argument("--buffer-mib", type=int, default=512)
+    ap.add_argument(
+        "--pattern",
+        action="append",
+        default=[],
+        type=_parse_pattern,
+        metavar="RUN_BYTES:STRIDE_BYTES",
+        help="also measure the bandwidth of reading RUN contiguous bytes out of every STRIDE "
+        "(a kernel's access pattern); repeatable",
+    )
     args = ap.parse_args()
+
+    from flashinfer_bench.device import calibration
 
     from flashinfer_bench.device import default_device_type, get_accelerator
 
@@ -147,12 +147,41 @@ def main() -> None:
     print(f"\n  per-call timing overhead    {floor:8.2f} us")
     print(f"     -> rank_vs_provider.py --floor-us {max(1, round(floor * 1.5))}")
 
-    cost = dispatch_cost(device, args.dataset, args.rounds)
+    launch = calibration.measure_launch_floor_us(device)
+    if launch is None:
+        print("\n  launch floor                unavailable (rounds did not settle)")
+    else:
+        print(f"\n  launch floor                {launch:8.2f} us per launch")
+    print("     what the smallest kernel costs inside a batch of launches. A kernel whose")
+    print("     device time sits here is launch-bound: only removing the launch can win.")
+
+    peak = calibration.measure_matmul_peak_tflops(device)
+    print(f"\n  matrix throughput (square matmul, side {calibration.MATMUL_PROBE_SIDE})")
+    for name in calibration.MATMUL_DTYPES:
+        if name not in peak:
+            print(f"     {name:10} not native on this part; not probed")
+        elif peak[name] is None:
+            print(f"     {name:10} unavailable (rounds did not settle)")
+        else:
+            print(f"     {name:10} {peak[name]:8.1f} TFLOP/s")
+    print("     the denominator of t_cmp = flops / peak; what torch.matmul reaches here.")
+
+    for run, stride in args.pattern:
+        bw_pattern = calibration.strided_read_bandwidth_gbs(device, run, stride)
+        if bw_pattern is None:
+            print(f"\n  strided read {run}:{stride:<12} unavailable (rounds did not settle)")
+        else:
+            print(f"\n  strided read {run}:{stride:<12} {bw_pattern:8.1f} GB/s of useful bytes")
+            print(f"     against {gb:.1f} GB/s contiguous: t_mem_pattern for a kernel obliged to")
+            print("     read in runs of this length.")
+
+    cost = dispatch_cost(device, args.dataset)
     if cost is None:
         print("\n  substitution cost           unavailable")
-        print("     No definition here both matches this part and has a benchmarked solution.")
-        print("     Benchmark one, then re-run; do not guess this number -- the deploy gate")
-        print("     is built on it.")
+        print("     Either no definition here has a solution apply() can dispatch on this part,")
+        print("     or the timed rounds did not agree (another process on the box?). Benchmark")
+        print("     one / retry on an idle box; do not guess this number -- the deploy gate is")
+        print("     built on it, and the vLLM sitecustomize refuses to enable apply() without it.")
     else:
         print(f"\n  substitution cost           {cost:8.2f} us")
         print(f"     -> ApplyConfig(min_gain_us={cost:.2f})  /  FIB_APPLY_MIN_GAIN_US={cost:.2f}")

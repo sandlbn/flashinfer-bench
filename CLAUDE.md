@@ -183,12 +183,18 @@ the dev venv. Procedure lives in the skills named; this table says what exists.
 | Fuse | Which producer→consumer edges the model actually ran could a GEMM epilogue absorb? Presets are read from Xe-Fuse, not copied | `scripts/fusion_candidates.py` |
 | Calibrate | What does this part charge: `apply()` dispatch cost, timing floor, launch floor, read bandwidth, achieved matmul throughput? Prints the record the bounds and the apply gate consume | `scripts/calibrate_part.py` |
 | Rank and bound | For every op with measured share and every delivery mechanism — provider patch, Triton in place, library call, layout transform, fusion at the call site or via `apply()`, `apply()` substitution, source rewrite — is the ceiling positive after that mechanism's cost? Every gate writes one line; `worklist.json` is the survivors ordered by worth | `scripts/bound_candidates.py` |
-| Optimize | Propose, measure, branch, keep the best. `benchmark` gates on correctness before timing and interleaves arms; `ab` compares two builds of one `torch.ops` symbol across processes; `finalize` refuses a best trial that is not a measured win | `scripts/kernel_trials.py` |
-| Prove | Tokens/sec under vLLM, A/B, with the dispatch counters that prove the substitution happened and token digests that prove the arms agree; `--plain-arm` for a provider build or source patch | `scripts/measure_serving_win.py` |
+| Optimize | Propose, measure, branch, keep the best. `benchmark` gates on correctness before timing and interleaves arms; `ab` compares two builds of one `torch.ops` symbol across processes; `finalize` refuses a best trial that is not a measured win. `init --bound --mechanism` ties a series to an ACCEPT row of the routing, and `benchmark` refuses a rejected or stale one before timing | `scripts/kernel_trials.py` |
+| Prove | Tokens/sec under vLLM, A/B, with the dispatch counters that prove the substitution happened and token digests that prove the arms agree; `--plain-arm` for a provider build or source patch. A failed gate -- an arm that failed, differing digests, nothing applied, a rejected or stale routing -- halts with no throughput printed | `scripts/measure_serving_win.py` |
 
 Skills: `discover-model-kernels` (discover, resolve, fuse), `wrap-kernel-for-tuning` and
 `optimize-intel-kernels` (optimize), `measure-serving-win` (prove). The rank-and-bound stage
 is described by the `route-kernel-work` plan (below), which is not yet a skill.
+
+A failed gate halts its stage: it prints no result a reader could take as valid, names the
+gate in the key contract (`VERDICT: ...`, `DONE` last) with the evidence it had, and exits
+non-zero. Stages consume each other's artefacts only with provenance intact -- `bound.json`
+records the digest and model of the `discovered.json` it was computed from, and a consumer
+refuses it once that report has changed (`STALE_INPUT`).
 
 Adjacent scripts, each one question:
 

@@ -1044,10 +1044,16 @@ def main() -> None:
     restore_triton()
 
     # A second pass, for the number that decides what any of this is worth.
+    # A failed device-time pass does not stop the harnesses being written -- they are
+    # still worth having -- but it is recorded in the report and in the exit status, because
+    # every later stage prices work from the shares this pass produces, and a report with
+    # zero everywhere reads as "nothing is worth doing" rather than "nothing was measured".
+    device_time_error = None
     try:
         profiled = device_time(llm, args.prompts, args.out_tokens, "xpu:0")
-    except Exception as exc:  # profiling is not worth failing discovery over
-        print(f"  device-time pass failed ({type(exc).__name__}: {exc}); shares unavailable")
+    except Exception as exc:
+        device_time_error = f"{type(exc).__name__}: {exc}"
+        print(f"  device-time pass failed ({device_time_error}); shares unavailable")
         profiled = {"by_op": {}, "by_kernel": {}, "total_us": 0.0}
     timed = profiled["by_op"]
 
@@ -1074,7 +1080,8 @@ def main() -> None:
 
     report = {
         "model": args.model,
-        "device_time_total_us": round(total_us, 1),
+        "device_time_error": device_time_error,
+        "device_time_total_us": round(total_us, 1) if device_time_error is None else 0.0,
         "device_time_by_kernel": {
             k: round(v, 1) for k, v in list(profiled["by_kernel"].items())[:40]
         },
@@ -1156,7 +1163,29 @@ def main() -> None:
             todo.append(record)
         print()
     print(f"\n  {made} harness(es) written to {out_dir}, {failed} discarded as unverifiable.")
-    print("  Next: pick one and run scripts/kernel_trials.py against it.")
+    status, message = exit_status(made, failed, report)
+    print(f"  {message}")
+    raise SystemExit(status)
+
+
+def exit_status(made: int, failed: int, report: Dict[str, Any]) -> Tuple[int, str]:
+    """The exit code and closing line, from what the run achieved.
+
+    The command promises verified harnesses with shares. Zero verified harnesses, or a
+    report with no device time, is not that -- and an exit of 0 there is what lets a
+    driver move to the next stage on nothing.
+    """
+    if report.get("device_time_error"):
+        return 1, (
+            "device-time pass failed; discovered.json carries no shares and "
+            "scripts/bound_candidates.py will refuse it. Fix the profiler and re-run."
+        )
+    if made == 0:
+        return 1, (
+            f"no harness verified ({failed} discarded); nothing to optimize was produced. "
+            "Read the drop reasons above."
+        )
+    return 0, "Next: pick one and run scripts/kernel_trials.py against it."
 
 
 if __name__ == "__main__":

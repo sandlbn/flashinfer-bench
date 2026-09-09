@@ -53,6 +53,12 @@ def _min_gain():
     return gain
 
 
+# Load-time weight layout: independent of apply(), so it can be measured with --plain-arm.
+if os.environ.get("FIB_VLLM_PAD_WEIGHT_ROWS", "").lower() in ("1", "true", "yes", "on"):
+    from flashinfer_bench.integration.vllm.weight_layout import install_weight_row_padding
+
+    install_weight_row_padding()
+
 if os.environ.get("FIB_VLLM_INTEGRATION", "").lower() in ("1", "true", "yes", "on"):
     from flashinfer_bench.integration.vllm import install_vllm_integrations
 
@@ -92,8 +98,29 @@ Rules for the run:
   when the window is doubled.
 - **To decide whether an opt-in integration flag should become the default**, set it on
   the patched arm only with `--env KEY=VALUE`.
+- **A load-time weight transform is not a substitution; measure it with `--plain-arm`.**
+  `--plain-arm --env FIB_VLLM_PAD_WEIGHT_ROWS=1` strips every `FIB_*` variable from both
+  arms and switches the transform on in one, so `apply()`'s dispatch cost is in neither.
+  The transform still reports through the exit counters (`weight_row_pad: N call(s), M
+  applied`, plus a `forward-saw-padded-pitch` detail per padded layer); a run with
+  `0 applied` is an A/A, whatever its delta says.
 
 ## Step 3: Read the dispatch counters — the validity gate
+
+The harness prints the same key contract as `kernel_trials.py` (`KEY: value` lines,
+`VERDICT`, then `DONE`) and **halts on a failed gate**: no per-arm throughput, no delta,
+exit 1. The gates are an arm that produced no throughput (`ARM_FAILED`), token digests that
+differ between arms or within one arm's repeats (`TOKENS_DIFFER`, `TOKENS_UNSTABLE`,
+`TOKENS_UNCOMPARED`), and nothing applied (`NOT_SUBSTITUTED`). Everything that helps fix
+the failure is still printed -- digests per arm, the failing arm's cause and log, the
+counters. `--report-unvalidated` is the one way to see the throughput past a failed token
+gate; it marks every line `UNVALIDATED`, keeps the failed verdict and the non-zero exit, and
+is for investigating a kernel whose numerics are expected to move the tokens, never for a
+result. Pass `--bound <dir>/bound.json --mechanism <m> --candidate <id>` to tie the run to
+a row of `scripts/bound_candidates.py`: a mechanism the routing rejected for that
+candidate, a routing computed from another model or a re-run discovery, or an `apply()`
+mechanism measured under `--plain-arm` (and vice versa) is refused before any arm launches
+(`ROUTING_REJECTED`, `STALE_INPUT`, `MECHANISM_MISMATCH`).
 
 At exit the adapters print:
 

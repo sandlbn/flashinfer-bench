@@ -112,6 +112,22 @@ Ship the fix as a Solution gated on `x.shape[0]`, with the weight transposed onc
 cached — never as a blanket load-time transpose. Load-time weight transforms belong in
 `flashinfer_bench/integration/weight_layout.py`.
 
+**Row pitch, not only layout tag.** The same `ba` weight, same implementation, streams at
+two thirds of the bandwidth of its neighbours when its row pitch in bytes is a multiple of
+the device's memory-channel period (`channel_period_bytes()`; six channels × a 1024-byte
+granule on the first part measured). It shows only when the weight streams from device
+memory — a single cache-resident weight in a tight loop hides it entirely, so measure with
+a rotation pool larger than `caps.l2_bytes`. `pad_rows_off_channel_period()` moves the
+pitch by one cache line, bit-identically, and oneDNN takes the strided descriptor (a
+`ba` weight tag that carries the pitch in `ONEDNN_VERBOSE`) with no reorder. The pad is not free — a weight that did not
+camp, and a taller one that did, both measured slower with it — so the vLLM hook
+(`flashinfer_bench/integration/vllm/weight_layout.py`, `FIB_VLLM_PAD_WEIGHT_ROWS=1`)
+keeps a pad only where a load-time streaming A/B of that shape measures a win. The pitch
+sweep that establishes the period on a part: `scripts/kernel_trials.py ab
+tools/kernel-harness/trials/linear_row_pad.py --env-a FIB_ROW_PAD_ELEMS=0 --env-b
+FIB_ROW_PAD_ELEMS=32` with `FIB_WEIGHT_POOL_MB` above the cache size, over the pitches
+the model's projections have.
+
 ## Fix 2: Primitive caching
 
 `create:` lines in a steady-state loop mean shape churn is rebuilding primitives per call.

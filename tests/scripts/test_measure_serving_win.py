@@ -6,6 +6,7 @@ testing is the parsing that decides whether a run counted -- not the throughput 
 
 import importlib.util
 import pathlib
+import sys
 
 import pytest
 
@@ -226,3 +227,363 @@ class TestTokenDigest:
         assert msw._tokens_identical(["a"], ["b"]) is False
         assert msw._tokens_identical(["a", "b"], ["a", "b"]) is False  # unstable arms
         assert msw._tokens_identical([], ["a"]) is None
+
+
+def _run(tok_s, digest="d0", dispatch=None, error=None):
+    r = {"tokens_per_sec": tok_s, "dispatch": dispatch or {}, "detail": []}
+    if digest is not None:
+        r["token_digest"] = digest
+    if error:
+        r.update(tokens_per_sec=None, error=error, log="tmp/x.fail.log")
+    return r
+
+
+APPLIED = {"rmsnorm": (100, 100)}
+ARMS = ["baseline", "ours"]
+
+
+class TestJudge:
+    """The gates, in order, and that no delta survives a failed one."""
+
+    def test_identical_tokens_and_a_substitution_give_a_valid_verdict(self):
+        runs = {
+            "baseline": [_run(100.0), _run(101.0)],
+            "ours": [_run(110.0, dispatch=APPLIED), _run(111.0, dispatch=APPLIED)],
+        }
+        out = msw.judge(runs, ARMS, plain_arm=False)
+        assert out["valid"] and out["verdict"] == "WIN"
+        assert out["delta"] == pytest.approx(110.5 / 100.5 - 1)
+        assert out["tokens"] == "IDENTICAL"
+
+    def test_a_delta_inside_the_spread_is_noise_not_a_win(self):
+        runs = {
+            "baseline": [_run(100.0), _run(110.0)],
+            "ours": [_run(104.0, dispatch=APPLIED), _run(106.0, dispatch=APPLIED)],
+        }
+        assert msw.judge(runs, ARMS, plain_arm=False)["verdict"] == "NOISE"
+
+    def test_differing_digests_halt_and_carry_no_delta(self):
+        runs = {
+            "baseline": [_run(100.0), _run(100.0)],
+            "ours": [_run(61.0, "other", APPLIED), _run(62.0, "other", APPLIED)],
+        }
+        out = msw.judge(runs, ARMS, plain_arm=False)
+        assert not out["valid"]
+        assert out["verdict"] == msw.TOKENS_DIFFER and out["tokens"] == "DIFFER"
+        assert out["delta"] is None and out["baseline_tok_s"] is None
+
+    def test_an_arm_unstable_across_its_own_repeats_halts_first(self):
+        runs = {
+            "baseline": [_run(100.0, "a"), _run(100.0, "b")],
+            "ours": [_run(100.0, "a", APPLIED), _run(100.0, "a", APPLIED)],
+        }
+        out = msw.judge(runs, ARMS, plain_arm=False)
+        assert out["verdict"] == msw.TOKENS_UNSTABLE and "baseline" in out["reason"]
+
+    def test_a_missing_digest_is_not_read_as_agreement(self):
+        runs = {
+            "baseline": [_run(100.0, None), _run(100.0, None)],
+            "ours": [_run(100.0, dispatch=APPLIED), _run(100.0, dispatch=APPLIED)],
+        }
+        assert msw.judge(runs, ARMS, plain_arm=False)["verdict"] == msw.TOKENS_UNCOMPARED
+
+    def test_a_failed_arm_halts_before_the_token_gate(self):
+        runs = {
+            "baseline": [_run(100.0), _run(100.0)],
+            "ours": [_run(None, error="OutOfMemoryError: x"), _run(None, error="x")],
+        }
+        out = msw.judge(runs, ARMS, plain_arm=False)
+        assert out["verdict"] == msw.ARM_FAILED and "ours" in out["reason"]
+        assert out["tokens"] is None
+
+    def test_apply_mode_without_counters_or_with_nothing_applied_is_not_substituted(self):
+        runs = {"baseline": [_run(100.0)] * 2, "ours": [_run(120.0)] * 2}
+        out = msw.judge(runs, ARMS, plain_arm=False)
+        assert out["verdict"] == msw.NOT_SUBSTITUTED and out["delta"] is None
+        none = {"rmsnorm": (100, 0)}
+        runs = {"baseline": [_run(100.0)] * 2, "ours": [_run(120.0, dispatch=none)] * 2}
+        out = msw.judge(runs, ARMS, plain_arm=False)
+        assert out["verdict"] == msw.NOT_SUBSTITUTED and "0 applied" in out["reason"]
+
+    def test_plain_mode_needs_no_counters_but_zero_applied_under_env_is_an_aa(self):
+        runs = {"baseline": [_run(100.0)] * 2, "ours": [_run(120.0)] * 2}
+        assert msw.judge(runs, ARMS, plain_arm=True, env=True)["valid"]
+        none = {"weight_row_pad": (24, 0)}
+        runs = {"baseline": [_run(100.0)] * 2, "ours": [_run(120.0, dispatch=none)] * 2}
+        assert msw.judge(runs, ARMS, plain_arm=True, env=True)["verdict"] == msw.NOT_SUBSTITUTED
+        # No --env: an A/A of the noise floor, and counters that count nothing are fine.
+        assert msw.judge(runs, ARMS, plain_arm=True, env=False)["valid"]
+
+    def test_overhead_arm_must_agree_on_tokens_too(self):
+        arms = ARMS + ["overhead"]
+        runs = {
+            "baseline": [_run(100.0)] * 2,
+            "ours": [_run(120.0, dispatch=APPLIED)] * 2,
+            "overhead": [_run(95.0, "x")] * 2,
+        }
+        assert msw.judge(runs, arms, plain_arm=False)["verdict"] == msw.TOKENS_DIFFER
+        runs["overhead"] = [_run(95.0)] * 2
+        out = msw.judge(runs, arms, plain_arm=False)
+        assert out["valid"] and out["dispatch_tax"] == pytest.approx(-0.05)
+
+
+def _args(**over):
+    base = {
+        "model": "test/model",
+        "plain_arm": False,
+        "repeats": 2,
+        "env": [],
+        "report_unvalidated": False,
+        "bound": None,
+        "mechanism": None,
+        "candidate": [],
+    }
+    base.update(over)
+    return __import__("argparse").Namespace(**base)
+
+
+class TestRender:
+    """A failed gate prints the contract and the diagnostics -- and no throughput."""
+
+    def test_digest_mismatch_prints_no_delta_and_no_rate(self, capsys):
+        runs = {
+            "baseline": [_run(100.0), _run(100.0)],
+            "ours": [_run(61.49, "other", APPLIED), _run(61.49, "other", APPLIED)],
+        }
+        out = msw.judge(runs, ARMS, plain_arm=False)
+        msw.render(out, _args(), ARMS, runs, {"routing": "UNCHECKED"})
+        text = capsys.readouterr().out
+        assert "VERDICT: TOKENS_DIFFER" in text and "TOKENS: DIFFER" in text
+        assert "ROUTING: UNCHECKED" in text
+        assert text.rstrip().endswith("DONE")
+        assert "DELTA_PCT" not in text and "\n  delta" not in text
+        assert "tok/s" not in text and "61.49" not in text and "-38.51" not in text
+        # The diagnostics that help fix it are all there.
+        assert "digest d0" in text and "digest other" in text
+        assert "rmsnorm" in text and "100/100 applied" in text
+
+    def test_unvalidated_override_marks_every_number_and_keeps_the_verdict(self, capsys):
+        runs = {
+            "baseline": [_run(100.0), _run(100.0)],
+            "ours": [_run(61.49, "other", APPLIED), _run(61.49, "other", APPLIED)],
+        }
+        out = msw.judge(runs, ARMS, plain_arm=False)
+        msw.render(out, _args(report_unvalidated=True), ARMS, runs, {"routing": "UNCHECKED"})
+        text = capsys.readouterr().out
+        assert "VERDICT: TOKENS_DIFFER" in text
+        assert "UNVALIDATED delta     -38.51%" in text
+        assert "UNVALIDATED ours" in text and "UNVALIDATED baseline" in text
+        assert "not a result" in text
+        assert "\n  delta" not in text  # never an unmarked delta line
+
+    def test_valid_result_prints_the_contract_then_the_table(self, capsys):
+        runs = {
+            "baseline": [_run(100.0), _run(102.0)],
+            "ours": [_run(120.0, dispatch=APPLIED), _run(121.0, dispatch=APPLIED)],
+        }
+        out = msw.judge(runs, ARMS, plain_arm=False)
+        msw.render(out, _args(), ARMS, runs, {"routing": "UNCHECKED"})
+        text = capsys.readouterr().out
+        for key in (
+            "MODEL: test/model",
+            "MODE: apply",
+            "BASELINE_TOK_S: 101.00",
+            "OURS_TOK_S: 120.50",
+            "DELTA_PCT: +19.31",
+            "SPREAD_PCT: 2.0",
+            "TOKENS: IDENTICAL",
+            "SUBSTITUTION: 100/100 applied across 1 family(ies)",
+            "VERDICT: WIN",
+        ):
+            assert key in text, text
+        assert text.rstrip().endswith("DONE")
+
+    def test_failed_arm_shows_its_cause_and_log_not_the_other_arms_rate(self, capsys):
+        runs = {
+            "baseline": [_run(100.0), _run(100.0)],
+            "ours": [_run(None, error="torch.OutOfMemoryError: XPU out of memory")] * 2,
+        }
+        out = msw.judge(runs, ARMS, plain_arm=False)
+        msw.render(out, _args(), ARMS, runs, {"routing": "UNCHECKED"})
+        text = capsys.readouterr().out
+        assert "VERDICT: ARM_FAILED" in text
+        assert "FAILED: torch.OutOfMemoryError" in text and "full log: tmp/x.fail.log" in text
+        assert "tok/s" not in text
+
+
+class TestRepeats:
+    def test_a_single_repeat_is_refused_at_the_cli(self):
+        with pytest.raises(SystemExit):
+            msw.build_parser().parse_args(["--model", "m", "--repeats", "1"])
+        assert msw.build_parser().parse_args(["--model", "m", "--repeats", "2"]).repeats == 2
+
+
+_BC_SPEC = importlib.util.spec_from_file_location(
+    "bound_candidates_for_msw",
+    pathlib.Path(__file__).resolve().parents[2] / "scripts" / "bound_candidates.py",
+)
+bc = importlib.util.module_from_spec(_BC_SPEC)
+sys.modules[_BC_SPEC.name] = bc
+_BC_SPEC.loader.exec_module(bc)
+
+
+def _routing_on_disk(tmp_path, model="test/model"):
+    """One candidate, one op: provider_patch ACCEPTed, apply_substitution REJECTed at
+    net_positive (headroom 3 us against a 6 us dispatch cost)."""
+    import json
+    from types import SimpleNamespace
+
+    op = "_C.rms_norm.default"
+    t = lambda shape: ["T", shape, "bfloat16"]  # noqa: E731
+    report = {
+        "model": model,
+        "device_time_total_us": 10000.0,
+        "device_time_by_kernel": {"vllm::norm_kernel<bf16>": 2000.0},
+        "ops": [{"op": op, "calls": 400, "args": [t([4, 1024]), t([4, 1024]), t([1024]), 1e-6]}],
+        "op_share": {op: {"device_us": 2000.0, "share_pct": 20.0}},
+        "op_calls": {op: 400},
+        "triton": [],
+        "edges": [],
+    }
+    bundle = tmp_path / "bundle"
+    (bundle / "source").mkdir(parents=True)
+    (bundle / "PROVENANCE.md").write_text("# x\n")
+    (bundle / "source" / "k.cpp").write_text("//\n")
+    resolution = {
+        "_C::rms_norm": {
+            "op": "_C::rms_norm",
+            "provider": "provider kernel",
+            "where": [f"{bundle}/source/k.cpp"],
+            "bundle": str(bundle),
+            "schema": "_C::rms_norm(Tensor($0! -> ) result, Tensor input, Tensor? weight, float epsilon) -> ()",
+            "launched": ["vllm::norm_kernel<bf16>"],
+        }
+    }
+    cal = SimpleNamespace(
+        hardware_id="TEST_PART",
+        timer="event",
+        dispatch_us=6.0,
+        timing_floor_us=1.0,
+        bandwidth_gbs=1000.0,
+        launch_floor_us=2.0,
+        matmul_peak_tflops={"bfloat16": 50.0},
+    )
+    cid = bc.candidate_id(op, "4x1024/4x1024/1024", "bfloat16")
+    report_path = tmp_path / "discovered.json"
+    report_path.write_text(json.dumps(report))
+    cands, rows = bc.run(
+        report,
+        resolution,
+        {cid: {"t_host_us": 8.0, "spread_us": 0.2}},
+        cal,
+        "run-1",
+        definitions_matching=lambda c: ["rmsnorm_h1024"],
+        cutoff=0.0,
+    )
+    out = tmp_path / "bound"
+    bc.write_outputs(
+        out,
+        "run-1",
+        cands,
+        rows,
+        cal,
+        0.0005,
+        str(report_path),
+        report_sha1=bc.report_digest(report_path),
+        model=model,
+    )
+    return out, report_path, cid, op
+
+
+class TestRoutingPrecheck:
+    """A serving run of a pair the routing rejected is refused before any arm launches."""
+
+    def test_accepted_pair_in_the_isolating_mode_passes(self, tmp_path):
+        out, _, cid, op = _routing_on_disk(tmp_path)
+        args = _args(bound=str(out), mechanism="provider_patch", candidate=[cid], plain_arm=True)
+        fields = msw.routing_precheck(args, bc)
+        assert fields["routing"] == "OK" and fields["candidate"] == cid
+        # An op name selects every candidate of that op.
+        args.candidate = [op]
+        assert msw.routing_precheck(args, bc)["candidate"] == cid
+
+    def test_rejected_mechanism_is_refused_with_the_gate(self, tmp_path):
+        out, _, cid, _ = _routing_on_disk(tmp_path)
+        args = _args(bound=str(out), mechanism="apply_substitution", candidate=[cid])
+        with pytest.raises(bc.RoutingRefused) as exc:
+            msw.routing_precheck(args, bc)
+        f = exc.value.fields
+        assert f["routing"] == "REJECTED" and f["gate"] == "net_positive"
+        assert f["arithmetic"] == "ceiling_us=-3 > spread_us=0.2"
+        assert f["verdict"] == "ROUTING_REJECTED"
+
+    def test_mechanism_measured_in_the_wrong_mode_is_refused(self, tmp_path):
+        out, _, cid, _ = _routing_on_disk(tmp_path)
+        args = _args(bound=str(out), mechanism="provider_patch", candidate=[cid])
+        with pytest.raises(bc.RoutingRefused) as exc:
+            msw.routing_precheck(args, bc)
+        assert exc.value.fields["verdict"] == msw.MECHANISM_MISMATCH
+        assert "--plain-arm" in exc.value.why
+
+    def test_routing_of_another_model_or_a_rerun_discovery_is_stale(self, tmp_path):
+        out, report_path, cid, _ = _routing_on_disk(tmp_path)
+        args = _args(
+            model="other/model",
+            bound=str(out),
+            mechanism="provider_patch",
+            candidate=[cid],
+            plain_arm=True,
+        )
+        with pytest.raises(bc.RoutingRefused) as exc:
+            msw.routing_precheck(args, bc)
+        assert exc.value.fields["verdict"] == "STALE_INPUT"
+        assert exc.value.fields["routed_model"] == "test/model"
+        report_path.write_text(report_path.read_text() + "\n")
+        args.model = "test/model"
+        with pytest.raises(bc.RoutingRefused) as exc:
+            msw.routing_precheck(args, bc)
+        assert exc.value.fields["routing"] == "STALE"
+
+    def test_half_the_flags_is_refused(self, tmp_path):
+        out, _, cid, _ = _routing_on_disk(tmp_path)
+        with pytest.raises(bc.RoutingRefused, match="go together"):
+            msw.routing_precheck(_args(bound=str(out)), bc)
+
+    def test_cli_halts_in_the_contract_before_importing_vllm(self, tmp_path):
+        """The refusal costs no serving time: it happens before vLLM is even imported."""
+        import subprocess
+        import sys
+
+        out, _, cid, _ = _routing_on_disk(tmp_path)
+        script = pathlib.Path(__file__).resolve().parents[2] / "scripts" / "measure_serving_win.py"
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(script),
+                "--model",
+                "test/model",
+                "--bound",
+                str(out),
+                "--mechanism",
+                "apply_substitution",
+                "--candidate",
+                cid,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert proc.returncode == 1, proc.stdout + proc.stderr
+        for key in (
+            "MODEL: test/model",
+            "MODE: apply",
+            "ROUTING: REJECTED",
+            f"CANDIDATE: {cid}",
+            "MECHANISM: apply_substitution",
+            "GATE: net_positive",
+            "ARITHMETIC: ceiling_us=-3 > spread_us=0.2",
+            "VERDICT: ROUTING_REJECTED",
+        ):
+            assert key in proc.stdout, proc.stdout
+        assert proc.stdout.rstrip().endswith("DONE")
+        assert "tok/s" not in proc.stdout and "DELTA" not in proc.stdout

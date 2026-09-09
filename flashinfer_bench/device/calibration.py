@@ -1,9 +1,10 @@
 """Per-part constants, measured and cached rather than written down.
 
-Thresholds like "a substitution costs ~6us" or "the timer's floor is ~30us" are properties
+Thresholds like "what a substitution costs" or "where the timer's floor is" are properties
 of one GPU and one software stack, not of this project. Written into a default they are
 wrong on every other part, and they drift on the part they came from: figures hand-measured
-here were already 3% and 87% off when re-measured on the same machine a day later.
+here had moved -- one of them by most of its value -- when re-measured on the same machine
+a day later.
 
 So nothing stores them. A caller asks for the value, it is measured once per (part, timer,
 stack) and cached on disk, and a new chip gets its own answer with no edit.
@@ -11,6 +12,7 @@ stack) and cached on disk, and a new chip gets its own answer with no edit.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -18,11 +20,26 @@ import pathlib
 import statistics
 import time
 from dataclasses import asdict, dataclass
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
+
+if TYPE_CHECKING:
+    import torch
 
 logger = logging.getLogger(__name__)
 
-CACHE_VERSION = 1
+CACHE_VERSION = 3
+"""Bumped when a stored record can no longer be trusted.
+
+v1 records wrote an unmeasurable dispatch cost as ``0.0`` -- the claim that a substitution
+is free -- so a v1 file is never read. v2 records predate ``launch_floor_us`` and
+``matmul_peak_tflops``; a reader that filled those in with a default would be classifying
+regimes against a number nobody measured, so a v2 file is not read either.
+"""
+
+MATMUL_DTYPES = ("bfloat16", "float16", "float32")
+"""The dtypes a matrix-throughput probe is attempted at, narrowed to those the part runs
+natively (:meth:`Capabilities.is_native_dtype`). A closed list of what ``torch.matmul``
+accepts as a real-valued operand, not a claim about any part."""
 
 
 @dataclass(frozen=True)
@@ -31,21 +48,145 @@ class Calibration:
 
     hardware_id: str
     timer: str
-    dispatch_us: float
-    """Cost of one successful apply() substitution beyond the kernel itself.
+    dispatch_us: Optional[float]
+    """What one apply() call costs over invoking the chosen kernel the way the benchmark did.
 
-    A kernel saving less than this loses the exchange however large its ratio.
+    The part of a substitution's per-call price that no trace contains: resolving the
+    definition, merging kwargs, building the key, checking dtypes, looking up the table and
+    the build cache, allocating outputs for a destination-passing kernel, and returning
+    through the Runnable. A kernel saving less than this loses the exchange however large
+    its ratio.
+
+    ``None`` means it could not be measured on this machine. It is never ``0.0`` from a
+    failure path: a caller that reads ``None`` must treat the apply() mechanism as
+    unavailable, not as free -- a gate set to zero admits every substitution.
     """
     timing_floor_us: float
     """Fixed cost a single event-timed call carries. Ratios below it measure the harness."""
     bandwidth_gbs: float
     """Contiguous read bandwidth. A kernel's own ceiling is lower; measure its access
-    pattern rather than treating this as a bound."""
+    pattern rather than treating this as a bound (:func:`strided_read_bandwidth_gbs`)."""
+    launch_floor_us: Optional[float]
+    """Per-launch cost of the smallest kernel this stack can put on the device.
+
+    Measured inside a batch of back-to-back launches under sustained load, so it is what
+    one launch costs when nothing but launching is happening -- distinct from
+    ``timing_floor_us``, which is what one *timed region* carries over its contents. A
+    kernel whose device time sits at this floor is launch-bound: no change inside it can
+    win, only removing the launch can.
+
+    ``None`` when the rounds did not settle; never a default.
+    """
+    matmul_peak_tflops: Dict[str, Optional[float]]
+    """Achieved matrix throughput per dtype name, from a square matmul of
+    :data:`MATMUL_PROBE_SIDE` under sustained load. The denominator of ``t_cmp = flops /
+    peak``. Only dtypes the part runs natively are probed; a dtype whose rounds did not
+    settle maps to ``None``. What ``torch.matmul`` reaches through this stack, not a
+    datasheet figure."""
+
+    @property
+    def complete(self) -> bool:
+        """Whether every field was measured. Only a complete record is worth caching: an
+        unmeasured cost is not a result to remember, and the next process gets another go."""
+        return (
+            self.dispatch_us is not None
+            and self.launch_floor_us is not None
+            and all(v is not None for v in self.matmul_peak_tflops.values())
+        )
+
+
+DISPATCH_SPREAD_TOLERANCE = 0.10
+"""Largest round-to-round spread (median absolute deviation over the median) a dispatch
+measurement may carry and still be reported.
+
+A property of the estimator, not of any part. On an idle box the paired rounds agree to
+1-3%; a thread that is bounced between core classes or shares a core with another process
+reads tens of percent, and its median is not a number about this machine but about that
+moment. Below the tolerance the measurement is settled; above it, it is refused.
+"""
+
+
+DEVICE_SPREAD_TOLERANCE = 0.05
+"""Largest window spread (median absolute deviation over the median) a device-side
+measurement may carry and still be reported.
+
+A property of the estimator, not of any part. Back-to-back regions of the same work on a
+device at steady clocks agree to a percent or two; while the clock is still ramping, or
+while another process shares the device, consecutive regions disagree by far more, and a
+median over that describes the moment rather than the machine.
+"""
+
+SETTLE_BUDGET_S = 4.0
+"""Longest a device-side measurement keeps sampling while waiting for its window to settle
+before it gives up and reports ``None``. Bounds the cost of an unsettleable measurement on
+a shared device; it does not set the warm-up, which ends the moment the window agrees."""
+
+MATMUL_PROBE_SIDE = 4096
+"""Side of the square matmul the matrix-throughput probe times. An estimator parameter: the
+field records what this size achieved, and the docstring of ``matmul_peak_tflops`` says so."""
+
+PATTERN_BUFFER_BYTES = 256 * 1024 * 1024
+"""Size of the buffer the strided-read probe sweeps, chosen to exceed any last-level cache
+this project targets so the number is memory bandwidth and not cache bandwidth."""
 
 
 def _cache_path(hardware_id: str, timer: str) -> pathlib.Path:
     root = os.environ.get("FIB_CACHE_PATH") or os.path.expanduser("~/.cache/flashinfer_bench")
     return pathlib.Path(root) / "calibration" / f"v{CACHE_VERSION}-{hardware_id}-{timer}.json"
+
+
+def _pattern_cache_path(hardware_id: str, timer: str) -> pathlib.Path:
+    """Sidecar for access-pattern bandwidths: patterns are open-ended, so they are not fields."""
+    return _cache_path(hardware_id, timer).with_name(
+        f"v{CACHE_VERSION}-{hardware_id}-{timer}-patterns.json"
+    )
+
+
+def _settled_device_us(
+    fn: Callable[[], object],
+    sync: Callable[[], None],
+    calls: int,
+    window: int = 5,
+    tolerance: float = DEVICE_SPREAD_TOLERANCE,
+    budget_s: float = SETTLE_BUDGET_S,
+    clock: Callable[[], float] = time.perf_counter,
+) -> Optional[float]:
+    """Per-call microseconds of `fn` once the device is in a steady state, or None.
+
+    Warm-up is by time and open-ended rather than by count. This part gates its clock within
+    tens of milliseconds of the queue draining and needs sustained load to come back, so a
+    fixed number of warm-up calls measures the idle clock on a fast kernel and wastes time
+    on a slow one. Regions of `calls` launches run back-to-back with no pause between them;
+    the measurement is accepted the first time the last `window` regions agree within
+    `tolerance`, which a ramping clock cannot do, and refused after `budget_s` if they never
+    do. The first call runs before the budget starts so a one-time JIT compile is not
+    charged against it.
+
+    Never returns zero (see :func:`_settled_median`).
+    """
+    fn()
+    sync()
+    samples: List[float] = []
+    deadline = clock() + budget_s
+    while True:
+        sync()
+        start = clock()
+        for _ in range(calls):
+            fn()
+        sync()
+        samples.append((clock() - start) / calls * 1e6)
+        if len(samples) >= window:
+            settled = _settled_median(samples[-window:], tolerance)
+            if settled is not None:
+                return settled
+        if clock() >= deadline:
+            logger.debug(
+                "device measurement did not settle in %.1fs (%d regions, last %s)",
+                budget_s,
+                len(samples),
+                [f"{s:.1f}" for s in samples[-window:]],
+            )
+            return None
 
 
 def _median_us(
@@ -63,6 +204,76 @@ def _median_us(
         sync()
         samples.append((time.perf_counter() - start) / calls * 1e6)
     return statistics.median(samples)
+
+
+def _settled_median(
+    deltas: Sequence[float], tolerance: float = DISPATCH_SPREAD_TOLERANCE
+) -> Optional[float]:
+    """The median of per-round differences, or None if the rounds do not agree.
+
+    Refuses a non-positive median outright -- the arms are indistinguishable or the slower
+    one measured faster, and either way there is no cost to report -- and refuses a positive
+    one whose round-to-round spread exceeds ``tolerance`` of it. Never returns zero: zero is
+    a claim that the wrapper is free, and a deploy gate set from it admits everything.
+    """
+    if not deltas:
+        return None
+    median = statistics.median(deltas)
+    spread = statistics.median(abs(d - median) for d in deltas)
+    if median <= 0 or spread > tolerance * median:
+        logger.debug(
+            "delta %.2fus with spread %.2fus over %d rounds: not settled",
+            median,
+            spread,
+            len(deltas),
+        )
+        return None
+    logger.debug("delta %.2fus, spread %.2fus over %d rounds", median, spread, len(deltas))
+    return median
+
+
+def _paired_delta_us(
+    slow: Callable[[], object],
+    fast: Callable[[], object],
+    calls: int,
+    rounds: int = 15,
+    sync: Optional[Callable[[], None]] = None,
+    warmup_s: float = 0.05,
+    tolerance: float = DISPATCH_SPREAD_TOLERANCE,
+) -> Optional[float]:
+    """How much longer `slow` takes than `fast` per call, or None if that did not settle.
+
+    Measured as a difference per round rather than as two separate medians. Whatever drifts
+    over the measurement -- a CPU leaving its idle frequency, a device ramping its clocks --
+    is charged to whichever arm ran first when the arms are timed one after the other, and
+    a few microseconds of real difference are easily swamped or inverted. Alternating the
+    arms inside each round (ABBA) cancels the drift both arms share.
+
+    Warm-up is by time rather than by count so that a host at its idle frequency has left it
+    before the first timed round, whatever one call costs.
+
+    Returns None rather than zero when the rounds do not agree (see :func:`_settled_median`).
+    """
+    sync = sync or (lambda: None)
+    deadline = time.perf_counter() + warmup_s
+    while time.perf_counter() < deadline:
+        for _ in range(calls):
+            slow()
+            fast()
+    sync()
+
+    deltas = []
+    for _ in range(rounds):
+        timings = []
+        for fn in (fast, slow, slow, fast):
+            sync()
+            start = time.perf_counter()
+            for _ in range(calls):
+                fn()
+            sync()
+            timings.append((time.perf_counter() - start) / calls * 1e6)
+        deltas.append((timings[1] + timings[2]) / 2 - (timings[0] + timings[3]) / 2)
+    return _settled_median(deltas, tolerance)
 
 
 def measure(device: str) -> Calibration:
@@ -100,52 +311,228 @@ def measure(device: str) -> Calibration:
         singles.append(a.elapsed_time(b) * 1000)
     floor = max(0.0, statistics.median(singles) - batched)
 
-    dispatch = _measure_dispatch(device, sync) or 0.0
-    return Calibration(caps.canonical_id, accel.make_timer(device).name, dispatch, floor, bandwidth)
+    launch = measure_launch_floor_us(device)
+    if launch is None:
+        logger.warning("Launch floor did not settle on %s; launch_floor_us is None.", device)
+    peak = measure_matmul_peak_tflops(device)
+    for name, value in peak.items():
+        if value is None:
+            logger.warning("Matrix throughput at %s did not settle on %s.", name, device)
+
+    dispatch = measure_dispatch_us(device)
+    if dispatch is None:
+        logger.warning(
+            "Could not measure what an apply() substitution costs on %s; dispatch_us is None. "
+            "Treat the apply() mechanism as unavailable here, not as free.",
+            device,
+        )
+    return Calibration(
+        hardware_id=caps.canonical_id,
+        timer=accel.make_timer(device).name,
+        dispatch_us=dispatch,
+        timing_floor_us=floor,
+        bandwidth_gbs=bandwidth,
+        launch_floor_us=launch,
+        matmul_peak_tflops=peak,
+    )
 
 
-def _measure_dispatch(device: str, sync: Callable[[], None]) -> Optional[float]:
-    """apply()'s cost over calling the same kernel directly, or None if unmeasurable.
+def _backend(device: str):
+    import torch
+
+    return torch.xpu if device.startswith("xpu") else torch.cuda
+
+
+def measure_launch_floor_us(device: str) -> Optional[float]:
+    """What one launch of the smallest possible kernel costs inside a batch, or None.
+
+    A one-element elementwise op, hundreds of times back-to-back, host-timed around the
+    synced batch: per launch this is the larger of what the host takes to submit one and
+    what the device takes to run one, which is exactly the floor no per-call time through
+    this stack can go under. Warm-up and acceptance are :func:`_settled_device_us`'s.
+    """
+    import torch
+
+    backend = _backend(device)
+    x = torch.randn(1, dtype=torch.bfloat16, device=device)
+    out = torch.empty_like(x)
+    return _settled_device_us(
+        lambda: torch.mul(x, 1.0001, out=out), lambda: backend.synchronize(), calls=500
+    )
+
+
+def measure_matmul_peak_tflops(
+    device: str, dtypes: Optional[Sequence[str]] = None
+) -> Dict[str, Optional[float]]:
+    """Achieved TFLOP/s of a :data:`MATMUL_PROBE_SIDE` square matmul per native dtype.
+
+    Each dtype is timed under sustained load and accepted only once its regions agree
+    (:func:`_settled_device_us`); a dtype that never settles maps to ``None`` rather than to
+    whatever the clock ramp produced. Dtypes the part only emulates are not probed: a
+    throughput measured on an emulation is a property of the emulation.
+    """
+    import torch
+
+    from flashinfer_bench.device import get_accelerator
+
+    caps = get_accelerator(device).capabilities(device)
+    backend = _backend(device)
+    n = MATMUL_PROBE_SIDE
+    result: Dict[str, Optional[float]] = {}
+    for name in dtypes or MATMUL_DTYPES:
+        if not caps.is_native_dtype(name):
+            continue
+        dtype = getattr(torch, name)
+        a = torch.randn(n, n, dtype=dtype, device=device)
+        b = torch.randn(n, n, dtype=dtype, device=device)
+        c = torch.empty(n, n, dtype=dtype, device=device)
+
+        def _mm(a=a, b=b, c=c):
+            return torch.matmul(a, b, out=c)
+
+        us = _settled_device_us(_mm, lambda: backend.synchronize(), calls=3)
+        result[name] = None if us is None else (2.0 * n**3) / (us * 1e-6) / 1e12
+        del a, b, c
+    return result
+
+
+def _measure_strided_read_gbs(device: str, run_bytes: int, stride_bytes: int) -> Optional[float]:
+    import torch
+
+    backend = _backend(device)
+    itemsize = 2
+    buf = torch.randn(PATTERN_BUFFER_BYTES // itemsize, dtype=torch.float16, device=device)
+    stride_e, run_e = stride_bytes // itemsize, run_bytes // itemsize
+    rows = buf.numel() // stride_e
+    view = buf[: rows * stride_e].view(rows, stride_e)[:, :run_e]
+    us = _settled_device_us(lambda: view.sum(), lambda: backend.synchronize(), calls=10)
+    if us is None:
+        return None
+    return (rows * run_bytes) / (us * 1e-6) / 1e9
+
+
+def strided_read_bandwidth_gbs(
+    device: str, run_bytes: int, stride_bytes: int, refresh: bool = False
+) -> Optional[float]:
+    """Bandwidth, in GB/s of *useful* bytes, of reading `run_bytes` out of every `stride_bytes`.
+
+    The ``bw_pattern`` of the regime classification: ``bandwidth_gbs`` is what a contiguous
+    stream reaches, and a kernel obliged to touch memory in runs shorter than that -- a
+    column of a row-major matrix, one head out of an interleaved row, a gathered table --
+    reaches less. ``run_bytes == stride_bytes`` is the contiguous case and should agree with
+    ``bandwidth_gbs``. Measured once per (part, timer, pattern) and cached in a sidecar of
+    the calibration record; ``None`` when it did not settle, and never cached as such.
+    """
+    itemsize = 2
+    if run_bytes <= 0 or stride_bytes < run_bytes:
+        raise ValueError(f"need 0 < run_bytes <= stride_bytes, got {run_bytes}:{stride_bytes}")
+    if run_bytes % itemsize or stride_bytes % itemsize:
+        raise ValueError(f"run and stride must be multiples of {itemsize} bytes")
+    if stride_bytes > PATTERN_BUFFER_BYTES:
+        raise ValueError(f"stride {stride_bytes} exceeds the probe buffer ({PATTERN_BUFFER_BYTES})")
+    try:
+        from flashinfer_bench.device import get_accelerator
+
+        accel = get_accelerator(device)
+        path = _pattern_cache_path(accel.canonical_id(device), accel.make_timer(device).name)
+    except Exception:
+        return None
+    key = f"{run_bytes}:{stride_bytes}"
+    table: Dict[str, float] = {}
+    if path.exists():
+        try:
+            table = json.loads(path.read_text())
+        except Exception:
+            table = {}
+    if not refresh and key in table:
+        return table[key]
+    try:
+        gbs = _measure_strided_read_gbs(device, run_bytes, stride_bytes)
+    except Exception as exc:
+        logger.debug("strided read %s failed on %s: %s", key, device, exc)
+        return None
+    if gbs is None:
+        return None
+    table[key] = gbs
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(table, indent=2) + "\n")
+    except OSError:
+        pass
+    return gbs
+
+
+_MISS = object()
+"""What the probe's fallback returns, so a miss cannot be confused with a kernel's output."""
+
+
+def measure_dispatch_us(device: str, dataset: Optional[str] = None) -> Optional[float]:
+    """What apply() adds per call over invoking the kernel it chose, or None if unmeasurable.
+
+    Host-side by construction. The kernel that apply() dispatches to is replaced by a no-op
+    for the duration, so the measurement compares two Python paths that end at the same
+    place -- ``apply(name, kwargs=...)`` against ``runnable(*args)``, the call the benchmark
+    timed when it produced the solution's trace -- and the device does no work at all.
+
+    It used to run the real kernel in both arms. That made a few microseconds of host cost
+    depend on the GPU's power state: an idle Arc B580 gates its clock to 400 MHz within
+    50 ms of the queue draining and takes ~150 ms of load to come back, and at 400 MHz the
+    probe kernel outlasts the host, both arms become device-bound and the difference reads
+    zero or negative. The dataset load between the previous measurement and this one is
+    enough of a gap, so the same code returned 6 us on one call and nothing on the next.
+    A quantity that does not involve the device should not be measured with it.
 
     Returns None rather than a guess: a deploy gate set from an invented number is worse
-    than one left off, because it silently refuses or admits the wrong kernels.
+    than one left off, because it silently admits or refuses the wrong kernels.
     """
     import torch
 
     try:
-        import vllm_xpu_kernels._C  # noqa: F401
-
-        from flashinfer_bench.apply import ApplyConfig, apply, enable_apply
+        from flashinfer_bench.apply import ApplyConfig, apply
         from flashinfer_bench.apply.runtime import ApplyRuntime
-    except Exception:
+        from flashinfer_bench.data import TraceSet
+    except Exception as exc:
+        logger.debug("dispatch calibration unavailable: %s", exc)
         return None
 
-    dataset = os.environ.get("FIB_DATASET_PATH", "tmp/flashinfer-trace")
+    dataset = dataset or os.environ.get("FIB_DATASET_PATH") or "tmp/flashinfer-trace"
     if not pathlib.Path(dataset).exists():
+        logger.debug("dispatch calibration unavailable: no dataset at %s", dataset)
         return None
 
-    hidden = 1024
-    x = torch.randn(64, hidden, dtype=torch.bfloat16, device=device)
-    w = torch.randn(hidden, dtype=torch.bfloat16, device=device)
-    out = torch.empty_like(x)
+    trace_set = TraceSet.from_path(dataset)
+    # The probe is whichever plain RMSNorm definition in the dataset apply() can dispatch on
+    # this machine. Nothing names a width: a dataset that lacks one width still calibrates
+    # on another.
+    probes = _rmsnorm_probes(trace_set)
+    if not probes:
+        logger.debug("dispatch calibration unavailable: no RMSNorm definition with a solution")
+        return None
 
-    ApplyRuntime._stack.clear()
-    runtime = enable_apply(
-        dataset, ApplyConfig(max_atol=0.02, max_rtol=0.02, on_miss_policy="use_def_best")
+    runtime = ApplyRuntime(
+        trace_set, ApplyConfig(max_atol=0.02, max_rtol=0.02, on_miss_policy="use_def_best")
     )
+    runtime.start()
     try:
-        name = f"rmsnorm_h{hidden}"
-        if apply(name, kwargs={"hidden_states": x, "weight": w}, fallback=lambda **k: None) is None:
-            return None
-        direct = _median_us(lambda: torch.ops._C.rms_norm(out, x, w, 1e-6), sync, 300)
-        through = _median_us(
-            lambda: apply(
-                name, kwargs={"hidden_states": x, "weight": w}, fallback=lambda **k: None
-            ),
-            sync,
-            300,
-        )
-        return max(0.0, through - direct)
+        for name, hidden, dtype in probes:
+            x = torch.randn(64, hidden, dtype=dtype, device=device)
+            w = torch.randn(hidden, dtype=dtype, device=device)
+            kwargs = {"hidden_states": x, "weight": w}
+
+            def _through(name=name, kwargs=kwargs):
+                return apply(name, kwargs=kwargs, fallback=lambda **k: _MISS)
+
+            runnable = _dispatched_runnable(runtime, _through)
+            if runnable is None:
+                continue
+            with _kernel_stubbed(runnable, (x, w)) as bench_call:
+                if _through() is _MISS:
+                    continue
+                delta = _paired_delta_us(_through, bench_call, calls=200)
+            if delta is not None:
+                logger.debug("dispatch cost %.2fus via %s on cpu %s", delta, name, _current_cpu())
+                return delta
+        return None
     except Exception as exc:
         logger.debug("dispatch calibration unavailable: %s", exc)
         return None
@@ -153,11 +540,90 @@ def _measure_dispatch(device: str, sync: Callable[[], None]) -> Optional[float]:
         runtime.stop()
 
 
+def _dispatched_runnable(runtime, call: Callable[[], object]):
+    """The Runnable `call` dispatches to through `runtime`, or None if it fell back.
+
+    Observed from the outside -- the runtime's build step is wrapped for one call and then
+    restored -- so that which solution the table selects, and through which builder, is
+    exactly what a serving process would get.
+    """
+    seen = []
+    original = runtime._try_build
+
+    def observe(definition, solution):
+        runnable = original(definition, solution)
+        seen.append(runnable)
+        return runnable
+
+    runtime._try_build = observe
+    try:
+        if call() is _MISS:
+            return None
+    finally:
+        del runtime._try_build
+    return next((r for r in reversed(seen) if r is not None), None)
+
+
+@contextlib.contextmanager
+def _kernel_stubbed(runnable, inputs: Tuple[object, ...]) -> Iterator[Callable[[], object]]:
+    """Replace `runnable`'s kernel with a no-op for the block; yield the call the bench timed.
+
+    The benchmark timed ``runnable(*inputs)`` for a value-returning solution and
+    ``runnable(*inputs, *outputs)`` with pre-allocated outputs for a destination-passing
+    one, so that is what apply() is measured against; anything apply() does beyond it --
+    including allocating those outputs -- is cost the trace does not contain. The stub
+    returns what the real kernel returned so the Runnable's return handling is unchanged.
+    The real kernel is put back however the block exits: the build cache is process-wide,
+    and a serving process runs calibration before it serves.
+    """
+    original = runnable._callable
+    if runnable.metadata.destination_passing_style:
+        args = (*inputs, *runnable._allocate_output_tensors(*inputs))
+        result = None
+    else:
+        args = tuple(inputs)
+        result = original(*args)
+    runnable._callable = lambda *a: result
+    try:
+        yield lambda: runnable(*args)
+    finally:
+        runnable._callable = original
+
+
+def _current_cpu() -> Optional[int]:
+    """Which CPU this thread is on, for the log: a hybrid part's core classes differ by half."""
+    try:
+        return int(pathlib.Path("/proc/self/stat").read_text().rsplit(")", 1)[1].split()[36])
+    except Exception:
+        return None
+
+
+def _rmsnorm_probes(trace_set) -> List[Tuple[str, int, torch.dtype]]:
+    """(definition, hidden, dtype) for every plain RMSNorm that has a solution, smallest first.
+
+    Read from the dataset rather than named: the probe only has to be *a* definition apply()
+    can dispatch here, and which widths exist is a property of the dataset in hand. Smallest
+    first only because the probe's tensors are cheapest to make; the kernel does not run.
+    """
+    probes = []
+    for name, definition in trace_set.definitions.items():
+        if definition.op_type != "rmsnorm" or set(definition.inputs) != {"hidden_states", "weight"}:
+            continue
+        hidden = definition.const_axes.get("hidden_size")
+        if not hidden or not trace_set.solutions.get(name):
+            continue
+        probes.append((name, int(hidden), definition.torch_input_dtypes[0]))
+    return sorted(probes, key=lambda p: p[1])
+
+
 def get(device: Optional[str] = None, refresh: bool = False) -> Optional[Calibration]:
     """Cached calibration for `device`, measuring once if needed.
 
     Returns None when it cannot be measured here, so a caller can fall back to a documented
-    behaviour instead of acting on a fabricated threshold.
+    behaviour instead of acting on a fabricated threshold. A record with any field still
+    None (``dispatch_us``, ``launch_floor_us``, a dtype's matrix throughput) is returned but
+    not cached: an unmeasured cost is not a result to remember, and the next process gets
+    another attempt.
     """
     try:
         from flashinfer_bench.device import default_device_type, get_accelerator
@@ -180,6 +646,8 @@ def get(device: Optional[str] = None, refresh: bool = False) -> Optional[Calibra
     except Exception as exc:
         logger.debug("calibration failed on %s: %s", device, exc)
         return None
+    if not result.complete:
+        return result
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(asdict(result), indent=2) + "\n")

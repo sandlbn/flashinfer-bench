@@ -8,8 +8,10 @@ inputs. The timing arithmetic itself is a median; the gates are where a loop goe
 import importlib.util
 import json
 import logging
+import math
 import os
 import pathlib
+import statistics
 import subprocess
 import sys
 import textwrap
@@ -71,21 +73,65 @@ INPLACE = textwrap.dedent(
 )
 
 
+# Does WORK matmuls per call; one file per amount of work makes an unambiguous slow or fast arm.
+# Single-threaded: torch's default intra-op pool spans every core, and on a shared box a
+# descheduled pool thread stalls a whole round a hundredfold, which is contention, not the
+# arm being timed.
+WORK = textwrap.dedent(
+    """
+    import torch
+    import torch.nn as nn
+
+    torch.set_num_threads(1)
+
+
+    class Model(nn.Module):
+        def forward(self, x, w):
+            out = x @ w
+            for _ in range(WORK - 1):
+                out = out + (x @ w) * 0.0
+            return out
+
+
+    def get_inputs():
+        return [torch.randn(96, 96), torch.randn(96, 96)]
+
+
+    def get_init_inputs():
+        return []
+    """
+)
+
+
 def _write(tmp_path, name, text):
     path = tmp_path / name
     path.write_text(text)
     return str(path)
 
 
-def _result(speedup, spread):
+def _result(speedup, spread, kind=kt.PAIRED_SPREAD_KIND):
     return {
         "correctness": "pass",
         "speedup": speedup,
         "spread": spread,
+        "spread_kind": kind,
         "max_abs_error": 0.0,
         "baseline_us": 100.0,
         "candidate_us": 100.0 / speedup,
     }
+
+
+def _old_rule(base, cand):
+    """The retired statistic: ratio of medians against the candidate's own range.
+
+    Kept here only as the thing the new rule is shown not to do.
+    """
+    base_us, cand_us = statistics.median(base), statistics.median(cand)
+    speedup = base_us / cand_us
+    spread = (max(cand) - min(cand)) / cand_us
+    if abs(speedup - 1) < spread:
+        return "NOISE", spread
+    return ("WIN" if speedup > 1 else "LOSS"), spread
 
 
 class TestVerdict:
@@ -102,6 +148,170 @@ class TestVerdict:
     def test_gross_regression_is_never_noise(self):
         """The signed comparison once reported a 5x slowdown as inside noise."""
         assert kt._verdict(_result(0.20, 0.50)) == "LOSS"
+
+    def test_a_slowdown_is_judged_as_hard_as_the_same_speedup(self):
+        """`speedup - 1` squeezes every regression into (-1, 0); the factor does not."""
+        assert kt._verdict(_result(1.5, 0.20)) == "WIN"
+        assert kt._verdict(_result(1 / 1.5, 0.20)) == "LOSS"
+
+    def test_the_threshold_is_noise_sigmas_of_the_spread(self):
+        """One sigma let identical arms through one time in seven; the gate asks for more."""
+        just_under = (1 + 0.10) ** kt.NOISE_SIGMAS * 0.999
+        just_over = (1 + 0.10) ** kt.NOISE_SIGMAS * 1.001
+        assert kt._verdict(_result(just_under, 0.10)) == "NOISE"
+        assert kt._verdict(_result(just_over, 0.10)) == "WIN"
+        assert kt._verdict(_result(1 / just_over, 0.10)) == "LOSS"
+
+    def test_a_result_scored_under_the_one_arm_rule_is_never_a_win(self):
+        """Stored series predate the paired statistic; their spread is not the verdict's."""
+        assert kt._verdict(_result(3.0, 0.01, kind=None)) == "NOISE"
+        legacy = _result(3.0, 0.01)
+        del legacy["spread_kind"]
+        assert kt._verdict(legacy) == "NOISE"
+
+
+class TestPairedSpread:
+    """The verdict rests on the scatter of the *difference* between the arms."""
+
+    STABLE = [100.0, 100.4, 99.6, 100.2, 99.8, 100.1, 99.9]
+    NOISY = [60.0, 140.0, 55.0, 150.0, 110.0, 45.0, 160.0]  # median 110, scatter +-50%
+
+    def test_noisy_baseline_against_stable_candidate_is_noise(self):
+        """The observed hole: only the candidate's scatter was read, and it was tiny."""
+        old_verdict, old_spread = _old_rule(self.NOISY, self.STABLE)
+        assert old_verdict == "WIN" and old_spread < 0.01
+        result = kt._summarize(self.NOISY, self.STABLE)
+        assert kt._verdict(result) == "NOISE"
+        assert result["spread"] > abs(result["speedup"] - 1)
+
+    def test_reported_spread_is_the_paired_one_not_either_arm(self):
+        result = kt._summarize(self.NOISY, self.STABLE)
+        assert result["spread_kind"] == kt.PAIRED_SPREAD_KIND
+        assert result["candidate_spread"] < 0.01
+        assert result["baseline_spread"] > 0.2
+        assert result["spread"] > result["candidate_spread"]
+        assert result["pairs"] == 7
+
+    def test_speedup_is_the_median_of_the_per_round_ratios(self):
+        base = [100.0, 200.0, 300.0, 400.0, 500.0]
+        cand = [b / 2 for b in base]
+        result = kt._summarize(base, cand)
+        assert result["speedup"] == pytest.approx(2.0)
+        assert result["spread"] == pytest.approx(0.0)
+        assert kt._verdict(result) == "WIN"
+
+    JITTER = [1.0, 1.04, 0.97, 1.03, 0.98, 1.05, 0.96]
+
+    def test_regression_outside_the_paired_scatter_is_a_loss(self):
+        cand = [3 * b * j for b, j in zip(self.STABLE, self.JITTER)]
+        result = kt._summarize(self.STABLE, cand)
+        assert 0 < result["spread"] < 0.1
+        assert kt._verdict(result) == "LOSS"
+        assert result["speedup"] == pytest.approx(1 / 3, rel=0.05)
+
+    def test_gain_outside_the_paired_scatter_is_a_win(self):
+        cand = [b / 3 * j for b, j in zip(self.STABLE, self.JITTER)]
+        result = kt._summarize(self.STABLE, cand)
+        assert kt._verdict(result) == "WIN"
+        assert result["speedup"] == pytest.approx(3.0, rel=0.05)
+
+    def test_noise_floor_is_what_the_verdict_compares_against(self):
+        result = kt._summarize(self.STABLE, [b * j for b, j in zip(self.STABLE, self.JITTER)])
+        assert result["noise_floor"] == pytest.approx((1 + result["spread"]) ** kt.NOISE_SIGMAS - 1)
+        assert kt._verdict(result) == "NOISE"
+
+    def test_gross_regression_under_heavy_scatter_is_still_a_loss(self):
+        """A noisy pair must not excuse a 5x slowdown; that is what the rule is for."""
+        cand = [5 * b for b in self.NOISY]
+        jitter = [1.0, 1.4, 0.7, 1.3, 0.8, 1.5, 0.6]
+        base = [b * j for b, j in zip(self.NOISY, jitter)]
+        result = kt._summarize(base, cand)
+        assert result["spread"] > 0.2
+        assert kt._verdict(result) == "LOSS"
+
+    def test_identical_arms_are_noise_even_when_every_round_is_equal(self):
+        result = kt._summarize(self.STABLE, self.STABLE)
+        assert result["speedup"] == 1.0 and result["spread"] == 0.0
+        assert kt._verdict(result) == "NOISE"
+
+    def test_too_few_or_unpaired_rounds_are_refused(self):
+        with pytest.raises(ValueError, match="paired round"):
+            kt._summarize([1.0, 2.0, 3.0, 4.0], [1.0, 2.0, 3.0, 4.0])
+        with pytest.raises(ValueError, match="not paired"):
+            kt._summarize([1.0] * 6, [1.0] * 5)
+
+    def test_cli_refuses_too_few_rounds(self):
+        parser = kt.build_parser()
+        with pytest.raises(SystemExit):
+            parser.parse_args(["benchmark", "s", "c.py", "--rounds", "4"])
+        floor = kt.MIN_PAIRED_ROUNDS
+        assert parser.parse_args(["benchmark", "s", "c.py", "--rounds", str(floor)]).rounds == floor
+        assert parser.parse_args(["benchmark", "s", "c.py"]).rounds > floor
+
+
+class TestRoundsStability:
+    """The spread estimates one quantity whatever `--rounds` is; a range did not.
+
+    Samples are the quantiles of a fixed log-normal scatter (sigma 5%) around a fixed true
+    gain, so the only thing that changes between cases is how many rounds were taken.
+    """
+
+    SIGMA, GAIN = 0.05, 0.15
+    COUNTS = (5, 7, 15, 31, 101)
+
+    def _arms(self, n):
+        z = [statistics.NormalDist().inv_cdf((k + 0.5) / n) for k in range(n)]
+        base = [100.0] * n
+        cand = [100.0 * math.exp(-(self.GAIN + self.SIGMA * zk)) for zk in z]
+        return base, cand
+
+    def test_paired_spread_does_not_grow_with_rounds(self):
+        spreads = [kt._summarize(*self._arms(n))["spread"] for n in self.COUNTS]
+        true = math.exp(self.SIGMA) - 1
+        # A 5- or 7-point MAD is granular, so a small count lands within a quarter of the
+        # true sigma rather than on it; what it never does is drift with the count.
+        assert all(abs(s / true - 1) < 0.25 for s in spreads), spreads
+        assert spreads[-1] == pytest.approx(true, rel=0.05)
+        assert spreads != sorted(spreads)
+
+    def test_verdict_holds_across_rounds_where_the_range_rule_flipped(self):
+        new = [kt._verdict(kt._summarize(*self._arms(n))) for n in self.COUNTS]
+        assert new == ["WIN"] * len(self.COUNTS)
+        old_verdicts, old_spreads = zip(*(_old_rule(*self._arms(n)) for n in self.COUNTS))
+        assert old_spreads == tuple(sorted(old_spreads)) and old_spreads[-1] > 1.5 * old_spreads[0]
+        assert len(set(old_verdicts)) > 1
+
+
+class TestBenchmarkVerdicts:
+    """End to end on CPU: identical arms are NOISE, 4x the work is LOSS, a quarter is WIN."""
+
+    def test_identical_arms_are_noise(self, tmp_path):
+        base = _write(tmp_path, "base.py", WORK.replace("WORK", "1"))
+        cand = _write(tmp_path, "cand.py", WORK.replace("WORK", "1"))
+        result = kt.benchmark(base, cand, rounds=21, calls=10, atol=1e-3, rtol=1e-3)
+        assert kt._verdict(result) == "NOISE", result
+
+    def test_a_slower_candidate_is_a_loss(self, tmp_path):
+        base = _write(tmp_path, "base.py", WORK.replace("WORK", "1"))
+        cand = _write(tmp_path, "cand.py", WORK.replace("WORK", "4"))
+        result = kt.benchmark(base, cand, rounds=7, calls=10, atol=1e-3, rtol=1e-3)
+        assert kt._verdict(result) == "LOSS", result
+
+    def test_a_faster_candidate_is_a_win(self, tmp_path):
+        base = _write(tmp_path, "base.py", WORK.replace("WORK", "4"))
+        cand = _write(tmp_path, "cand.py", WORK.replace("WORK", "1"))
+        result = kt.benchmark(base, cand, rounds=7, calls=10, atol=1e-3, rtol=1e-3)
+        assert kt._verdict(result) == "WIN", result
+
+    def test_contract_reports_the_spread_the_verdict_used(self, tmp_path, capsys):
+        base = _write(tmp_path, "base.py", WORK.replace("WORK", "1"))
+        cand = _write(tmp_path, "cand.py", WORK.replace("WORK", "1"))
+        result = kt.benchmark(base, cand, rounds=5, calls=5, atol=1e-3, rtol=1e-3)
+        kt._report_result(result, "unknown")
+        out = capsys.readouterr().out
+        assert f"SPREAD_PCT: {result['spread'] * 100:.1f}" in out
+        assert "BASELINE_SPREAD_PCT:" in out and "CANDIDATE_SPREAD_PCT:" in out
+        assert f"VERDICT: {kt._verdict(result)}" in out
 
 
 class TestFinalize:
@@ -262,7 +472,7 @@ class TestBenchmarkResult:
     def test_passing_result_carries_build_log(self, tmp_path):
         base = _write(tmp_path, "base.py", HARNESS)
         cand = _write(tmp_path, "cand.py", HARNESS)
-        result = kt.benchmark(base, cand, rounds=1, calls=2, atol=1e-3, rtol=1e-3)
+        result = kt.benchmark(base, cand, rounds=5, calls=2, atol=1e-3, rtol=1e-3)
         assert result["correctness"] == "pass"
         assert "build_log" in result and isinstance(result["build_log"], str)
         assert kt._spill_state(result["build_log"]) == "unknown"
@@ -270,7 +480,7 @@ class TestBenchmarkResult:
     def test_failing_result_carries_build_log_too(self, tmp_path):
         base = _write(tmp_path, "base.py", INPLACE.replace("SHIFT", "0.0"))
         cand = _write(tmp_path, "cand.py", INPLACE.replace("SHIFT", "100.0"))
-        result = kt.benchmark(base, cand, rounds=1, calls=2, atol=1e-3, rtol=1e-3)
+        result = kt.benchmark(base, cand, rounds=5, calls=2, atol=1e-3, rtol=1e-3)
         assert result["correctness"] == "fail"
         assert "argument 0 differs" in result["reason"]
         assert "build_log" in result
@@ -284,7 +494,7 @@ class TestBenchmarkResult:
         )
         log = []
         with pytest.raises(RuntimeError):
-            kt.benchmark(base, cand, 1, 1, 1e-3, 1e-3, build_log=log)
+            kt.benchmark(base, cand, 5, 1, 1e-3, 1e-3, build_log=log)
         assert kt._spill_from("\n".join(log)) == 9
 
 
@@ -317,16 +527,16 @@ class TestCompare:
         assert kt._compare(a, b, 1e-3, 1e-3)[0] == "candidate returned a different type"
 
 
-def _run_ab(tmp_path, harness, *extra):
+def _run_ab(tmp_path, harness, *extra, rounds=10):
     cmd = [
         sys.executable,
         str(SCRIPT),
         "ab",
         harness,
         "--rounds",
-        "1",
+        str(rounds),
         "--inner-rounds",
-        "1",
+        "2",
         "--calls",
         "3",
         "--json",
@@ -346,7 +556,7 @@ class TestAb:
             "BUILD: OK",
             "SPILLS: unknown",
             "INPUTS: IDENTICAL",
-            "PROCESSES: 2",
+            "PROCESSES: 20",
             "CORRECT: OK",
         ):
             assert key in out, out
@@ -355,7 +565,47 @@ class TestAb:
         recorded = json.loads((tmp_path / "ab.json").read_text())
         assert recorded["arm_b"]["env"] == {"KT_TEST_EXTRA": "2"}
         assert recorded["arm_a"]["env"] == {}
-        assert recorded["processes"] == 2
+        assert recorded["processes"] == 20
+        # One flipped pair of rounds is one observation, judged by the rule `benchmark` uses.
+        assert recorded["spread_kind"] == kt.PAIRED_SPREAD_KIND
+        assert recorded["pairs"] == 5
+        assert len(recorded["round_medians"]["a"]) == 10
+        assert f"NOISE_FLOOR_PCT: {recorded['noise_floor'] * 100:.1f}" in out
+        assert f"SPREAD_PCT: {recorded['spread'] * 100:.1f}" in out
+        assert recorded["verdict"] == kt._verdict(recorded)
+
+    def test_odd_or_too_few_rounds_are_refused_before_any_launch(self, tmp_path):
+        harness = _write(tmp_path, "h.py", HARNESS)
+        for rounds in ("8", "11"):
+            cmd = [sys.executable, str(SCRIPT), "ab", harness, "--rounds", rounds]
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+            assert proc.returncode != 0
+            assert "even and at least 10" in proc.stderr, proc.stderr
+            assert "BUILD" not in proc.stdout
+
+    def test_a_flipped_pair_of_rounds_cancels_the_launch_order(self):
+        """Whichever arm launches second reads 30% slower; a real 1.2x sits underneath.
+
+        Paired round by round, the order effect lands in the spread and the gain is NOISE;
+        paired as flipped pairs it cancels and the gain is measured.
+        """
+        rounds = 10
+        medians = {"a": [], "b": []}
+        for r in range(rounds):
+            a, b = 120.0, 100.0
+            if r % 2 == 0:
+                b *= 1.3
+            else:
+                a *= 1.3
+            medians["a"].append(a)
+            medians["b"].append(b)
+        assert kt._verdict(kt._summarize(medians["a"], medians["b"])) == "NOISE"
+        obs = kt._ab_observations(medians)
+        result = kt._summarize(obs["a"], obs["b"])
+        assert result["pairs"] == rounds // 2
+        assert result["speedup"] == pytest.approx(1.2)
+        assert result["spread"] == pytest.approx(0.0)
+        assert kt._verdict(result) == "WIN"
 
     def test_a_wrong_arm_fails_correctness_before_any_timing(self, tmp_path):
         harness = _write(tmp_path, "h.py", HARNESS)
@@ -364,6 +614,8 @@ class TestAb:
         out = proc.stdout
         assert "CORRECT: FAILED" in out and "VERDICT: INCORRECT" in out, out
         assert "SPEEDUP:" not in out
+        # Refused after the first round, not after every launch was spent.
+        assert "PROCESSES:" not in out
 
     def test_an_arm_that_cannot_load_is_a_build_failure_naming_the_arm(self, tmp_path):
         harness = _write(tmp_path, "h.py", HARNESS)

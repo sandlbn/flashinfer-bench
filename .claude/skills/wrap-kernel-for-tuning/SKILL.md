@@ -90,12 +90,21 @@ where the per-part numbers (substitution cost, timer floor, bandwidth) come from
 strategy that produced it, so a regression branches back to the best node.
 
 ```bash
-python scripts/kernel_trials.py init      <name> <harness.py>
+python scripts/kernel_trials.py init      <name> <harness.py> [--bound <dir>/bound.json --mechanism <m>]
 python scripts/kernel_trials.py save      <name> <candidate.py> --parent t2 --strategy "..."
 python scripts/kernel_trials.py benchmark <name> <candidate.py> --trial t3
 python scripts/kernel_trials.py status    <name>      # the tree, and which node to branch from
 python scripts/kernel_trials.py finalize  <name> <output.py>
 ```
+
+When the harness came out of the pipeline, open the series from its routing: `--bound` and
+`--mechanism` tie it to the ACCEPT row `scripts/bound_candidates.py` wrote for this
+harness's candidate. `benchmark` re-checks that row every time. A pair the routing rejected,
+or a routing whose `discovered.json` has been re-run since, is refused in the contract
+(`ROUTING: REJECTED|STALE`, the `GATE` and `ARITHMETIC` that decided, `VERDICT:
+ROUTING_REJECTED|STALE_INPUT`) before anything is timed -- a number for a pair the routing
+priced out would be read as evidence about the pipeline. Without the flags the contract
+says `ROUTING: UNCHECKED`.
 
 `benchmark` is the only sanctioned way to get a number. It gates timing on correctness,
 warms both arms before timing either, times in interleaved rounds with the median reported,

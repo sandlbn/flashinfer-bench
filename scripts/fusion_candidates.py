@@ -44,11 +44,15 @@ _VOCABULARY = {
 _GEMM_HINTS = ("linear", "matmul", "mm", "addmm", "bmm", "scaled_mm")
 
 
-def presets(xe_fuse: pathlib.Path) -> List[Tuple[str, str]]:
-    """`(name, description)` straight from the generator, so the two cannot drift apart."""
+def presets(xe_fuse: pathlib.Path) -> Optional[List[Tuple[str, str]]]:
+    """`(name, description)` straight from the generator, so the two cannot drift apart.
+
+    None when the generator is not there or did not run: that is "unknown", which no caller
+    may read as "no preset matches".
+    """
     gen = xe_fuse / "autotune" / "generate_kernel.py"
     if not gen.is_file():
-        return []
+        return None
     try:
         r = subprocess.run(
             [sys.executable, str(gen), "--list-presets"],
@@ -57,7 +61,9 @@ def presets(xe_fuse: pathlib.Path) -> List[Tuple[str, str]]:
             timeout=120,
         )
     except (OSError, subprocess.TimeoutExpired):
-        return []
+        return None
+    if r.returncode != 0:
+        return None
     out = []
     for line in r.stdout.splitlines():
         m = re.match(r"^\s{2,}(\w+)\s{2,}(\S.*)$", line)
@@ -93,16 +99,32 @@ def main() -> None:
     ap.add_argument("--xe-fuse", default="tmp/Xe-Fuse")
     args = ap.parse_args()
 
-    data = json.loads(pathlib.Path(args.report).read_text())
+    report = pathlib.Path(args.report)
+    if not report.is_file():
+        raise SystemExit(
+            f"no discovery report at {report}; scripts/harness_from_model.py writes it."
+        )
+    data = json.loads(report.read_text())
     edges = data.get("edges") or []
+    # Each of these is a missing input, not an answer. Exiting 0 with a sentence would let a
+    # driver read "no fusion proposed" where the truth is "nothing was examined".
     if not edges:
-        print("No edges recorded. Re-run discovery: fusion cannot be judged from op counts.")
-        return
+        raise SystemExit(
+            f"{report} records no edges, so no fusion can be judged: fusion is a property of "
+            "the producer->consumer edge, not of either op's count. Re-run discovery."
+        )
 
     pres = presets(pathlib.Path(args.xe_fuse))
+    if pres is None:
+        raise SystemExit(
+            f"Xe-Fuse is not readable at {args.xe_fuse} (no autotune/generate_kernel.py, or "
+            "it did not run); clone it to propose epilogue presets."
+        )
     if not pres:
-        print(f"Xe-Fuse not readable at {args.xe_fuse}; clone it to propose epilogue presets.")
-        return
+        raise SystemExit(
+            f"{args.xe_fuse}/autotune/generate_kernel.py --list-presets listed no presets; "
+            "nothing can be matched against."
+        )
 
     shares: Dict[str, float] = {
         op: v.get("share_pct", 0.0) for op, v in (data.get("op_share") or {}).items()

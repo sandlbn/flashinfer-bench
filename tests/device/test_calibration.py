@@ -65,14 +65,58 @@ class TestGetNeverFabricatesZero:
         monkeypatch.setenv("FIB_CACHE_PATH", str(tmp_path))
         return tmp_path / "calibration"
 
-    def _record(self, dispatch):
+    def _record(self, dispatch, launch=2.0, peak=None):
         return calibration.Calibration(
             hardware_id="CPU",
             timer="wall",
             dispatch_us=dispatch,
             timing_floor_us=1.0,
             bandwidth_gbs=1.0,
+            launch_floor_us=launch,
+            matmul_peak_tflops={"bfloat16": 10.0} if peak is None else peak,
         )
+
+    def test_unsettled_launch_floor_is_returned_as_none_and_not_cached(
+        self, cache_dir, monkeypatch
+    ):
+        monkeypatch.setattr(calibration, "measure", lambda device: self._record(5.0, launch=None))
+        result = calibration.get("cpu", refresh=True)
+        assert result.launch_floor_us is None and not result.complete
+        assert not cache_dir.exists() or not list(cache_dir.glob("*.json"))
+
+    def test_unsettled_matmul_peak_is_returned_as_none_and_not_cached(self, cache_dir, monkeypatch):
+        monkeypatch.setattr(
+            calibration, "measure", lambda device: self._record(5.0, peak={"bfloat16": None})
+        )
+        result = calibration.get("cpu", refresh=True)
+        assert result.matmul_peak_tflops == {"bfloat16": None} and not result.complete
+        assert not cache_dir.exists() or not list(cache_dir.glob("*.json"))
+
+    def test_new_fields_round_trip_through_the_cache(self, cache_dir, monkeypatch):
+        monkeypatch.setattr(
+            calibration,
+            "measure",
+            lambda device: self._record(5.0, launch=3.5, peak={"float16": 42.0}),
+        )
+        first = calibration.get("cpu", refresh=True)
+        monkeypatch.setattr(calibration, "measure", lambda device: pytest.fail("cache not used"))
+        again = calibration.get("cpu")
+        assert again == first
+        assert again.launch_floor_us == pytest.approx(3.5)
+        assert again.matmul_peak_tflops == {"float16": pytest.approx(42.0)}
+
+    def test_v2_records_lacking_the_new_fields_are_not_read(self, cache_dir, monkeypatch):
+        monkeypatch.setattr(calibration, "measure", lambda device: self._record(4.0))
+        result = calibration.get("cpu", refresh=True)
+        (path,) = cache_dir.glob("*.json")
+        stale = path.with_name(path.name.replace(f"v{calibration.CACHE_VERSION}-", "v2-"))
+        old = json.loads(path.read_text())
+        old.pop("launch_floor_us")
+        old.pop("matmul_peak_tflops")
+        stale.write_text(json.dumps(old))
+        path.unlink()
+        monkeypatch.setattr(calibration, "measure", lambda device: replace(result, dispatch_us=7.0))
+        assert calibration.get("cpu").dispatch_us == pytest.approx(7.0)
 
     def test_unmeasurable_dispatch_is_returned_as_none_and_not_cached(self, cache_dir, monkeypatch):
         monkeypatch.setattr(calibration, "measure", lambda device: self._record(None))
@@ -172,3 +216,70 @@ class TestReachingIntoTheRuntimeIsUndone:
         rt = Runtime()
         assert calibration._dispatched_runnable(rt, lambda: calibration._MISS) is None
         assert "_try_build" not in vars(rt)
+
+
+class TestSettledDeviceMeasurement:
+    """The warm-up is by time and ends when the window agrees; nothing is reported before."""
+
+    def _clock(self, per_call_sequence):
+        # A fake clock advanced by the fake kernel: each region's per-call cost comes from
+        # the sequence, so the ramp a gated clock produces can be scripted.
+        state = {"t": 0.0, "i": 0}
+        costs = list(per_call_sequence)
+
+        def fn():
+            i = min(state["i"], len(costs) - 1)
+            state["t"] += costs[i] * 1e-6
+            state["i"] += 1
+
+        return state, fn, (lambda: state["t"])
+
+    def test_ramping_clock_is_not_reported_until_it_settles(self):
+        # Ten calls per region: regions 1-3 ramp (idle clock), regions 4+ are steady at 5 us.
+        per_call = [50.0] * 11 + [30.0] * 10 + [15.0] * 10 + [5.0] * 500
+        state, fn, clock = self._clock(per_call)
+        us = calibration._settled_device_us(
+            fn, lambda: None, calls=10, window=5, budget_s=10.0, clock=clock
+        )
+        assert us == pytest.approx(5.0)
+        assert state["i"] > 1 + 3 * 10  # the three ramping regions were consumed, not reported
+
+    def test_never_settling_returns_none_not_the_last_sample(self):
+        import itertools
+
+        noisy = itertools.cycle([5.0, 9.0, 5.0, 12.0, 6.0, 11.0])
+        state = {"t": 0.0}
+
+        def fn():
+            state["t"] += next(noisy) * 1e-6
+
+        us = calibration._settled_device_us(
+            fn, lambda: None, calls=1, window=5, budget_s=0.001, clock=lambda: state["t"]
+        )
+        assert us is None
+
+    def test_steady_regions_report_their_median(self):
+        _, fn, clock = self._clock([7.0] * 1000)
+        assert calibration._settled_device_us(
+            fn, lambda: None, calls=10, window=5, budget_s=1.0, clock=clock
+        ) == pytest.approx(7.0)
+
+
+class TestStridedReadArguments:
+    def test_pattern_arguments_are_validated_before_any_device_is_touched(self):
+        with pytest.raises(ValueError):
+            calibration.strided_read_bandwidth_gbs("cpu", 0, 64)
+        with pytest.raises(ValueError):
+            calibration.strided_read_bandwidth_gbs("cpu", 128, 64)
+        with pytest.raises(ValueError):
+            calibration.strided_read_bandwidth_gbs("cpu", 3, 64)
+        with pytest.raises(ValueError):
+            calibration.strided_read_bandwidth_gbs("cpu", 64, calibration.PATTERN_BUFFER_BYTES * 2)
+
+    def test_complete_requires_every_field(self):
+        full = calibration.Calibration("p", "t", 1.0, 1.0, 1.0, 1.0, {"bfloat16": 1.0})
+        assert full.complete
+        assert not replace(full, dispatch_us=None).complete
+        assert not replace(full, launch_floor_us=None).complete
+        assert not replace(full, matmul_peak_tflops={"bfloat16": None}).complete
+        assert replace(full, matmul_peak_tflops={}).complete
