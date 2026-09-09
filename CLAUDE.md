@@ -233,6 +233,10 @@ Start with `.claude/skills/`. Each subdirectory contains a `SKILL.md` with full 
   source kernels from oneDNN / vllm-xpu-kernels / sgl-kernel-xpu / Xe-Fuse / SYCL, and
   diagnose and fix provider problems
 - **clone-repos**: Clone SGLang, FlashInfer, sgl-cookbook, and flashinfer-trace to `tmp/`
+- **wrap-kernel-for-tuning**: Make a kernel that lives inside a serving stack measurable and
+  optimizable *without extracting it* — an ai-bench Model that imports and calls the
+  production kernel, plus the three checks that prove the harness did not change the
+  problem
 - **discover-models**: Classify a model new to the project and record it in the onboarding
   manifest. First step of `/onboard-model`
 - **submit-onboarding-prs**: Open the per-definition pair of PRs that publishes an
