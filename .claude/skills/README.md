@@ -154,6 +154,17 @@ live procedure, unlike the plan documents in the next-but-one table.
 | `optimize-model-kernels/references/tools.md` | one entry per instrument: the question only it answers, how it is invoked, and the conditions under which its numbers can be trusted |
 | `optimize-model-kernels/references/gates.md` | the key contract a trial prints, how a loop branches on it, every gate and what enforces it, the conditions that close a row, and who decides what |
 
+Alongside those, each skill keeps references it alone owns. They are cited by name from
+their skill and are not shared:
+
+| File | What it owns |
+| --- | --- |
+| `optimize-model-kernels/references/deploy-provider-patch.md` | building a provider's kernels from source, selecting that build for one process, and the checks that prove the rebuilt kernel is the one running rather than the stock one |
+| `optimize-onednn/references/strategy-selection.md` | reading which implementation the library chose and why, and what a caller can change to reach a different one |
+| `optimize-onednn/references/illustrations.md` | worked findings for the library call, each naming the part, version and shape family it came from and the command that re-establishes it |
+| `optimize-onednn/references/quantized-matmul.md` | the quantized-matmul path, including a correctness trap established by probing |
+| `optimize-intel-kernels/references/xe-forge-knowledge.md` | an index into the vendor's kernel-optimization corpus: what to take from it, what to leave, and where its claims and this project's measurements disagree |
+
 ### Intel box: setup and profiling
 
 | Skill | Reach for it when | Hands to |

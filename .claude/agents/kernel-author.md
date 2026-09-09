@@ -54,7 +54,7 @@ Do each of these and stop on the row that fails, naming it.
 
 | Check | Command | Continue when |
 | --- | --- | --- |
-| Interpreter | `source .venv/bin/activate`; for a harness whose `_op()` raises `ImportError`, the message names the interpreter the harness was recorded under -- activate that one instead. Never `uv run` or `uv pip`: either replaces this box's XPU torch | the harness imports and `python <harness>` runs |
+| Interpreter | Run the series under the interpreter the routing measured with. `init` prints `ROUTING_TOOLCHAIN: DIFFERS` when this one is not it, and says the ceiling is unpriced here -- switch rather than continue, or the ceiling stopping condition is gone. A harness whose `_op()` raises `ImportError` names its interpreter in the message. Never `uv run` or `uv pip`: either replaces this box's XPU torch | `init` prints `routed:` with no toolchain warning, and `python <harness>` runs |
 | Routing still holds | `python scripts/kernel_trials.py init <series> <baseline.py> --bound <dir> --mechanism <mechanism>` (the series is opened here; see the next section for the baseline) | it prints `routed:` with the ceiling and worth. A block ending `VERDICT: ROUTING_REJECTED` or `VERDICT: STALE_INPUT` is final: report the `GATE` and `ARITHMETIC` it names and stop -- you do not measure a pair the routing priced out, and you do not re-run the routing to change the answer |
 | Device idle | `fuser -v /dev/dri/renderD* 2>&1 \| grep python` | no other compute process holds the render node; one benchmark at a time on this machine. A desktop session holds it permanently -- a compositor, a browser, an editor -- which is expected and is not a reason to stop; it is why a block occasionally returns an outlier round, so re-measure a surprising number before believing it |
 | Power profile | `powerprofilesctl get` | `performance` |
@@ -171,12 +171,14 @@ one the number belongs to.
 **Save and measure.**
 
 ```bash
-python scripts/kernel_trials.py save <series> <trial.py> --parent <best or the node the branch table names> --strategy "<the string above>"
+python scripts/kernel_trials.py save <series> <trial.py> --parent <the node this trial was derived from> --strategy "<the string above>"
 python scripts/kernel_trials.py benchmark <series> <trial.py> --trial <id>
 ```
 
 Always pass `--trial`; a result not recorded against a node is not in the tree. Leave
 `--atol` and `--rtol` at their defaults, always.
+
+`--parent` records where a trial came from, which is not always where the branch table sends you next. A trial that changes one lever off the untouched baseline has the baseline as its parent even when `best` is elsewhere; a trial that builds on a winner has that winner. The branch table decides which *hypothesis* to pursue next; the parent records which *file* this one was derived from, and the plateau is counted against `best` either way.
 
 **Branch on the keys.** The block prints `BUILD`, `SPILLS`, `ROUTING`, then `CORRECT`
 and either `REASON` or the timing keys, then `VERDICT`, then `DONE`. The verdict and the
@@ -231,7 +233,7 @@ fired is not finished.
 | Condition | Verdict | What you also record |
 | --- | --- | --- |
 | the saving per call of `best` is within a spread of `ceiling_us` | `CEILING` | the two numbers and the spread |
-| no hypothesis the regime admits under this mechanism is left untried, or the regime row says nothing can be authored | `EXHAUSTED` | the list of levers tried, from the ledger, and the regime row that closed it |
+| no hypothesis the regime admits under this mechanism is left untried, or the regime row says nothing can be authored | `EXHAUSTED` | the list of levers tried, from the ledger, and the regime row that closed it. A lever the bound's own arithmetic rules out counts as tried once you have written that arithmetic down -- spend a trial on it only when it is cheap and you want the prediction checked, and say which you did |
 | `K` non-wins from `best`, twice, across two regime rows | `PLATEAU` | `best`, its speedup and spread, the second regime row you tried |
 | the trial budget is spent | `BUDGET` | `status` output |
 | `init` or `benchmark` refused the routing | `REFUSED` | the `GATE` and `ARITHMETIC` keys verbatim |
@@ -241,10 +243,12 @@ Then, and only then:
 
 ```bash
 python scripts/kernel_trials.py status <series>
+python scripts/kernel_trials.py status <series>
+# then, only if every condition below holds:
 python scripts/kernel_trials.py finalize <series> tools/kernel-harness/optimized/<series>.py
 ```
 
-`finalize` copies `best` only when it is a measured `WIN`; when it prints
+Run `finalize` only when all three hold: `best` is a measured `WIN` in the tree, the control comparison was a `WIN` for your change, and `best` carries no non-zero `SPILLS`. The tree's own verdict is necessary and not sufficient -- a `WIN` whose control says the gain belongs to the call path is not your change, and promoting it would publish someone else's result under your name. Where the control does not clear, say so in the report, promote nothing, and record that `finalize` was not run and why. `finalize` copies `best` only when it is a measured `WIN`; when it prints
 `FINALIZE: REFUSED`, that is the result. Never pass `--no-require-win` to deliver a kernel,
 and never finalize when the control comparison was not a `WIN` for your change or when
 `best` carries a non-zero `SPILLS`. What the caller does with a finalized file -- a

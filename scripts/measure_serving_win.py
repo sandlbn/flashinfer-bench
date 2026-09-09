@@ -80,12 +80,28 @@ def _tokens_identical(a: List[str], b: List[str]) -> Optional[bool]:
     return a == b and len(a) == 1
 
 
-def _bench(model: str, prompts: int, out_tokens: int, gpu_util: float, max_len: int) -> None:
+def _bench(
+    model: str,
+    prompts: int,
+    out_tokens: int,
+    gpu_util: float,
+    max_len: int,
+    prompt_tokens: int = 0,
+) -> None:
     """One arm, in its own process. Only reached via the child invocation."""
     from vllm import LLM, SamplingParams
 
+    # Prompt length decides which regime the run measures. A short prompt with many output
+    # tokens is almost entirely decode, so a change that only helps prefill is invisible in
+    # the result -- and a null reads as "the change is worth nothing" rather than "this run
+    # never exercised it". The filler's content is irrelevant; its length is not.
+    filler = (
+        "The quick brown fox jumps over the lazy dog while the serving stack prefills "
+        "the prompt and records what it ran. "
+    )
     texts = [
-        f"Write a short paragraph about topic number {i} in computing history."
+        f"Write a short paragraph about topic number {i} in computing history. "
+        + filler * max(0, prompt_tokens // 20)
         for i in range(prompts)
     ]
     # ignore_eos fixes the generated length: without it the two arms can stop at different
@@ -220,6 +236,8 @@ def _run_arm(
         str(args.gpu_util),
         "--max-model-len",
         str(args.max_model_len),
+        "--prompt-tokens",
+        str(args.prompt_tokens),
     ]
     proc = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=args.timeout)
     combined = proc.stdout + "\n" + proc.stderr
@@ -679,6 +697,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--dataset", default="tmp/flashinfer-trace", help="Dataset apply() draws solutions from."
     )
     ap.add_argument("--prompts", type=int, default=16)
+    ap.add_argument(
+        "--prompt-tokens",
+        type=int,
+        default=0,
+        help=(
+            "Approximate tokens per prompt. Zero keeps the short prompt, which makes a run "
+            "almost entirely decode; raise it to measure a change that acts at prefill."
+        ),
+    )
     ap.add_argument("--out-tokens", type=int, default=128)
     ap.add_argument("--gpu-util", type=float, default=0.85)
     ap.add_argument("--max-model-len", type=int, default=2048)
@@ -751,7 +778,14 @@ def main() -> None:
     args = build_parser().parse_args()
 
     if args.child:
-        _bench(args.model, args.prompts, args.out_tokens, args.gpu_util, args.max_model_len)
+        _bench(
+            args.model,
+            args.prompts,
+            args.out_tokens,
+            args.gpu_util,
+            args.max_model_len,
+            args.prompt_tokens,
+        )
         return
 
     mode = "plain" if args.plain_arm else "apply"

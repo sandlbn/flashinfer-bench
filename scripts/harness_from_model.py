@@ -125,7 +125,27 @@ def _numel(desc: Any) -> int:
     return n
 
 
-def device_time(llm, prompts: int, out_tokens: int, device: str) -> Dict[str, object]:
+def _workload(prompts: int, prompt_tokens: int) -> List[str]:
+    """Prompts long enough that the stack prefills as it would in service.
+
+    A trivially short prompt makes every recorded shape a decode shape, and a kernel
+    measured only at decode sizes finishes below this part's launch floor -- so the
+    routing prices every candidate against a bound that says the time is in getting the
+    kernel onto the device rather than in the kernel. That conclusion is then an artefact
+    of the workload, not a property of the kernel. The text is filler; only its length
+    reaches the shapes.
+    """
+    filler = (
+        "The quick brown fox jumps over the lazy dog while the system records every "
+        "operation it performs and the shapes it performs them at. "
+    )
+    reps = max(1, prompt_tokens // 20)
+    return [f"Document {i}. " + filler * reps for i in range(prompts)]
+
+
+def device_time(
+    llm, prompts: int, out_tokens: int, device: str, prompt_tokens: int = 0
+) -> Dict[str, object]:
     """Per-op device time for this model on this stack, as a share of the total.
 
     Call counts are not share, and share is the only thing that says what an optimization
@@ -147,7 +167,7 @@ def device_time(llm, prompts: int, out_tokens: int, device: str) -> Dict[str, ob
 
     with profile(activities=act) as prof:
         llm.generate(
-            [f"Topic {i}." for i in range(prompts)],
+            _workload(prompts, prompt_tokens),
             SamplingParams(temperature=0.0, max_tokens=out_tokens, ignore_eos=True),
         )
 
@@ -569,6 +589,7 @@ def capture_state(
     prompts: int,
     out_tokens: int,
     out_dir: pathlib.Path,
+    prompt_tokens: int = 0,
 ) -> Dict[Tuple[str, tuple], Dict[str, Any]]:
     """Run the model again and capture, for each target op, the state its modules held.
 
@@ -673,7 +694,7 @@ def capture_state(
 
     with Capturer():
         llm.generate(
-            [f"Topic {i}." for i in range(prompts)],
+            _workload(prompts, prompt_tokens),
             SamplingParams(temperature=0.0, max_tokens=out_tokens, ignore_eos=True),
         )
     return results
@@ -882,6 +903,19 @@ def _harness_name(record: Dict[str, Any]) -> str:
     return name
 
 
+def _leading_extent(record: Dict[str, Any]) -> Optional[int]:
+    """The first dimension of this record's first tensor argument, if it has one.
+
+    That extent is what separates a decode call from a prefill one for every op a
+    transformer runs: rows of activations. It is read from the recorded shape rather than
+    inferred from the op's name.
+    """
+    for a in record.get("args", ()):
+        if isinstance(a, (list, tuple)) and a and a[0] == "T" and a[1]:
+            return int(a[1][0])
+    return None
+
+
 def _emit(record: Dict[str, Any], model: str, out_dir: pathlib.Path) -> pathlib.Path | None:
     """Write a harness for one recorded op, or None when it cannot be expressed.
 
@@ -1014,6 +1048,15 @@ def main() -> None:
     ap.add_argument("--model", required=True)
     ap.add_argument("--out-dir", default="tools/kernel-harness/auto")
     ap.add_argument("--prompts", type=int, default=4)
+    ap.add_argument(
+        "--prompt-tokens",
+        type=int,
+        default=512,
+        help=(
+            "Approximate tokens per prompt. The default prefills; set it small only to "
+            "record a decode-only workload deliberately."
+        ),
+    )
     ap.add_argument("--out-tokens", type=int, default=16)
     ap.add_argument("--top", type=int, default=10, help="Harness this many ops, by call count.")
     args = ap.parse_args()
@@ -1038,7 +1081,7 @@ def main() -> None:
     restore_triton = observe_triton()
     with record_mode():
         llm.generate(
-            [f"Topic {i}." for i in range(args.prompts)],
+            _workload(args.prompts, args.prompt_tokens),
             SamplingParams(temperature=0.0, max_tokens=args.out_tokens, ignore_eos=True),
         )
     restore_triton()
@@ -1050,7 +1093,7 @@ def main() -> None:
     # zero everywhere reads as "nothing is worth doing" rather than "nothing was measured".
     device_time_error = None
     try:
-        profiled = device_time(llm, args.prompts, args.out_tokens, "xpu:0")
+        profiled = device_time(llm, args.prompts, args.out_tokens, "xpu:0", args.prompt_tokens)
     except Exception as exc:
         device_time_error = f"{type(exc).__name__}: {exc}"
         print(f"  device-time pass failed ({device_time_error}); shares unavailable")
@@ -1114,6 +1157,27 @@ def main() -> None:
 
     made, failed = 0, 0
     todo = list(ranked[: args.top])
+
+    # Ranking by call count harnesses only the shape the model runs most often, which in a
+    # serving trace is always the decode shape -- decode calls outnumber prefill ones by the
+    # length of the generation. A kernel measured only at decode sizes finishes below this
+    # part's launch floor, so the routing prices every candidate against a bound that says
+    # the time is in the launch rather than in the kernel; at prefill sizes the same kernel
+    # can be far above that floor. Carry the largest shape of each op as well, so both
+    # regimes reach the routing and it decides per shape instead of per op.
+    seen = {id(r) for r in todo}
+    largest: Dict[str, Dict[str, Any]] = {}
+    for record in ranked:
+        rows = _leading_extent(record)
+        if rows is None:
+            continue
+        current = largest.get(record["op"])
+        if current is None or rows > _leading_extent(current):
+            largest[record["op"]] = record
+    for record in largest.values():
+        if id(record) not in seen and _leading_extent(record):
+            todo.append(record)
+            seen.add(id(record))
     # A harness may fail because the op reads state the stack sets around each forward.
     # Such failures are collected, the state is captured from another run of the model, and
     # the harness is emitted again with it. Bounded, because an op can need state from more
@@ -1150,7 +1214,9 @@ def main() -> None:
         if not needs:
             break
         print()
-        captured = capture_state(llm, needs, args.prompts, args.out_tokens, out_dir)
+        captured = capture_state(
+            llm, needs, args.prompts, args.out_tokens, out_dir, args.prompt_tokens
+        )
         todo = []
         for key in needs:
             record, result = RECORDS[key], captured.get(key)
