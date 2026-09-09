@@ -1,0 +1,655 @@
+{
+  "op": "aten::linear",
+  "device": "xpu:0",
+  "library": {
+    "name": "oneDNN",
+    "version": "3.12.0",
+    "commit": "80afa71049cd69a3df32adcccb623b12cd7baa22"
+  },
+  "environment": [
+    "gpu,runtime:SYCL",
+    "gpu,engine,sycl gpu device count:2",
+    "gpu,engine,0,backend:Level Zero,name:Intel(R) Arc(TM) B580 Graphics,driver_version:1.17.39395,binary_kernels:enabled",
+    "gpu,engine,1,backend:Level Zero,name:Intel(R) Graphics,driver_version:1.17.39395,binary_kernels:enabled"
+  ],
+  "source_revision": "v3.13.2",
+  "selected": [
+    {
+      "engine": "gpu:0",
+      "kind": "matmul",
+      "implementation": "jit:gemm:any",
+      "prop_kind": "undef",
+      "memory_descriptors": "src:bf16::blocked:ab::f0 wei:bf16::blocked:ba::f0 dst:bf16::blocked:ab::f0",
+      "attributes": "attr-scratchpad:user",
+      "problem_desc": "8x1024:1024x4096"
+    }
+  ],
+  "nested": [
+    {
+      "engine": "gpu:0",
+      "kind": "gemm",
+      "implementation": "jit:gemm:any",
+      "prop_kind": "undef",
+      "memory_descriptors": "src_a:bf16::blocked:ab::f0 src_b:bf16::blocked:ba::f0 dst:bf16::blocked:ab::f0",
+      "attributes": "",
+      "problem_desc": "8x1024:1024x4096"
+    },
+    {
+      "engine": "gpu:0",
+      "kind": "matmul",
+      "implementation": "jit:gemm:any",
+      "prop_kind": "undef",
+      "memory_descriptors": "src:bf16::blocked:ab::f0 wei:bf16::blocked:ba::f0 dst:bf16::blocked:ab::f0",
+      "attributes": "attr-scratchpad:user",
+      "problem_desc": "8x1024:1024x4096"
+    }
+  ],
+  "rejected": [
+    {
+      "component": "gemm",
+      "engine": "gpu:0",
+      "kind": "gemm",
+      "implementation": "jit:xe_hp:gemm:any",
+      "prop_kind": "undef",
+      "memory_descriptors": "src_a:bf16::blocked:ab::f0 src_b:bf16::blocked:ba::f0 dst:bf16::blocked:ab::f0",
+      "attributes": "",
+      "problem_desc": "8x1024:1024x4096",
+      "reason": "unsupported format tag",
+      "path": "src/gpu/intel/gemm/jit_xe_hp_systolic.cpp",
+      "line": "79"
+    }
+  ],
+  "candidates": {
+    "gemm": {
+      "path": "src/gpu/gpu_gemm_list.cpp",
+      "rows": [
+        {
+          "position": "1",
+          "macro": "GPU_INSTANCE_INTEL_DEVMODE",
+          "class": "intel::gemm::conv_t",
+          "name": "conv:ir",
+          "computed": "",
+          "declared_at": "src/gpu/intel/gemm/conv.hpp:37",
+          "list_line": "41",
+          "outcome": "build-conditional",
+          "detail": "compiled out when !(DNNL_DEV_MODE)"
+        },
+        {
+          "position": "2",
+          "macro": "GPU_INSTANCE_INTEL",
+          "class": "intel::gemm::xe_hp_systolic_t",
+          "name": "jit:xe_hp:gemm:any",
+          "computed": "",
+          "declared_at": "src/gpu/intel/gemm/jit_xe_hp_systolic.hpp:38",
+          "list_line": "42",
+          "outcome": "rejected",
+          "detail": "unsupported format tag at `src/gpu/intel/gemm/jit_xe_hp_systolic.cpp:79`"
+        },
+        {
+          "position": "3",
+          "macro": "GPU_INSTANCE_INTEL",
+          "class": "intel::gemm::gen_t",
+          "name": "jit:gemm:any",
+          "computed": "",
+          "declared_at": "src/gpu/intel/gemm/jit.hpp:85",
+          "list_line": "43",
+          "outcome": "selected",
+          "detail": ""
+        },
+        {
+          "position": "4",
+          "macro": "GPU_INSTANCE_INTEL",
+          "class": "intel::gemm::with_post_ops_t",
+          "name": "ocl:with_po:any",
+          "computed": "",
+          "declared_at": "src/gpu/intel/gemm/with_post_ops.hpp:35",
+          "list_line": "44",
+          "outcome": "not tried",
+          "detail": "after the winner in the list"
+        },
+        {
+          "position": "5",
+          "macro": "GPU_INSTANCE_INTEL_REF",
+          "class": "intel::gemm::ref_t",
+          "name": "ocl:ref:any",
+          "computed": "",
+          "declared_at": "src/gpu/intel/gemm/ref.hpp:97",
+          "list_line": "45",
+          "outcome": "build-conditional",
+          "detail": "compiled out when DNNL_DISABLE_GPU_REF_KERNELS"
+        }
+      ]
+    },
+    "matmul": {
+      "path": "src/gpu/gpu_matmul_list.cpp",
+      "rows": [
+        {
+          "position": "1",
+          "macro": "GPU_INSTANCE_INTEL",
+          "class": "intel::matmul::gemm_t",
+          "name": "",
+          "computed": "gemm_pd_ ? gemm_pd_->name() : \"gemm_t\"",
+          "declared_at": "src/gpu/intel/matmul/gemm.hpp:42",
+          "list_line": "50",
+          "outcome": "selected",
+          "detail": "name computed at run time (`gemm_pd_ ? gemm_pd_->name() : \"gemm_t\"`); the log's `jit:gemm:any` is attributed here by elimination -- the log shows a nested `gemm` primitive of that name being created, so this entry is the wrapper that carries it"
+        },
+        {
+          "position": "2",
+          "macro": "GPU_INSTANCE_INTEL",
+          "class": "intel::matmul::ref_sparse_t",
+          "name": "ocl:ref:any",
+          "computed": "",
+          "declared_at": "src/gpu/intel/matmul/sparse_ref.hpp:40",
+          "list_line": "51",
+          "outcome": "not tried",
+          "detail": "after the winner in the list"
+        },
+        {
+          "position": "3",
+          "macro": "GPU_INSTANCE_GROUPED",
+          "class": "intel::matmul::grouped_micro_gemm_t",
+          "name": "grouped_gemm:micro",
+          "computed": "",
+          "declared_at": "src/gpu/intel/matmul/grouped_micro_gemm.hpp:67",
+          "list_line": "52",
+          "outcome": "build-conditional",
+          "detail": "compiled out when !(DNNL_EXPERIMENTAL_GROUPED_MEMORY)"
+        },
+        {
+          "position": "4",
+          "macro": "GPU_INSTANCE_GROUPED",
+          "class": "intel::matmul::ref_grouped_t",
+          "name": "ocl:ref_grouped:any",
+          "computed": "",
+          "declared_at": "src/gpu/intel/matmul/ref_grouped_gemm.hpp:44",
+          "list_line": "53",
+          "outcome": "build-conditional",
+          "detail": "compiled out when !(DNNL_EXPERIMENTAL_GROUPED_MEMORY)"
+        },
+        {
+          "position": "5",
+          "macro": "GPU_INSTANCE_INTEL_REF",
+          "class": "intel::matmul::ref_t",
+          "name": "ocl:ref:any",
+          "computed": "",
+          "declared_at": "src/gpu/intel/matmul/ref.hpp:43",
+          "list_line": "54",
+          "outcome": "build-conditional",
+          "detail": "compiled out when DNNL_DISABLE_GPU_REF_KERNELS"
+        },
+        {
+          "position": "6",
+          "macro": "GPU_INSTANCE_NVIDIA",
+          "class": "nvidia::cudnn_matmul_lt_t",
+          "name": "cuda:cublaslt:any",
+          "computed": "",
+          "declared_at": "src/gpu/nvidia/cudnn_matmul_lt.hpp:43",
+          "list_line": "55",
+          "outcome": "not built",
+          "detail": "built only for nvidia"
+        },
+        {
+          "position": "7",
+          "macro": "GPU_INSTANCE_NVIDIA",
+          "class": "nvidia::cudnn_matmul_t",
+          "name": "cuda:cudnn:any",
+          "computed": "",
+          "declared_at": "src/gpu/nvidia/cudnn_matmul.hpp:42",
+          "list_line": "56",
+          "outcome": "not built",
+          "detail": "built only for nvidia"
+        },
+        {
+          "position": "8",
+          "macro": "GPU_INSTANCE_AMD",
+          "class": "amd::miopen_matmul_t",
+          "name": "hip:miopen:any",
+          "computed": "",
+          "declared_at": "src/gpu/amd/miopen_matmul.hpp:41",
+          "list_line": "57",
+          "outcome": "not built",
+          "detail": "built only for amd"
+        },
+        {
+          "position": "9",
+          "macro": "GPU_INSTANCE_GENERIC_SYCL",
+          "class": "generic::sycl::ref_matmul_t",
+          "name": "sycl:ref:any",
+          "computed": "",
+          "declared_at": "src/gpu/generic/sycl/ref_matmul.hpp:41",
+          "list_line": "58",
+          "outcome": "not built",
+          "detail": "built only for generic sycl"
+        }
+      ]
+    }
+  },
+  "gates": [
+    {
+      "component": "gemm",
+      "engine": "gpu:0",
+      "kind": "gemm",
+      "implementation": "jit:xe_hp:gemm:any",
+      "prop_kind": "undef",
+      "memory_descriptors": "src_a:bf16::blocked:ab::f0 src_b:bf16::blocked:ba::f0 dst:bf16::blocked:ab::f0",
+      "attributes": "",
+      "problem_desc": "8x1024:1024x4096",
+      "reason": "unsupported format tag",
+      "path": "src/gpu/intel/gemm/jit_xe_hp_systolic.cpp",
+      "line": "79",
+      "function": "xe_hp_systolic_t::pd_t::init",
+      "index": 3,
+      "total": 19,
+      "helpers": [],
+      "remaining": [
+        "VERBOSE_UNSUPPORTED_TAG",
+        "VERBOSE_UNSUPPORTED_TAG",
+        "VERBOSE_SKIP_PRIMITIVE_IMPL",
+        "VERBOSE_RUNTIMEDIM_UNSUPPORTED",
+        "VERBOSE_UNSUPPORTED_DT_CFG",
+        "VERBOSE_UNSUPPORTED_ARCH",
+        "VERBOSE_UNSUPPORTED_DEVICE_FEATURE",
+        "VERBOSE_UNSUPPORTED_ATTR",
+        "VERBOSE_UNSUPPORTED_FEATURE",
+        "VERBOSE_UNSUPPORTED_BIAS_CFG",
+        "VERBOSE_SHAPE_RESTRICTION",
+        "VERBOSE_UNSUPPORTED_ZP_CFG",
+        "VERBOSE_UNSUPPORTED_ZP_CFG",
+        "VERBOSE_UNSUPPORTED_ZP_CFG",
+        "VERBOSE_UNSUPPORTED_ZP_CFG",
+        "VERBOSE_UNSUPPORTED_ZP_CFG"
+      ],
+      "lever": "operand layout",
+      "action": "caller-controlled: operand memory format and strides -- pass `any` for a weight so the library may pick its packed layout, pre-pack it once, or make operands contiguous"
+    }
+  ],
+  "strategies": [
+    {
+      "strategy": "G gemm HHS T@16N@16N 16 16 at32+m32@32 am64+m64@64 aB wg 4x2 xaf st vav pt sr br sb64 bk0 sm sn grf256 sys",
+      "score": 4351603.806669
+    },
+    {
+      "strategy": "F gemm HHS TNN 16 8 at16x2+m64@16 aB32+m16@32 aB wg 4x2x4 kr af vav li nmk pt sr br sb64 bk0 sm sn dm grf256 sys kv afb l4 l2d",
+      "score": 4945613.075104
+    },
+    {
+      "strategy": "F gemm BBS TNN 16 8 at16x2+m64@16 aB32+m16@32 aB wg 4x2x4 kr af vav li nmk pt sr br sb64 bk0 sm sn dm grf256 sys kv afb l4 l2d",
+      "score": 4965831.660192
+    },
+    {
+      "strategy": "F gemm BBS T@4N@8N 16 16 at16x2+m32@48 am32+m16@64 aB wg 4x2x4 kr xaf st vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb",
+      "score": 5150499.993862
+    },
+    {
+      "strategy": "F gemm HHS T@4N@8N 16 16 at16x2+m32@48 am32+m16@64 aB wg 4x2x4 kr xaf st vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb",
+      "score": 5216869.406669
+    },
+    {
+      "strategy": "F gemm BBS T@4N@8N 16 4 at16+m64@16 am64+m64@64 aB wg 8x4 af vav li nmk pt sr br sb64 bk0 sm sys kv afb",
+      "score": 5306033.127898
+    },
+    {
+      "strategy": "F gemm HHS T@4N@8N 16 4 at16+m64@16 am64+m64@64 aB wg 8x4 af vav li nmk pt sr br sb64 bk0 sm sys kv afb",
+      "score": 5311280.282701
+    },
+    {
+      "strategy": "F gemm BBS T@4N@8N 32 32 at32+m32@48 am32+m32@48 aB wg 4x2x4 kr xaf vav hi pt sr br sb64 bk0 sm sn grf256 kv afb sys",
+      "score": 5626159.440077
+    },
+    {
+      "strategy": "F gemm HHS T@4N@8N 16 16 at32+m32@64 am32+m64@64 aB wg 2x2x8 kr xaf vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb",
+      "score": 5854349.289536
+    },
+    {
+      "strategy": "F gemm BBS T@4N@8N 16 16 at32+m32@64 am32+m64@64 aB wg 2x2x8 kr xaf vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb",
+      "score": 5868914.782477
+    },
+    {
+      "strategy": "F gemm BBS TNN 16 16 at16x2+m32@48 aB32 aB wg 4x2x4 kr cb4x2 ks64 af vav hi pt sr br bk0 sm sn dm grf256 kv afb sys l4 l2d",
+      "score": 5989661.611802
+    },
+    {
+      "strategy": "F gemm HHS TNN 16 16 at16x2+m32@48 aB32 aB wg 4x2x4 kr cb4x2 ks64 af vav hi pt sr br bk0 sm sn dm grf256 kv afb sys l4 l2d",
+      "score": 6053857.324122
+    },
+    {
+      "strategy": "F gemm HHS T@4N@8N 32 32 at32+m32@48 am32+m32@48 aB wg 4x2x4 kr xaf vav hi pt sr br sb64 bk0 sm sn grf256 kv afb sys",
+      "score": 6055121.445451
+    },
+    {
+      "strategy": "F gemm BBS T@4N@8N 16 16 at16+m32@48 am32+m64@48 aB wg 8x4 af vav hi pt sr br sb64 bk0 sm sn grf256 sys",
+      "score": 6070625.842394
+    },
+    {
+      "strategy": "F gemm HHS T@4N@8N 16 16 at16+m32@48 am32+m64@48 aB wg 8x4 af vav hi pt sr br sb64 bk0 sm sn grf256 sys",
+      "score": 6119848.201157
+    },
+    {
+      "strategy": "F gemm BBS TNN 16 64 at16+m32@16 aB32 aB wg 8x1x4 kr cb4x2 ks32 xaf st vav hi pt sr br bk0 sm sn dm grf256 kv afb sys l4 l2d",
+      "score": 6175107.166106
+    },
+    {
+      "strategy": "F gemm BBS TNN 16 64 at32+m32@64 aB16x2 aB wg 16x2 cb3 ks32 xaf st vav hi pt sr br bk0 sm sn nb 0x2 dm grf256 sys kv afb l4 l2d",
+      "score": 6322944.559701
+    },
+    {
+      "strategy": "F gemm BBS TNN 16 16 at32+m32@48 aB32x2 aB wg 2x2x8 kr cb4x2 ks32 xaf vav hi pt sr br bk0 sm sn dm grf256 kv afb sys l4 l2d",
+      "score": 6375706.071923
+    },
+    {
+      "strategy": "F gemm HHS TNN 16 16 at32+m32@48 aB32x2 aB wg 2x2x8 kr cb4x2 ks32 xaf vav hi pt sr br bk0 sm sn dm grf256 kv afb sys l4 l2d",
+      "score": 6376369.273638
+    },
+    {
+      "strategy": "F gemm HHS TNN 16 64 at32+m32@64 aB16x2 aB wg 16x2 cb3 ks32 xaf st vav hi pt sr br bk0 sm sn nb 0x2 dm grf256 sys kv afb l4 l2d",
+      "score": 6657780.806812
+    },
+    {
+      "strategy": "F gemm BBS T@4N@8N 16 64 at16+m32@64 am16 aB wg 16x2 cb3x2 ks32 af vav hi pt sr br bk0 sm sn grf256 sys",
+      "score": 6661912.217993
+    },
+    {
+      "strategy": "F gemm HHS TNN 16 64 at16+m32@16 aB32 aB wg 8x1x4 kr cb4x2 ks32 xaf st vav hi pt sr br bk0 sm sn dm grf256 kv afb sys l4 l2d",
+      "score": 6816176.412913
+    },
+    {
+      "strategy": "F gemm BBS T@4N@8N 32 64 at16+m32@32 am32+m32@48 aB wg 8x2x2 kr af vav hi pt sr br sb64 bk0 sm sn grf256 sys",
+      "score": 6953627.056202
+    },
+    {
+      "strategy": "F gemm BBS T@4N@8N 32 32 at32+m32@48 am32+m32@48 aB wg 2x2x8 kr xaf vav hi pt sr br sb64 bk0 sm sn grf256 kv afb sys",
+      "score": 6995361.70057
+    },
+    {
+      "strategy": "F gemm BBS T@4N@8N 32 64 at16+m32@32 am32+m32@48 aB wg 8x2x2 kr af vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb",
+      "score": 7010181.644005
+    },
+    {
+      "strategy": "F gemm BBS T@4N@8N 32 32 at32+m32@48 am16x2+m64@32 aB wg 4x4x2 kr xaf st vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb",
+      "score": 7151030.545906
+    },
+    {
+      "strategy": "F gemm HHS T@4N@8N 32 32 at32+m32@48 am32+m32@48 aB wg 2x2x8 kr xaf vav hi pt sr br sb64 bk0 sm sn grf256 kv afb sys",
+      "score": 7179556.84539
+    },
+    {
+      "strategy": "F gemm HHS T@4N@8N 16 64 at16+m32@64 am16 aB wg 16x2 cb3x2 ks32 af vav hi pt sr br bk0 sm sn grf256 sys",
+      "score": 7202051.319944
+    },
+    {
+      "strategy": "F gemm BBS T@4N@8N 32 48 at16x2+m32@32 am32+m64@48 aB wg 8x4 xaf vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb",
+      "score": 7214887.562941
+    },
+    {
+      "strategy": "F gemm BBS TNN 16 16 at16+m16@64 aB32x2 aB wg 8x4 cb4x2 ks64 xaf st vav hi pt sr br bk0 sm sn nb 0x4 dm grf256 sys l4 l2d",
+      "score": 7333463.089194
+    },
+    {
+      "strategy": "F gemm HHS T@4N@8N 32 64 at16+m32@32 am32+m32@48 aB wg 8x2x2 kr af vav hi pt sr br sb64 bk0 sm sn grf256 sys",
+      "score": 7352046.555611
+    },
+    {
+      "strategy": "F gemm HHS TNN 16 16 at16+m16@64 aB32x2 aB wg 8x4 cb4x2 ks64 xaf st vav hi pt sr br bk0 sm sn nb 0x4 dm grf256 sys l4 l2d",
+      "score": 7383999.781376
+    },
+    {
+      "strategy": "F gemm BBS TNN 16 32 at32+m32@32 aB16x2 aB wg 4x2x4 kr cb4x2 ks32 xaf st vav hi pt sr br bk0 sm sn dm grf256 kv afb sys l4 l2d",
+      "score": 7498210.622426
+    },
+    {
+      "strategy": "F gemm HHS T@4N@8N 32 64 at16+m32@32 am32+m32@48 aB wg 8x2x2 kr af vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb",
+      "score": 7500665.345401
+    },
+    {
+      "strategy": "F gemm HHS TNN 16 32 at32+m32@32 aB16x2 aB wg 4x2x4 kr cb4x2 ks32 xaf st vav hi pt sr br bk0 sm sn dm grf256 kv afb sys l4 l2d",
+      "score": 7524236.412378
+    },
+    {
+      "strategy": "F gemm BBS T@4N@8N 16 32 at16+m64@64 am32+m16@64 aB wg 8x4 af vav hi pt sr br sb64 bk0 sm sn grf256 sys",
+      "score": 7569809.580268
+    },
+    {
+      "strategy": "F gemm HHS T@4N@8N 16 32 at16+m64@64 am32+m16@64 aB wg 8x4 af vav hi pt sr br sb64 bk0 sm sn grf256 sys",
+      "score": 7694605.327947
+    },
+    {
+      "strategy": "F gemm HHS T@4N@8N 32 48 at16x2+m32@32 am32+m64@48 aB wg 8x4 xaf vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb",
+      "score": 7744560.226918
+    },
+    {
+      "strategy": "F gemm HHS T@4N@8N 32 32 at32+m32@48 am16x2+m64@32 aB wg 4x4x2 kr xaf st vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb",
+      "score": 7781479.685461
+    },
+    {
+      "strategy": "F gemm BBS T@4N@8N 16 16 at32+m16@48 am16x2+m32@32 aB wg 4x2x4 kr af vav hi pt sr br sb64 bk0 sm sn grf256 sys",
+      "score": 7784670.490982
+    },
+    {
+      "strategy": "F gemm HHS T@4N@8N 16 16 at32+m16@48 am16x2+m32@32 aB wg 4x2x4 kr af vav hi pt sr br sb64 bk0 sm sn grf256 sys",
+      "score": 7795323.087536
+    },
+    {
+      "strategy": "F gemm BBS T@4N@4N 16 96 at16+m32@48 aB16 aB wg 16x2 cb4x2 ks64 xaf st vav hi pt sr br bk0 sm sn dm grf256 sys kv afb",
+      "score": 7828886.263459
+    },
+    {
+      "strategy": "F gemm BBS TNN 16 64 at16x2+m32@32 aB16x2 aB wg 8x2x2 kr cb4 ks32 xaf st vav hi pt sr br bk0 sm sn dm grf256 kv afb sys l4 l2d",
+      "score": 7956691.025
+    },
+    {
+      "strategy": "F gemm BBS T@4N@8N 32 64 at16x2+m64@48 am32+m32@64 aB wg 8x4 xaf vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb",
+      "score": 8192299.391786
+    },
+    {
+      "strategy": "F gemm BBS T@4N@8N 32 32 at16+m64@32 am32+m16@32 aB wg 4x4x2 kr xaf vav hi pt sr br sb64 bk0 sm sn grf256 sys",
+      "score": 8227137.724736
+    },
+    {
+      "strategy": "G gemm HHS T@16N@16N 16 16 at16+m32@48 am32+m64@48 aB wg 8x4 af vav hi pt sr br sb64 bk0 sm sn grf256 sys",
+      "score": 8248905.55968
+    },
+    {
+      "strategy": "F gemm BBS T@4N@8N 16 16 at16+m32@48 am32+m32@48 aB wg 4x4x2 kr xaf vav hi pt sr br sb64 bk0 sm sn grf256 sys",
+      "score": 8274584.992032
+    },
+    {
+      "strategy": "F gemm HHS T@4N@8N 16 16 at16+m32@48 am32+m32@48 aB wg 4x4x2 kr xaf vav hi pt sr br sb64 bk0 sm sn grf256 sys",
+      "score": 8353039.694592
+    },
+    {
+      "strategy": "F gemm HHS T@4N@4N 16 96 at16+m32@48 aB16 aB wg 16x2 cb4x2 ks64 xaf st vav hi pt sr br bk0 sm sn dm grf256 sys kv afb",
+      "score": 8365024.649395
+    },
+    {
+      "strategy": "F gemm HHS T@4N@8N 32 32 at16+m64@32 am32+m16@32 aB wg 4x4x2 kr xaf vav hi pt sr br sb64 bk0 sm sn grf256 sys",
+      "score": 8449483.654127
+    },
+    {
+      "strategy": "F gemm BBS TNN 16 32 at16+m32@48 aB32 aB wg 8x4 cb4x2 ks32 xaf vav hi pt sr br bk0 sm sn dm grf256 sys l4 l2d",
+      "score": 8520743.504819
+    },
+    {
+      "strategy": "G gemm HHS T@16N@16N 16 16 at16x2+m32@48 am32+m16@64 aB wg 4x2x4 kr xaf st vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb",
+      "score": 8546242.43312
+    },
+    {
+      "strategy": "F gemm HHS T@4N@8N 32 64 at16x2+m64@48 am32+m32@64 aB wg 8x4 xaf vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb",
+      "score": 8579419.572103
+    },
+    {
+      "strategy": "F gemm HHS TNN 16 64 at16x2+m32@32 aB16x2 aB wg 8x2x2 kr cb4 ks32 xaf st vav hi pt sr br bk0 sm sn dm grf256 kv afb sys l4 l2d",
+      "score": 8584260.046522
+    },
+    {
+      "strategy": "F gemm BBS TNN 16 32 at32+m32@32 aB16 aB wg 8x2x4 kr cb4 ks16 af vav hi pt sr br bk0 sm sn dm sys l4 l2d",
+      "score": 8657405.426155
+    },
+    {
+      "strategy": "F gemm HHS TNN 16 32 at16+m32@48 aB32 aB wg 8x4 cb4x2 ks32 xaf vav hi pt sr br bk0 sm sn dm grf256 sys l4 l2d",
+      "score": 8677916.641467
+    },
+    {
+      "strategy": "F gemm HHS TNN 16 32 at32+m32@32 aB16 aB wg 8x2x4 kr cb4 ks16 af vav hi pt sr br bk0 sm sn dm sys l4 l2d",
+      "score": 8733372.962487
+    },
+    {
+      "strategy": "F gemm BBS T@4N@4N 32 64 at16+m32@48 aB16 aB wg 8x4 cb4x2 ks32 af vav hi pt sr br bk0 sm sn dm grf256 sys kv afb",
+      "score": 9039974.306309
+    },
+    {
+      "strategy": "F gemm BBS T@4N@8N 64 40 at16+m64@48 am32+m32@56 aB wg 4x8 xaf st vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb",
+      "score": 9261944.846755
+    },
+    {
+      "strategy": "F gemm HHS T@4N@4N 32 64 at16+m32@48 aB16 aB wg 8x4 cb4x2 ks32 af vav hi pt sr br bk0 sm sn dm grf256 sys kv afb",
+      "score": 9291712.956693
+    },
+    {
+      "strategy": "G gemm HHS T@16N@16N 16 8 at32+m16@48 am16x2+m32@32 aB wg 2x4x4 kr xaf st vav hi pt sr br sb64 bk0 sm sn grf256 sys",
+      "score": 9337311.14192
+    },
+    {
+      "strategy": "F gemm HHS TNN 16 1 aS32+S32@48 aB32+S16@48 aB wg 4x1 af vav nmk li pt br sr sb256 bk0 sm grf256 sys l4 kd",
+      "score": 10152792.914638
+    },
+    {
+      "strategy": "F gemm BBS TNN 16 1 aS32+S32@48 aB32+S16@48 aB wg 4x1 af vav nmk li pt br sr sb256 bk0 sm grf256 sys l4 kd",
+      "score": 10159419.237517
+    },
+    {
+      "strategy": "F gemm BBS T@4N@8N 16 8 at32+m16@48 am16x2+m32@32 aB wg 2x4x4 kr xaf st vav hi pt sr br sb64 bk0 sm sn grf256 sys",
+      "score": 10530188.196181
+    },
+    {
+      "strategy": "F gemm HHS T@4N@8N 16 8 at32+m16@48 am16x2+m32@32 aB wg 2x4x4 kr xaf st vav hi pt sr br sb64 bk0 sm sn grf256 sys",
+      "score": 10555732.814473
+    },
+    {
+      "strategy": "F gemm HHS T@4N@8N 64 40 at16+m64@48 am32+m32@56 aB wg 4x8 xaf st vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb",
+      "score": 10772374.501488
+    },
+    {
+      "strategy": "F gemm BBS TNN 16 8 at16+m32@64 aB64 aB wg 4x8 cb4x2 ks64 xaf st vav hi pt sr br bk0 sm sn dm grf256 sys l4 l2d",
+      "score": 11331243.084265
+    },
+    {
+      "strategy": "F gemm HHS TNN 16 8 at16+m32@64 aB64 aB wg 4x8 cb4x2 ks64 xaf st vav hi pt sr br bk0 sm sn dm grf256 sys l4 l2d",
+      "score": 11340281.176324
+    },
+    {
+      "strategy": "F gemm BBS TNN 16 32 at32+m16@32 aB16 aB wg 4x2x4 kr cb4x2 ks32 af vav hi pt sr br bk0 sm sn dm grf256 sys l4 l2d",
+      "score": 11375393.882063
+    },
+    {
+      "strategy": "F gemm HHS TNN 16 32 at32+m16@32 aB16 aB wg 4x2x4 kr cb4x2 ks32 af vav hi pt sr br bk0 sm sn dm grf256 sys l4 l2d",
+      "score": 11429925.782878
+    },
+    {
+      "strategy": "F gemm BBS T@4N@8N 16 8 at16+m32@48 am16+m64@48 aB wg 4x8 xaf st vav hi pt sr br sb64 bk0 sm sn grf256 sys",
+      "score": 11500756.906209
+    },
+    {
+      "strategy": "F gemm HHS T@4N@8N 16 8 at16+m32@48 am16+m64@48 aB wg 4x8 xaf st vav hi pt sr br sb64 bk0 sm sn grf256 sys",
+      "score": 11504867.228902
+    },
+    {
+      "strategy": "F gemm HHS TNN 16 16 at16+m16@32 aB64+m32@32 aB wg 2x2x8 kr af vav hi pt sr br sb64 bk0 sm sn dm grf256 sys l4 l2d",
+      "score": 13868248.755682
+    },
+    {
+      "strategy": "F gemm BBS TNN 16 16 at16+m16@32 aB64+m32@32 aB wg 2x2x8 kr af vav hi pt sr br sb64 bk0 sm sn dm grf256 sys l4 l2d",
+      "score": 13870683.929366
+    },
+    {
+      "strategy": "G gemm HHS T@16N@16N 16 16 at32+m32@64 am64+m64@64 aB wg 2x2x8 kr xaf st vav hi pt sr br sb64 bk0 sm sn grf256 sys",
+      "score": 15479593.424029
+    },
+    {
+      "strategy": "F gemm BBS T@8N@4N 4 16 am32+C32@64 at32 aS wg 1x1x16 ikr af vav sr sb256 bk0 bm0 sys rr",
+      "score": 21436144.858368
+    },
+    {
+      "strategy": "F gemm HHS T@8N@4N 4 16 am32+C32@64 at32 aS wg 1x1x16 ikr af vav sr sb256 bk0 bm0 sys rr",
+      "score": 21436144.858368
+    },
+    {
+      "strategy": "F gemm BBS T@8N@4N 4 16 am32+m64@64 at32+m16@64 aS wg 1x1x16 kr af vav sr sb64 bm0 bk0 sm sn grf256 sys ikr",
+      "score": 33553346.259026
+    },
+    {
+      "strategy": "F gemm HHS T@8N@4N 4 16 am32+m64@64 at32+m16@64 aS wg 1x1x16 kr af vav sr sb64 bm0 bk0 sm sn grf256 sys ikr",
+      "score": 33553346.259026
+    },
+    {
+      "strategy": "G gemm HHS T@16N@16N 4 16 am32+C32@64 at32 aS wg 1x1x16 ikr af vav sr sb256 bk0 bm0 sys rr",
+      "score": 40963944.510419
+    },
+    {
+      "strategy": "F gemm HHS T@4N@8N 32 64 at16x2+m64@48 am32+m32@64 aB wg 8x4 xaf vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb cti",
+      "score": 100615934.727142
+    }
+  ],
+  "files": [
+    {
+      "path": "src/gpu/intel/gemm/jit.hpp",
+      "why": "selected implementation -- declares `jit:gemm:any` as `gen_t` (line 85)",
+      "confidence": "rule"
+    },
+    {
+      "path": "src/gpu/intel/gemm/jit.cpp",
+      "why": "selected implementation -- implements `gen_t`",
+      "confidence": "rule"
+    },
+    {
+      "path": "src/gpu/gpu_gemm_list.cpp",
+      "why": "candidate order for `gemm` -- walked top to bottom",
+      "confidence": "rule"
+    },
+    {
+      "path": "src/gpu/gpu_matmul_list.cpp",
+      "why": "candidate order for `matmul` -- walked top to bottom",
+      "confidence": "rule"
+    },
+    {
+      "path": "src/gpu/intel/gemm/jit_xe_hp_systolic.cpp",
+      "why": "rejected `jit:xe_hp:gemm:any`: unsupported format tag (line 79)",
+      "confidence": "cited"
+    },
+    {
+      "path": "src/gpu/intel/gemm/jit_xe_hp_systolic.hpp",
+      "why": "rejected candidate -- declares `jit:xe_hp:gemm:any` as `xe_hp_systolic_t` (line 38)",
+      "confidence": "rule"
+    },
+    {
+      "path": "src/gpu/intel/gemm/jit/gen_kernel.cpp",
+      "why": "scores the generator's strategies (prints `consider:`)",
+      "confidence": "rule"
+    },
+    {
+      "path": "src/gpu/intel/gemm/jit/selector/db/kernel.db",
+      "why": "strategy catalog the scored entries are drawn from",
+      "confidence": "rule"
+    },
+    {
+      "path": "src/gpu/intel/gemm/jit/selector/db/ukernel_lmr.db",
+      "why": "strategy catalog the scored entries are drawn from",
+      "confidence": "rule"
+    },
+    {
+      "path": "src/gpu/intel/gemm/jit/selector/db/ukernel_mlr.db",
+      "why": "strategy catalog the scored entries are drawn from",
+      "confidence": "rule"
+    },
+    {
+      "path": "src/gpu/intel/gemm/jit/selector/db/ukernel_mmr.db",
+      "why": "strategy catalog the scored entries are drawn from",
+      "confidence": "rule"
+    }
+  ],
+  "gaps": [
+    "the checkout does not contain the revision that ran (`80afa71049cd69a3df32adcccb623b12cd7baa22` / `v3.12.0`), so files come from its working tree at `v3.13.2`; a `file:line` cited above may be off by the drift between the two. `git -C tmp/oneDNN fetch --tags && git checkout v3.12.0` aligns them.",
+    "`jit:gemm:any` was selected for `matmul`, but the declaration carrying that name lives outside any `matmul` directory: the `matmul` entry is a wrapper that takes its name from the nested primitive it delegates to, and the nested primitive is what is bundled. The wrapper is the computed-name entry in the `matmul` candidate list."
+  ],
+  "reproduce": "ONEDNN_VERBOSE=all python repro.py"
+}

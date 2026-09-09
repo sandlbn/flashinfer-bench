@@ -228,12 +228,40 @@ def streaming_pool_bytes(device: object) -> Optional[int]:
     return STREAMING_POOL_LLC_MULTIPLE * l2 if l2 > 0 else None
 
 
-class PadProbe(NamedTuple):
-    """What the load-time A/B measured: median per-round speedup and its robust scatter."""
+class Probe(NamedTuple):
+    """What a load-time A/B measured: median per-round speedup and its robust scatter.
+
+    ``win`` is the same call :func:`probe_verdict` makes, kept as a field because a caller
+    that only has to decide "keep it or not" should not have to re-derive it. A caller that
+    has to tell a measured *slowdown* from a measurement that said nothing wants the verdict.
+    """
 
     win: bool
     speedup: float
     spread: float
+
+
+PadProbe = Probe
+"""The row pad's name for :class:`Probe`, from when it was the only measured decision."""
+
+
+def probe_verdict(probe: "Probe", sigmas: float = None) -> str:
+    """``"WIN"``, ``"LOSS"`` or ``"NOISE"`` -- the three-way reading of a probe.
+
+    ``win`` collapses LOSS and NOISE into "not a win", which is the right question when the
+    transform is free to decline. It is the wrong question when declining is itself a
+    decision: a transform that wins in one regime and is *measured slower* in another is a
+    different situation from one that wins in the first and says nothing about the second.
+    """
+    import math
+
+    if sigmas is None:
+        sigmas = _NOISE_SIGMAS
+    if probe.speedup <= 0:
+        return "NOISE"
+    if abs(math.log(probe.speedup)) <= sigmas * math.log1p(max(probe.spread, 0.0)):
+        return "NOISE"
+    return "WIN" if probe.speedup > 1.0 else "LOSS"
 
 
 class ChannelPeriodUnknown(LookupError):
@@ -414,8 +442,6 @@ def streaming_pad_wins(
     cannot measure (host memory, no room for the pools): unknown is not a win.
     """
     import math
-    import statistics
-    import time
 
     import torch
 
@@ -451,32 +477,211 @@ def streaming_pad_wins(
         torch.nn.functional.linear(x, pool[counters[arm] % len(pool)])
         counters[arm] += 1
 
-    def _time(arm: int) -> float:
-        sync(str(weight.device))
+    with torch.no_grad():
+        return paired_speedup(
+            lambda: _call(0),
+            lambda: _call(1),
+            lambda: sync(str(weight.device)),
+            rounds=rounds,
+            calls=calls,
+        )
+
+
+def paired_speedup(
+    call_a,
+    call_b,
+    sync,
+    *,
+    rounds: int = PROBE_ROUNDS,
+    calls: int = PROBE_CALLS,
+    warmup_s: float = PROBE_WARMUP_S,
+) -> Optional["Probe"]:
+    """Time two ways of doing the same thing against each other, and judge the difference.
+
+    The shape every load-time decision in this module takes: warm both arms together until
+    the part's clocks have settled, then time them in interleaved rounds with the order
+    flipped each round, and read the median of the per-round log-ratios against its own
+    robust scatter -- the same judgement ``scripts/kernel_trials.py`` makes on a trial, so a
+    decision taken at load and a decision taken in the trial loop mean the same thing.
+
+    ``call_a`` is the arm being defended (what the stack does today) and ``call_b`` the
+    challenger, so a speedup above one favours ``call_b``. ``sync`` takes no arguments and
+    must drain the device. None when a round measured no time at all.
+    """
+    import math
+    import statistics
+    import time
+
+    def _time(fn) -> float:
+        sync()
         start = time.perf_counter()
         for _ in range(calls):
-            _call(arm)
-        sync(str(weight.device))
+            fn()
+        sync()
         return time.perf_counter() - start
 
-    with torch.no_grad():
-        deadline = time.perf_counter() + PROBE_WARMUP_S
-        while time.perf_counter() < deadline:
-            _call(0)
-            _call(1)
-        samples: List[Tuple[float, float]] = []
-        for r in range(rounds):
-            # Flip the order each round so neither arm systematically inherits the other's
-            # clock state; the pools are released when this function returns.
-            if r % 2 == 0:
-                a, b = _time(0), _time(1)
-            else:
-                b, a = _time(1), _time(0)
-            samples.append((a, b))
+    deadline = time.perf_counter() + warmup_s
+    while time.perf_counter() < deadline:
+        call_a()
+        call_b()
+    samples: List[Tuple[float, float]] = []
+    for r in range(rounds):
+        # Flip the order each round so neither arm systematically inherits the other's
+        # clock state.
+        if r % 2 == 0:
+            a, b = _time(call_a), _time(call_b)
+        else:
+            b, a = _time(call_b), _time(call_a)
+        samples.append((a, b))
     if any(a <= 0 or b <= 0 for a, b in samples):
         return None
     ratios = [math.log(a / b) for a, b in samples]
     center = statistics.median(ratios)
     sigma = _MAD_TO_SIGMA * statistics.median(abs(v - center) for v in ratios)
-    win = center > 0 and center > _NOISE_SIGMAS * sigma
-    return PadProbe(win=win, speedup=math.exp(center), spread=math.exp(sigma) - 1)
+    return Probe(
+        win=center > 0 and center > _NOISE_SIGMAS * sigma,
+        speedup=math.exp(center),
+        spread=math.exp(sigma) - 1,
+    )
+
+
+# ------------------------------------------------------------ the mm operand and its entry
+#
+# A third kind of load-time transform, and the first that changes which *kernel* runs.
+#
+# A model stores a projection as ``[n, k]`` row-major and the stack calls ``F.linear``,
+# which hands the GEMM library a B operand that is the transpose of that storage -- column-
+# major, in the library's descriptor a `ba` tag. Given a `ba` B operand oneDNN selects one
+# GEMM kernel; given a row-major ``[k, n]`` one it selects another, and on a large-M problem
+# the second is the faster of the two. It is also the kernel the part's peak-throughput
+# calibration probe runs, because that probe's operand is already row-major -- so the
+# transform is what makes a projection run the kernel the part's peak was measured on.
+#
+# Two things have to change together and neither is sufficient alone:
+#
+# - the *operand*: the weight re-laid so its transpose is contiguous. A transposed **view**
+#   of the original storage carries the original descriptor and changes no selection; the
+#   copy is real, and it costs one weight's worth of memory traffic once, at load.
+# - the *entry point*: ``aten.mm`` on that operand rather than ``F.linear`` on its
+#   transpose. Measured on the same operand, the linear entry point gave the layout's gain
+#   back; ``mm`` is the shallowest entry that reaches the primitive.
+#
+# Unlike the pitch rule there is no arithmetic here that predicts the answer: which kernel a
+# library selects, and whether the selected one is faster at the M this deployment presents,
+# are properties of the library and the part. So the structural test below only rejects
+# weights the transform is *meaningless* for, and every weight it admits is decided by
+# measuring both arms at that weight's own shape -- see :func:`mm_entry_wins`.
+
+
+def mm_operand(weight: "torch.Tensor") -> "torch.Tensor":
+    """The ``[k, n]`` right-hand operand ``aten.mm`` takes for an ``[n, k]`` weight.
+
+    A view, never a copy. It is contiguous exactly when ``weight`` has been through
+    :func:`to_mm_operand_layout` -- which is the whole point of that function.
+    """
+    return weight.t()
+
+
+def mm_operand_ready(weight: "torch.Tensor") -> bool:
+    """Whether ``mm_operand(weight)`` is already the contiguous ``[k, n]`` the win needs."""
+    return weight.ndim == 2 and weight.t().is_contiguous()
+
+
+def is_row_major(weight: "torch.Tensor") -> bool:
+    """Whether a 2-D tensor is plain ``[n, k]`` row-major, as a model stores a projection."""
+    return weight.ndim == 2 and weight.stride(1) == 1 and weight.stride(0) == weight.shape[1]
+
+
+def to_mm_operand_layout(weight: "torch.Tensor") -> Optional["torch.Tensor"]:
+    """``weight`` re-laid so that ``mm_operand`` of it is contiguous, or None.
+
+    Same shape, dtype, device and values; only the strides differ, so everything that reads
+    ``weight.shape`` -- weight loaders, tensor-parallel bookkeeping, ``F.linear`` itself --
+    keeps working. None when the tensor is not a plain row-major 2-D weight: something has
+    already re-laid it (the row pad, or vLLM's own N-contiguous option) and stacking a
+    second layout transform on top of the first would measure neither.
+    """
+    if not is_row_major(weight):
+        return None
+    return weight.t().contiguous().t()
+
+
+def mm_entry_wins(
+    weight: "torch.Tensor",
+    converted: "torch.Tensor",
+    *,
+    m: int,
+    rounds: int = PROBE_ROUNDS,
+    calls: int = PROBE_CALLS,
+    pool_bytes: Optional[int] = None,
+) -> Optional["Probe"]:
+    """Time the production call against the mm entry on the converted operand, at ``m`` rows.
+
+    Arm A is exactly what the stack does today -- ``F.linear`` on the weight as stored. Arm B
+    is ``aten.mm`` on ``converted``'s transpose. Both arms rotate over enough copies to
+    exceed the last-level cache, because a weight is not cache-resident when a model runs.
+
+    ``m`` is the decision's whole context: the same lever measured at a prefill-sized M and
+    at a decode-sized one does not give the same answer, and a caller that wants to know
+    about both asks twice. Returns None when it cannot measure -- host memory, no capability
+    record, no room for the pools. Unknown is not a win.
+    """
+    import math
+
+    import torch
+
+    if weight.device.type == "cpu" or not mm_operand_ready(converted):
+        return None
+    try:
+        from flashinfer_bench.device import get_accelerator
+
+        accel = get_accelerator(str(weight.device))
+        if pool_bytes is None:
+            pool_bytes = streaming_pool_bytes(weight.device)
+        sync = accel.synchronize
+    except Exception:
+        return None
+    if pool_bytes is None:
+        return None
+
+    k = weight.shape[1]
+    bytes_each = weight.numel() * weight.element_size() or 1
+    copies = max(2, math.ceil(pool_bytes / bytes_each))
+    try:
+        stored: List["torch.Tensor"] = [weight] + [weight.clone() for _ in range(copies - 1)]
+        operands: List["torch.Tensor"] = [mm_operand(converted)] + [
+            mm_operand(w.t().contiguous().t()) for w in stored[1:]
+        ]
+        rows: List["torch.Tensor"] = [torch.randn((m, k), dtype=weight.dtype, device=weight.device)]
+    except RuntimeError:  # no room for the pools; leave the weight as it is
+        return None
+
+    counters = [0, 0]
+
+    def _linear() -> None:
+        torch.nn.functional.linear(rows[0], stored[counters[0] % len(stored)])
+        counters[0] += 1
+
+    def _mm() -> None:
+        torch.ops.aten.mm.default(rows[0], operands[counters[1] % len(operands)])
+        counters[1] += 1
+
+    try:
+        with torch.no_grad():
+            return paired_speedup(
+                _linear,
+                _mm,
+                lambda: sync(str(weight.device)),
+                rounds=rounds,
+                calls=calls,
+            )
+    finally:
+        # Hand the pools and the arms' results back to the driver before returning. A
+        # serving stack sizes its KV cache from the free memory it finds after loading, so a
+        # probe that left a few hundred megabytes cached would give the measured arm a
+        # smaller cache than the arm it is compared against -- and the A/B would then differ
+        # by the batch size as well as by the kernel.
+        stored.clear()
+        operands.clear()
+        rows.clear()
+        accel.empty_cache()

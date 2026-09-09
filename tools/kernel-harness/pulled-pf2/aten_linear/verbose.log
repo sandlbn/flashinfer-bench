@@ -1,0 +1,188 @@
+onednn_verbose,v1,info,oneDNN v3.12.0 (commit 80afa71049cd69a3df32adcccb623b12cd7baa22)
+onednn_verbose,v1,info,gpu,runtime:SYCL
+onednn_verbose,v1,info,gpu,engine,sycl gpu device count:2
+onednn_verbose,v1,info,gpu,engine,0,backend:Level Zero,name:Intel(R) Arc(TM) B580 Graphics,driver_version:1.17.39395,binary_kernels:enabled
+onednn_verbose,v1,info,gpu,engine,1,backend:Level Zero,name:Intel(R) Graphics,driver_version:1.17.39395,binary_kernels:enabled
+onednn_verbose,v1,info,graph,backend,0:dnnl_backend
+onednn_verbose,v1,primitive,info,template:operation,engine,primitive,implementation,prop_kind,memory_descriptors,attributes,auxiliary,problem_desc,exec_time
+onednn_verbose,v1,graph,info,template:operation,engine,partition_id,partition_kind,op_names,data_formats,logical_tensors,fpmath_mode,implementation,backend,exec_time
+onednn_verbose,v1,primitive,create:dispatch,gemm,gpu:0,gemm,jit:xe_hp:gemm:any,undef,src_a:bf16::blocked:ab::f0 src_b:bf16::blocked:ba::f0 dst:bf16::blocked:ab::f0,,,8x1024:1024x4096,unsupported format tag,src/gpu/intel/gemm/jit_xe_hp_systolic.cpp:79
+onednn_verbose,v1,info,gpu,gemm,consider:G gemm HHS T@16N@16N 16 16 at32+m32@32 am64+m64@64 aB wg 4x2 xaf st vav pt sr br sb64 bk0 sm sn grf256 sys,score:4351603.806669
+onednn_verbose,v1,info,gpu,gemm,consider:G gemm HHS T@16N@16N 16 16 at32+m32@64 am64+m64@64 aB wg 2x2x8 kr xaf st vav hi pt sr br sb64 bk0 sm sn grf256 sys,score:15479593.424029
+onednn_verbose,v1,info,gpu,gemm,consider:G gemm HHS T@16N@16N 16 16 at16+m32@48 am32+m64@48 aB wg 8x4 af vav hi pt sr br sb64 bk0 sm sn grf256 sys,score:8248905.559680
+onednn_verbose,v1,info,gpu,gemm,consider:G gemm HHS T@16N@16N 16 8 at32+m16@48 am16x2+m32@32 aB wg 2x4x4 kr xaf st vav hi pt sr br sb64 bk0 sm sn grf256 sys,score:9337311.141920
+onednn_verbose,v1,info,gpu,gemm,consider:G gemm HHS T@16N@16N 4 16 am32+C32@64 at32 aS wg 1x1x16 ikr af vav sr sb256 bk0 bm0 sys rr,score:40963944.510419
+onednn_verbose,v1,info,gpu,gemm,consider:G gemm HHS T@16N@16N 16 16 at16x2+m32@48 am32+m16@64 aB wg 4x2x4 kr xaf st vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb,score:8546242.433120
+onednn_verbose,v1,info,gpu,gemm,consider:G gemm HHS T@16N@16N 16 16 at32+m32@32 am64+m64@64 aB wg 4x2 xaf st vav pt sr br sb64 bk0 sm sn grf256 sys,score:4351603.806669
+onednn_verbose,v1,info,gpu,gemm,consider:G gemm HHS T@16N@16N 16 16 at32+m32@64 am64+m64@64 aB wg 2x2x8 kr xaf st vav hi pt sr br sb64 bk0 sm sn grf256 sys,score:15479593.424029
+onednn_verbose,v1,info,gpu,gemm,consider:G gemm HHS T@16N@16N 16 16 at16+m32@48 am32+m64@48 aB wg 8x4 af vav hi pt sr br sb64 bk0 sm sn grf256 sys,score:8248905.559680
+onednn_verbose,v1,info,gpu,gemm,consider:G gemm HHS T@16N@16N 16 8 at32+m16@48 am16x2+m32@32 aB wg 2x4x4 kr xaf st vav hi pt sr br sb64 bk0 sm sn grf256 sys,score:9337311.141920
+onednn_verbose,v1,info,gpu,gemm,consider:G gemm HHS T@16N@16N 4 16 am32+C32@64 at32 aS wg 1x1x16 ikr af vav sr sb256 bk0 bm0 sys rr,score:40963944.510419
+onednn_verbose,v1,info,gpu,gemm,consider:G gemm HHS T@16N@16N 16 16 at16x2+m32@48 am32+m16@64 aB wg 4x2x4 kr xaf st vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb,score:8546242.433120
+onednn_verbose,v1,info,gpu,gemm,consider:G gemm HHS T@16N@16N 16 16 at32+m32@32 am64+m64@64 aB wg 4x2 xaf st vav pt sr br sb64 bk0 sm sn grf256 sys,score:4351603.806669
+onednn_verbose,v1,info,gpu,gemm,consider:G gemm HHS T@16N@16N 16 16 at32+m32@64 am64+m64@64 aB wg 2x2x8 kr xaf st vav hi pt sr br sb64 bk0 sm sn grf256 sys,score:15479593.424029
+onednn_verbose,v1,info,gpu,gemm,consider:G gemm HHS T@16N@16N 16 16 at16+m32@48 am32+m64@48 aB wg 8x4 af vav hi pt sr br sb64 bk0 sm sn grf256 sys,score:8248905.559680
+onednn_verbose,v1,info,gpu,gemm,consider:G gemm HHS T@16N@16N 16 8 at32+m16@48 am16x2+m32@32 aB wg 2x4x4 kr xaf st vav hi pt sr br sb64 bk0 sm sn grf256 sys,score:9337311.141920
+onednn_verbose,v1,info,gpu,gemm,consider:G gemm HHS T@16N@16N 4 16 am32+C32@64 at32 aS wg 1x1x16 ikr af vav sr sb256 bk0 bm0 sys rr,score:40963944.510419
+onednn_verbose,v1,info,gpu,gemm,consider:G gemm HHS T@16N@16N 16 16 at16x2+m32@48 am32+m16@64 aB wg 4x2x4 kr xaf st vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb,score:8546242.433120
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm BBS T@4N@8N 64 40 at16+m64@48 am32+m32@56 aB wg 4x8 xaf st vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb,score:9261944.846755
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm BBS T@4N@8N 32 64 at16x2+m64@48 am32+m32@64 aB wg 8x4 xaf vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb,score:8192299.391786
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm BBS T@4N@8N 32 48 at16x2+m32@32 am32+m64@48 aB wg 8x4 xaf vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb,score:7214887.562941
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm BBS T@4N@8N 32 64 at16+m32@32 am32+m32@48 aB wg 8x2x2 kr af vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb,score:7010181.644005
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm BBS T@4N@8N 32 64 at16+m32@32 am32+m32@48 aB wg 8x2x2 kr af vav hi pt sr br sb64 bk0 sm sn grf256 sys,score:6953627.056202
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm BBS T@4N@8N 16 64 at16+m32@64 am16 aB wg 16x2 cb3x2 ks32 af vav hi pt sr br bk0 sm sn grf256 sys,score:6661912.217993
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm BBS T@4N@8N 32 32 at32+m32@48 am16x2+m64@32 aB wg 4x4x2 kr xaf st vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb,score:7151030.545906
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm BBS T@4N@8N 32 32 at16+m64@32 am32+m16@32 aB wg 4x4x2 kr xaf vav hi pt sr br sb64 bk0 sm sn grf256 sys,score:8227137.724736
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm BBS T@4N@8N 16 32 at16+m64@64 am32+m16@64 aB wg 8x4 af vav hi pt sr br sb64 bk0 sm sn grf256 sys,score:7569809.580268
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm BBS T@4N@8N 32 32 at32+m32@48 am32+m32@48 aB wg 4x2x4 kr xaf vav hi pt sr br sb64 bk0 sm sn grf256 kv afb sys,score:5626159.440077
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm BBS T@4N@8N 16 16 at16+m32@48 am32+m64@48 aB wg 8x4 af vav hi pt sr br sb64 bk0 sm sn grf256 sys,score:6070625.842394
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm BBS T@4N@8N 32 32 at32+m32@48 am32+m32@48 aB wg 2x2x8 kr xaf vav hi pt sr br sb64 bk0 sm sn grf256 kv afb sys,score:6995361.700570
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm BBS T@4N@8N 16 16 at16+m32@48 am32+m32@48 aB wg 4x4x2 kr xaf vav hi pt sr br sb64 bk0 sm sn grf256 sys,score:8274584.992032
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm BBS T@4N@8N 16 8 at16+m32@48 am16+m64@48 aB wg 4x8 xaf st vav hi pt sr br sb64 bk0 sm sn grf256 sys,score:11500756.906209
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm BBS T@4N@8N 16 16 at16x2+m32@48 am32+m16@64 aB wg 4x2x4 kr xaf st vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb,score:5150499.993862
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm BBS T@4N@8N 16 16 at32+m16@48 am16x2+m32@32 aB wg 4x2x4 kr af vav hi pt sr br sb64 bk0 sm sn grf256 sys,score:7784670.490982
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm BBS T@4N@8N 16 16 at32+m32@64 am32+m64@64 aB wg 2x2x8 kr xaf vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb,score:5868914.782477
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm BBS T@4N@8N 16 8 at32+m16@48 am16x2+m32@32 aB wg 2x4x4 kr xaf st vav hi pt sr br sb64 bk0 sm sn grf256 sys,score:10530188.196181
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm BBS T@4N@8N 16 4 at16+m64@16 am64+m64@64 aB wg 8x4 af vav li nmk pt sr br sb64 bk0 sm sys kv afb,score:5306033.127898
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm BBS T@4N@4N 32 64 at16+m32@48 aB16 aB wg 8x4 cb4x2 ks32 af vav hi pt sr br bk0 sm sn dm grf256 sys kv afb,score:9039974.306309
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm BBS T@4N@4N 16 96 at16+m32@48 aB16 aB wg 16x2 cb4x2 ks64 xaf st vav hi pt sr br bk0 sm sn dm grf256 sys kv afb,score:7828886.263459
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm BBS TNN 16 64 at32+m32@64 aB16x2 aB wg 16x2 cb3 ks32 xaf st vav hi pt sr br bk0 sm sn nb 0x2 dm grf256 sys kv afb l4 l2d,score:6322944.559701
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm BBS TNN 16 64 at16x2+m32@32 aB16x2 aB wg 8x2x2 kr cb4 ks32 xaf st vav hi pt sr br bk0 sm sn dm grf256 kv afb sys l4 l2d,score:7956691.025000
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm BBS TNN 16 32 at16+m32@48 aB32 aB wg 8x4 cb4x2 ks32 xaf vav hi pt sr br bk0 sm sn dm grf256 sys l4 l2d,score:8520743.504819
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm BBS TNN 16 64 at16+m32@16 aB32 aB wg 8x1x4 kr cb4x2 ks32 xaf st vav hi pt sr br bk0 sm sn dm grf256 kv afb sys l4 l2d,score:6175107.166106
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm BBS TNN 16 32 at32+m32@32 aB16 aB wg 8x2x4 kr cb4 ks16 af vav hi pt sr br bk0 sm sn dm sys l4 l2d,score:8657405.426155
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm BBS TNN 16 16 at16+m16@64 aB32x2 aB wg 8x4 cb4x2 ks64 xaf st vav hi pt sr br bk0 sm sn nb 0x4 dm grf256 sys l4 l2d,score:7333463.089194
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm BBS TNN 16 32 at32+m32@32 aB16x2 aB wg 4x2x4 kr cb4x2 ks32 xaf st vav hi pt sr br bk0 sm sn dm grf256 kv afb sys l4 l2d,score:7498210.622426
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm BBS TNN 16 32 at32+m16@32 aB16 aB wg 4x2x4 kr cb4x2 ks32 af vav hi pt sr br bk0 sm sn dm grf256 sys l4 l2d,score:11375393.882063
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm BBS TNN 16 8 at16+m32@64 aB64 aB wg 4x8 cb4x2 ks64 xaf st vav hi pt sr br bk0 sm sn dm grf256 sys l4 l2d,score:11331243.084265
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm BBS TNN 16 16 at16x2+m32@48 aB32 aB wg 4x2x4 kr cb4x2 ks64 af vav hi pt sr br bk0 sm sn dm grf256 kv afb sys l4 l2d,score:5989661.611802
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm BBS TNN 16 16 at32+m32@48 aB32x2 aB wg 2x2x8 kr cb4x2 ks32 xaf vav hi pt sr br bk0 sm sn dm grf256 kv afb sys l4 l2d,score:6375706.071923
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm BBS TNN 16 16 at16+m16@32 aB64+m32@32 aB wg 2x2x8 kr af vav hi pt sr br sb64 bk0 sm sn dm grf256 sys l4 l2d,score:13870683.929366
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm BBS TNN 16 8 at16x2+m64@16 aB32+m16@32 aB wg 4x2x4 kr af vav li nmk pt sr br sb64 bk0 sm sn dm grf256 sys kv afb l4 l2d,score:4965831.660192
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm BBS TNN 16 1 aS32+S32@48 aB32+S16@48 aB wg 4x1 af vav nmk li pt br sr sb256 bk0 sm grf256 sys l4 kd,score:10159419.237517
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm BBS T@8N@4N 4 16 am32+C32@64 at32 aS wg 1x1x16 ikr af vav sr sb256 bk0 bm0 sys rr,score:21436144.858368
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm BBS T@8N@4N 4 16 am32+m64@64 at32+m16@64 aS wg 1x1x16 kr af vav sr sb64 bm0 bk0 sm sn grf256 sys ikr,score:33553346.259026
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 64 40 at16+m64@48 am32+m32@56 aB wg 4x8 xaf st vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb,score:10772374.501488
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 32 64 at16x2+m64@48 am32+m32@64 aB wg 8x4 xaf vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb,score:8579419.572103
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 32 64 at16x2+m64@48 am32+m32@64 aB wg 8x4 xaf vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb cti,score:100615934.727142
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 32 48 at16x2+m32@32 am32+m64@48 aB wg 8x4 xaf vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb,score:7744560.226918
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 32 64 at16+m32@32 am32+m32@48 aB wg 8x2x2 kr af vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb,score:7500665.345401
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 32 64 at16+m32@32 am32+m32@48 aB wg 8x2x2 kr af vav hi pt sr br sb64 bk0 sm sn grf256 sys,score:7352046.555611
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 16 64 at16+m32@64 am16 aB wg 16x2 cb3x2 ks32 af vav hi pt sr br bk0 sm sn grf256 sys,score:7202051.319944
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 32 32 at32+m32@48 am16x2+m64@32 aB wg 4x4x2 kr xaf st vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb,score:7781479.685461
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 32 32 at16+m64@32 am32+m16@32 aB wg 4x4x2 kr xaf vav hi pt sr br sb64 bk0 sm sn grf256 sys,score:8449483.654127
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 16 32 at16+m64@64 am32+m16@64 aB wg 8x4 af vav hi pt sr br sb64 bk0 sm sn grf256 sys,score:7694605.327947
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 32 32 at32+m32@48 am32+m32@48 aB wg 4x2x4 kr xaf vav hi pt sr br sb64 bk0 sm sn grf256 kv afb sys,score:6055121.445451
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 16 16 at16+m32@48 am32+m64@48 aB wg 8x4 af vav hi pt sr br sb64 bk0 sm sn grf256 sys,score:6119848.201157
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 32 32 at32+m32@48 am32+m32@48 aB wg 2x2x8 kr xaf vav hi pt sr br sb64 bk0 sm sn grf256 kv afb sys,score:7179556.845390
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 16 16 at16+m32@48 am32+m32@48 aB wg 4x4x2 kr xaf vav hi pt sr br sb64 bk0 sm sn grf256 sys,score:8353039.694592
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 16 8 at16+m32@48 am16+m64@48 aB wg 4x8 xaf st vav hi pt sr br sb64 bk0 sm sn grf256 sys,score:11504867.228902
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 16 16 at16x2+m32@48 am32+m16@64 aB wg 4x2x4 kr xaf st vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb,score:5216869.406669
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 16 16 at32+m16@48 am16x2+m32@32 aB wg 4x2x4 kr af vav hi pt sr br sb64 bk0 sm sn grf256 sys,score:7795323.087536
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 16 16 at32+m32@64 am32+m64@64 aB wg 2x2x8 kr xaf vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb,score:5854349.289536
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 16 8 at32+m16@48 am16x2+m32@32 aB wg 2x4x4 kr xaf st vav hi pt sr br sb64 bk0 sm sn grf256 sys,score:10555732.814473
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 16 4 at16+m64@16 am64+m64@64 aB wg 8x4 af vav li nmk pt sr br sb64 bk0 sm sys kv afb,score:5311280.282701
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@4N 32 64 at16+m32@48 aB16 aB wg 8x4 cb4x2 ks32 af vav hi pt sr br bk0 sm sn dm grf256 sys kv afb,score:9291712.956693
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@4N 16 96 at16+m32@48 aB16 aB wg 16x2 cb4x2 ks64 xaf st vav hi pt sr br bk0 sm sn dm grf256 sys kv afb,score:8365024.649395
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS TNN 16 64 at32+m32@64 aB16x2 aB wg 16x2 cb3 ks32 xaf st vav hi pt sr br bk0 sm sn nb 0x2 dm grf256 sys kv afb l4 l2d,score:6657780.806812
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS TNN 16 64 at16x2+m32@32 aB16x2 aB wg 8x2x2 kr cb4 ks32 xaf st vav hi pt sr br bk0 sm sn dm grf256 kv afb sys l4 l2d,score:8584260.046522
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS TNN 16 32 at16+m32@48 aB32 aB wg 8x4 cb4x2 ks32 xaf vav hi pt sr br bk0 sm sn dm grf256 sys l4 l2d,score:8677916.641467
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS TNN 16 64 at16+m32@16 aB32 aB wg 8x1x4 kr cb4x2 ks32 xaf st vav hi pt sr br bk0 sm sn dm grf256 kv afb sys l4 l2d,score:6816176.412913
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS TNN 16 32 at32+m32@32 aB16 aB wg 8x2x4 kr cb4 ks16 af vav hi pt sr br bk0 sm sn dm sys l4 l2d,score:8733372.962487
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS TNN 16 16 at16+m16@64 aB32x2 aB wg 8x4 cb4x2 ks64 xaf st vav hi pt sr br bk0 sm sn nb 0x4 dm grf256 sys l4 l2d,score:7383999.781376
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS TNN 16 32 at32+m32@32 aB16x2 aB wg 4x2x4 kr cb4x2 ks32 xaf st vav hi pt sr br bk0 sm sn dm grf256 kv afb sys l4 l2d,score:7524236.412378
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS TNN 16 32 at32+m16@32 aB16 aB wg 4x2x4 kr cb4x2 ks32 af vav hi pt sr br bk0 sm sn dm grf256 sys l4 l2d,score:11429925.782878
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS TNN 16 8 at16+m32@64 aB64 aB wg 4x8 cb4x2 ks64 xaf st vav hi pt sr br bk0 sm sn dm grf256 sys l4 l2d,score:11340281.176324
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS TNN 16 16 at16x2+m32@48 aB32 aB wg 4x2x4 kr cb4x2 ks64 af vav hi pt sr br bk0 sm sn dm grf256 kv afb sys l4 l2d,score:6053857.324122
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS TNN 16 16 at32+m32@48 aB32x2 aB wg 2x2x8 kr cb4x2 ks32 xaf vav hi pt sr br bk0 sm sn dm grf256 kv afb sys l4 l2d,score:6376369.273638
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS TNN 16 16 at16+m16@32 aB64+m32@32 aB wg 2x2x8 kr af vav hi pt sr br sb64 bk0 sm sn dm grf256 sys l4 l2d,score:13868248.755682
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS TNN 16 8 at16x2+m64@16 aB32+m16@32 aB wg 4x2x4 kr af vav li nmk pt sr br sb64 bk0 sm sn dm grf256 sys kv afb l4 l2d,score:4945613.075104
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS TNN 16 1 aS32+S32@48 aB32+S16@48 aB wg 4x1 af vav nmk li pt br sr sb256 bk0 sm grf256 sys l4 kd,score:10152792.914638
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@8N@4N 4 16 am32+C32@64 at32 aS wg 1x1x16 ikr af vav sr sb256 bk0 bm0 sys rr,score:21436144.858368
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@8N@4N 4 16 am32+m64@64 at32+m16@64 aS wg 1x1x16 kr af vav sr sb64 bm0 bk0 sm sn grf256 sys ikr,score:33553346.259026
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 64 40 at16+m64@48 am32+m32@56 aB wg 4x8 xaf st vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb,score:10772374.501488
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 32 64 at16x2+m64@48 am32+m32@64 aB wg 8x4 xaf vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb,score:8579419.572103
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 32 64 at16x2+m64@48 am32+m32@64 aB wg 8x4 xaf vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb cti,score:100615934.727142
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 32 48 at16x2+m32@32 am32+m64@48 aB wg 8x4 xaf vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb,score:7744560.226918
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 32 64 at16+m32@32 am32+m32@48 aB wg 8x2x2 kr af vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb,score:7500665.345401
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 32 64 at16+m32@32 am32+m32@48 aB wg 8x2x2 kr af vav hi pt sr br sb64 bk0 sm sn grf256 sys,score:7352046.555611
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 16 64 at16+m32@64 am16 aB wg 16x2 cb3x2 ks32 af vav hi pt sr br bk0 sm sn grf256 sys,score:7202051.319944
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 32 32 at32+m32@48 am16x2+m64@32 aB wg 4x4x2 kr xaf st vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb,score:7781479.685461
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 32 32 at16+m64@32 am32+m16@32 aB wg 4x4x2 kr xaf vav hi pt sr br sb64 bk0 sm sn grf256 sys,score:8449483.654127
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 16 32 at16+m64@64 am32+m16@64 aB wg 8x4 af vav hi pt sr br sb64 bk0 sm sn grf256 sys,score:7694605.327947
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 32 32 at32+m32@48 am32+m32@48 aB wg 4x2x4 kr xaf vav hi pt sr br sb64 bk0 sm sn grf256 kv afb sys,score:6055121.445451
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 16 16 at16+m32@48 am32+m64@48 aB wg 8x4 af vav hi pt sr br sb64 bk0 sm sn grf256 sys,score:6119848.201157
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 32 32 at32+m32@48 am32+m32@48 aB wg 2x2x8 kr xaf vav hi pt sr br sb64 bk0 sm sn grf256 kv afb sys,score:7179556.845390
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 16 16 at16+m32@48 am32+m32@48 aB wg 4x4x2 kr xaf vav hi pt sr br sb64 bk0 sm sn grf256 sys,score:8353039.694592
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 16 8 at16+m32@48 am16+m64@48 aB wg 4x8 xaf st vav hi pt sr br sb64 bk0 sm sn grf256 sys,score:11504867.228902
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 16 16 at16x2+m32@48 am32+m16@64 aB wg 4x2x4 kr xaf st vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb,score:5216869.406669
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 16 16 at32+m16@48 am16x2+m32@32 aB wg 4x2x4 kr af vav hi pt sr br sb64 bk0 sm sn grf256 sys,score:7795323.087536
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 16 16 at32+m32@64 am32+m64@64 aB wg 2x2x8 kr xaf vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb,score:5854349.289536
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 16 8 at32+m16@48 am16x2+m32@32 aB wg 2x4x4 kr xaf st vav hi pt sr br sb64 bk0 sm sn grf256 sys,score:10555732.814473
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 16 4 at16+m64@16 am64+m64@64 aB wg 8x4 af vav li nmk pt sr br sb64 bk0 sm sys kv afb,score:5311280.282701
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@4N 32 64 at16+m32@48 aB16 aB wg 8x4 cb4x2 ks32 af vav hi pt sr br bk0 sm sn dm grf256 sys kv afb,score:9291712.956693
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@4N 16 96 at16+m32@48 aB16 aB wg 16x2 cb4x2 ks64 xaf st vav hi pt sr br bk0 sm sn dm grf256 sys kv afb,score:8365024.649395
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS TNN 16 64 at32+m32@64 aB16x2 aB wg 16x2 cb3 ks32 xaf st vav hi pt sr br bk0 sm sn nb 0x2 dm grf256 sys kv afb l4 l2d,score:6657780.806812
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS TNN 16 64 at16x2+m32@32 aB16x2 aB wg 8x2x2 kr cb4 ks32 xaf st vav hi pt sr br bk0 sm sn dm grf256 kv afb sys l4 l2d,score:8584260.046522
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS TNN 16 32 at16+m32@48 aB32 aB wg 8x4 cb4x2 ks32 xaf vav hi pt sr br bk0 sm sn dm grf256 sys l4 l2d,score:8677916.641467
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS TNN 16 64 at16+m32@16 aB32 aB wg 8x1x4 kr cb4x2 ks32 xaf st vav hi pt sr br bk0 sm sn dm grf256 kv afb sys l4 l2d,score:6816176.412913
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS TNN 16 32 at32+m32@32 aB16 aB wg 8x2x4 kr cb4 ks16 af vav hi pt sr br bk0 sm sn dm sys l4 l2d,score:8733372.962487
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS TNN 16 16 at16+m16@64 aB32x2 aB wg 8x4 cb4x2 ks64 xaf st vav hi pt sr br bk0 sm sn nb 0x4 dm grf256 sys l4 l2d,score:7383999.781376
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS TNN 16 32 at32+m32@32 aB16x2 aB wg 4x2x4 kr cb4x2 ks32 xaf st vav hi pt sr br bk0 sm sn dm grf256 kv afb sys l4 l2d,score:7524236.412378
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS TNN 16 32 at32+m16@32 aB16 aB wg 4x2x4 kr cb4x2 ks32 af vav hi pt sr br bk0 sm sn dm grf256 sys l4 l2d,score:11429925.782878
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS TNN 16 8 at16+m32@64 aB64 aB wg 4x8 cb4x2 ks64 xaf st vav hi pt sr br bk0 sm sn dm grf256 sys l4 l2d,score:11340281.176324
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS TNN 16 16 at16x2+m32@48 aB32 aB wg 4x2x4 kr cb4x2 ks64 af vav hi pt sr br bk0 sm sn dm grf256 kv afb sys l4 l2d,score:6053857.324122
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS TNN 16 16 at32+m32@48 aB32x2 aB wg 2x2x8 kr cb4x2 ks32 xaf vav hi pt sr br bk0 sm sn dm grf256 kv afb sys l4 l2d,score:6376369.273638
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS TNN 16 16 at16+m16@32 aB64+m32@32 aB wg 2x2x8 kr af vav hi pt sr br sb64 bk0 sm sn dm grf256 sys l4 l2d,score:13868248.755682
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS TNN 16 8 at16x2+m64@16 aB32+m16@32 aB wg 4x2x4 kr af vav li nmk pt sr br sb64 bk0 sm sn dm grf256 sys kv afb l4 l2d,score:4945613.075104
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS TNN 16 1 aS32+S32@48 aB32+S16@48 aB wg 4x1 af vav nmk li pt br sr sb256 bk0 sm grf256 sys l4 kd,score:10152792.914638
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@8N@4N 4 16 am32+C32@64 at32 aS wg 1x1x16 ikr af vav sr sb256 bk0 bm0 sys rr,score:21436144.858368
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@8N@4N 4 16 am32+m64@64 at32+m16@64 aS wg 1x1x16 kr af vav sr sb64 bm0 bk0 sm sn grf256 sys ikr,score:33553346.259026
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 64 40 at16+m64@48 am32+m32@56 aB wg 4x8 xaf st vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb,score:10772374.501488
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 32 64 at16x2+m64@48 am32+m32@64 aB wg 8x4 xaf vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb,score:8579419.572103
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 32 64 at16x2+m64@48 am32+m32@64 aB wg 8x4 xaf vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb cti,score:100615934.727142
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 32 48 at16x2+m32@32 am32+m64@48 aB wg 8x4 xaf vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb,score:7744560.226918
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 32 64 at16+m32@32 am32+m32@48 aB wg 8x2x2 kr af vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb,score:7500665.345401
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 32 64 at16+m32@32 am32+m32@48 aB wg 8x2x2 kr af vav hi pt sr br sb64 bk0 sm sn grf256 sys,score:7352046.555611
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 16 64 at16+m32@64 am16 aB wg 16x2 cb3x2 ks32 af vav hi pt sr br bk0 sm sn grf256 sys,score:7202051.319944
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 32 32 at32+m32@48 am16x2+m64@32 aB wg 4x4x2 kr xaf st vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb,score:7781479.685461
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 32 32 at16+m64@32 am32+m16@32 aB wg 4x4x2 kr xaf vav hi pt sr br sb64 bk0 sm sn grf256 sys,score:8449483.654127
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 16 32 at16+m64@64 am32+m16@64 aB wg 8x4 af vav hi pt sr br sb64 bk0 sm sn grf256 sys,score:7694605.327947
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 32 32 at32+m32@48 am32+m32@48 aB wg 4x2x4 kr xaf vav hi pt sr br sb64 bk0 sm sn grf256 kv afb sys,score:6055121.445451
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 16 16 at16+m32@48 am32+m64@48 aB wg 8x4 af vav hi pt sr br sb64 bk0 sm sn grf256 sys,score:6119848.201157
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 32 32 at32+m32@48 am32+m32@48 aB wg 2x2x8 kr xaf vav hi pt sr br sb64 bk0 sm sn grf256 kv afb sys,score:7179556.845390
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 16 16 at16+m32@48 am32+m32@48 aB wg 4x4x2 kr xaf vav hi pt sr br sb64 bk0 sm sn grf256 sys,score:8353039.694592
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 16 8 at16+m32@48 am16+m64@48 aB wg 4x8 xaf st vav hi pt sr br sb64 bk0 sm sn grf256 sys,score:11504867.228902
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 16 16 at16x2+m32@48 am32+m16@64 aB wg 4x2x4 kr xaf st vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb,score:5216869.406669
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 16 16 at32+m16@48 am16x2+m32@32 aB wg 4x2x4 kr af vav hi pt sr br sb64 bk0 sm sn grf256 sys,score:7795323.087536
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 16 16 at32+m32@64 am32+m64@64 aB wg 2x2x8 kr xaf vav hi pt sr br sb64 bk0 sm sn grf256 sys kv afb,score:5854349.289536
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 16 8 at32+m16@48 am16x2+m32@32 aB wg 2x4x4 kr xaf st vav hi pt sr br sb64 bk0 sm sn grf256 sys,score:10555732.814473
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@8N 16 4 at16+m64@16 am64+m64@64 aB wg 8x4 af vav li nmk pt sr br sb64 bk0 sm sys kv afb,score:5311280.282701
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@4N 32 64 at16+m32@48 aB16 aB wg 8x4 cb4x2 ks32 af vav hi pt sr br bk0 sm sn dm grf256 sys kv afb,score:9291712.956693
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@4N@4N 16 96 at16+m32@48 aB16 aB wg 16x2 cb4x2 ks64 xaf st vav hi pt sr br bk0 sm sn dm grf256 sys kv afb,score:8365024.649395
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS TNN 16 64 at32+m32@64 aB16x2 aB wg 16x2 cb3 ks32 xaf st vav hi pt sr br bk0 sm sn nb 0x2 dm grf256 sys kv afb l4 l2d,score:6657780.806812
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS TNN 16 64 at16x2+m32@32 aB16x2 aB wg 8x2x2 kr cb4 ks32 xaf st vav hi pt sr br bk0 sm sn dm grf256 kv afb sys l4 l2d,score:8584260.046522
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS TNN 16 32 at16+m32@48 aB32 aB wg 8x4 cb4x2 ks32 xaf vav hi pt sr br bk0 sm sn dm grf256 sys l4 l2d,score:8677916.641467
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS TNN 16 64 at16+m32@16 aB32 aB wg 8x1x4 kr cb4x2 ks32 xaf st vav hi pt sr br bk0 sm sn dm grf256 kv afb sys l4 l2d,score:6816176.412913
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS TNN 16 32 at32+m32@32 aB16 aB wg 8x2x4 kr cb4 ks16 af vav hi pt sr br bk0 sm sn dm sys l4 l2d,score:8733372.962487
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS TNN 16 16 at16+m16@64 aB32x2 aB wg 8x4 cb4x2 ks64 xaf st vav hi pt sr br bk0 sm sn nb 0x4 dm grf256 sys l4 l2d,score:7383999.781376
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS TNN 16 32 at32+m32@32 aB16x2 aB wg 4x2x4 kr cb4x2 ks32 xaf st vav hi pt sr br bk0 sm sn dm grf256 kv afb sys l4 l2d,score:7524236.412378
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS TNN 16 32 at32+m16@32 aB16 aB wg 4x2x4 kr cb4x2 ks32 af vav hi pt sr br bk0 sm sn dm grf256 sys l4 l2d,score:11429925.782878
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS TNN 16 8 at16+m32@64 aB64 aB wg 4x8 cb4x2 ks64 xaf st vav hi pt sr br bk0 sm sn dm grf256 sys l4 l2d,score:11340281.176324
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS TNN 16 16 at16x2+m32@48 aB32 aB wg 4x2x4 kr cb4x2 ks64 af vav hi pt sr br bk0 sm sn dm grf256 kv afb sys l4 l2d,score:6053857.324122
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS TNN 16 16 at32+m32@48 aB32x2 aB wg 2x2x8 kr cb4x2 ks32 xaf vav hi pt sr br bk0 sm sn dm grf256 kv afb sys l4 l2d,score:6376369.273638
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS TNN 16 16 at16+m16@32 aB64+m32@32 aB wg 2x2x8 kr af vav hi pt sr br sb64 bk0 sm sn dm grf256 sys l4 l2d,score:13868248.755682
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS TNN 16 8 at16x2+m64@16 aB32+m16@32 aB wg 4x2x4 kr af vav li nmk pt sr br sb64 bk0 sm sn dm grf256 sys kv afb l4 l2d,score:4945613.075104
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS TNN 16 1 aS32+S32@48 aB32+S16@48 aB wg 4x1 af vav nmk li pt br sr sb256 bk0 sm grf256 sys l4 kd,score:10152792.914638
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@8N@4N 4 16 am32+C32@64 at32 aS wg 1x1x16 ikr af vav sr sb256 bk0 bm0 sys rr,score:21436144.858368
+onednn_verbose,v1,info,gpu,gemm,consider:F gemm HHS T@8N@4N 4 16 am32+m64@64 at32+m16@64 aS wg 1x1x16 kr af vav sr sb64 bm0 bk0 sm sn grf256 sys ikr,score:33553346.259026
+onednn_verbose,v1,info,gpu,gemm,catalog entry:G gemm HHS T@16N@16N 16 16 at32+m32@32 am64+m64@64 aB wg 4x2 xaf st vav pt sr br sb64 bk0 sm sn grf256 sys
+onednn_verbose,v1,info,gpu,gemm,kernel:gemm BB[SB] T@16N@16N 16 16 1 0 aT32#16,0{cc}+M32,32@32{cc} aM64#16,0{cc}+M64,64@64{cc} aB#16,0{cc/ub} wg 4x2 sys xaf st k64 grf256 sm sn vav di sr bf sb64 np bm16777216 bn16777216 bk16777216
+onednn_verbose,v1,primitive,create:cache_miss,gpu:0,gemm,jit:gemm:any,undef,src_a:bf16::blocked:ab::f0 src_b:bf16::blocked:ba::f0 dst:bf16::blocked:ab::f0,,,8x1024:1024x4096,2.91113
+onednn_verbose,v1,primitive,create_nested:kernel_cache_hit,gpu:0,gemm,jit:gemm:any,undef,src_a:bf16::blocked:ab::f0 src_b:bf16::blocked:ba::f0 dst:bf16::blocked:ab::f0,,,8x1024:1024x4096,0.0100098
+onednn_verbose,v1,primitive,create:nested_primitive_cache_hit,gpu:0,matmul,jit:gemm:any,undef,src:bf16::blocked:ab::f0 wei:bf16::blocked:ba::f0 dst:bf16::blocked:ab::f0,attr-scratchpad:user,,8x1024:1024x4096,0.0249023
+onednn_verbose,v1,primitive,exec:check,primitive,unused primitive execution argument (80),src/common/primitive_exec_types.cpp:136
+onednn_verbose,v1,primitive,exec,gpu:0,matmul,jit:gemm:any,undef,src:bf16::blocked:ab::f0 wei:bf16::blocked:ba::f0 dst:bf16::blocked:ab::f0,attr-scratchpad:user,,8x1024:1024x4096,0.976807
+onednn_verbose,v1,primitive,create:cache_hit,gpu:0,matmul,jit:gemm:any,undef,src:bf16::blocked:ab::f0 wei:bf16::blocked:ba::f0 dst:bf16::blocked:ab::f0,attr-scratchpad:user,,8x1024:1024x4096,0.0090332
+onednn_verbose,v1,primitive,exec:check,primitive,unused primitive execution argument (80),src/common/primitive_exec_types.cpp:136
+onednn_verbose,v1,primitive,exec,gpu:0,matmul,jit:gemm:any,undef,src:bf16::blocked:ab::f0 wei:bf16::blocked:ba::f0 dst:bf16::blocked:ab::f0,attr-scratchpad:user,,8x1024:1024x4096,1.24194

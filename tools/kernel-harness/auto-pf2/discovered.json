@@ -1,0 +1,1887 @@
+{
+  "model": "Qwen/Qwen3-0.6B",
+  "device_time_error": null,
+  "device_time_total_us": 93981.4,
+  "device_time_by_kernel": {
+    "gemm_kernel": 55459.4,
+    "_ZTSN6compat12experimental6detail13KernelFunctorIXadL_ZN7cutlass13device_kernelINS3_4fmha6kernel22XeFMHAFwdSplitKVKernelINS6_18DecodeProblemShapeILb1EEENS5_10collective17DecodeFwdMainloopINS5_9XeDefaultILi1EEELb1ELb0EN4cute8TiledMMAINSE_8MMA_AtomIJNSE_10XE_DPAS_TTILi8EfNS3_10bfloat16_tESI_fEEEEENSE_6LayoutINSE_5tupleIJNSE_1CILi1EEENSN_ILi4EEESO_EEENSM_IJNSN_ILi0EEESO_SR_EEEEEKNSM_IJNSL_INSN_ILi8EEESO_EENSL_INSN_ILi64EEESO_EESX_EEEEENSF_ISK_NSL_INSM_IJSO_SO_SP_EEENSM_IJSR_SR_SO_EEEEEKNSM_IJSV_NSL_INSN_ILi32EEESO_EESX_EEEEELi4ENSE_6TensorINSE_10ViewEngineINSE_8gmem_ptrIPSI_EEEENSL_INSM_IJiiiiEEENSM_IJiSO_iiEEEEEEES1I_NS19_IS1E_NSL_IS1F_NSM_IJSO_iiiEEEEEEEvvvLb0EEENSA_17DecodeFwdEpilogueIS1M_NSM_IJSU_NSN_ILi128EEEEEES1I_NS19_INS1A_INS1B_IPfEEEES1H_EEvLb0EEENS6_19DecodeTileSchedulerEEEEEvRKNT_6ParamsEEEN4sycl3_V18nd_rangeILi3EEENS22_3ext6oneapi12experimental10propertiesINS27_6detail20properties_type_listIJNS27_14property_valueINS27_18sub_group_size_keyEJSt17integral_constantIjLj16EEEEENS2B_INS25_5intel12experimental12grf_size_keyEJS2D_IjLj256EEEEEEEEEELb0EJNS1W_6ParamsEEEE": 24485.5,
+    "compat::experimental::detail::KernelFunctor<&(void cutlass::device_kernel<cutlass::fmha::kernel::XeFMHAFwdKernel<cutlass::fmha::kernel::FMHAProblemShape<true>, cutlass::fmha::collective::FMHAFwdMainloop<cutlass::fmha::XeDefault<2>, true, false, true, cute::TiledMMA<cute::MMA_Atom<cute::XE_DPAS_TT<8, float, cutlass::bfloat16_t, cutlass::bfloat16_t, float> >, cute::Layout<cute::tuple<cute::C<16>, cute::C<1>, cute::C<1> >, cute::tuple<cute::C<1>, cute::C<0>, cute::C<0> > >, cute::tuple<cute::Layout<cute::tuple<cute::C<8>, cute::C<16>, cute::C<2> >, cute::tuple<cute::C<1>, cute::C<16>, cute::C<8> > >, cute::Layout<cute::C<32>, cute::C<1> >, cute::Layout<cute::C<32>, cute::C<1> > > const>, cute::TiledMMA<cute::MMA_Atom<cute::XE_DPAS_TT<8, float, cutlass::bfloat16_t, cutlass::bfloat16_t, float> >, cute::Layout<cute::tuple<cute::C<16>, cute::C<1>, cute::C<1> >, cute::tuple<cute::C<1>, cute::C<0>, cute::C<0> > >, cute::tuple<cute::Layout<cute::tuple<cute::C<8>, cute::C<16>, cute::C<2> >, cute::tuple<cute::C<1>, cute::C<16>, cute::C<8> > >, cute::Layout<cute::C<32>, cute::C<1> >, cute::Layout<cute::C<32>, cute::C<1> > > const>, 4, cute::Tensor<cute::ViewEngine<cute::gmem_ptr<cutlass::bfloat16_t*> >, cute::Layout<cute::tuple<int, int, int, int>, cute::tuple<int, cute::C<1>, int, int> > >, cute::Tensor<cute::ViewEngine<cute::gmem_ptr<cutlass::bfloat16_t*> >, cute::Layout<cute::tuple<int, int, int, int>, cute::tuple<int, cute::C<1>, int, int> > >, cute::Tensor<cute::ViewEngine<cute::gmem_ptr<cutlass::bfloat16_t*> >, cute::Layout<cute::tuple<int, int, int, int>, cute::tuple<cute::C<1>, int, int, int> > >, void, void, void>, cutlass::fmha::collective::FMHAFwdEpilogue<false, cutlass::fmha::collective::FMHAFwdMainloop<cutlass::fmha::XeDefault<2>, true, false, true, cute::TiledMMA<cute::MMA_Atom<cute::XE_DPAS_TT<8, float, cutlass::bfloat16_t, cutlass::bfloat16_t, float> >, cute::Layout<cute::tuple<cute::C<16>, cute::C<1>, cute::C<1> >, cute::tuple<cute::C<1>, cute::C<0>, cute::C<0> > >, cute::tuple<cute::Layout<cute::tuple<cute::C<8>, cute::C<16>, cute::C<2> >, cute::tuple<cute::C<1>, cute::C<16>, cute::C<8> > >, cute::Layout<cute::C<32>, cute::C<1> >, cute::Layout<cute::C<32>, cute::C<1> > > const>, cute::TiledMMA<cute::MMA_Atom<cute::XE_DPAS_TT<8, float, cutlass::bfloat16_t, cutlass::bfloat16_t, float> >, cute::Layout<cute::tuple<cute::C<16>, cute::C<1>, cute::C<1> >, cute::tuple<cute::C<1>, cute::C<0>, cute::C<0> > >, cute::tuple<cute::Layout<cute::tuple<cute::C<8>, cute::C<16>, cute::C<2> >, cute::tuple<cute::C<1>, cute::C<16>, cute::C<8> > >, cute::Layout<cute::C<32>, cute::C<1> >, cute::Layout<cute::C<32>, cute::C<1> > > const>, 4, cute::Tensor<cute::ViewEngine<cute::gmem_ptr<cutlass::bfloat16_t*> >, cute::Layout<cute::tuple<int, int, int, int>, cute::tuple<int, cute::C<1>, int, int> > >, cute::Tensor<cute::ViewEngine<cute::gmem_ptr<cutlass::bfloat16_t*> >, cute::Layout<cute::tuple<int, int, int, int>, cute::tuple<int, cute::C<1>, int, int> > >, cute::Tensor<cute::ViewEngine<cute::gmem_ptr<cutlass::bfloat16_t*> >, cute::Layout<cute::tuple<int, int, int, int>, cute::tuple<cute::C<1>, int, int, int> > >, void, void, void>, cute::tuple<cute::C<256>, cute::C<128> >, cute::Tensor<cute::ViewEngine<cute::gmem_ptr<cutlass::bfloat16_t*> >, cute::Layout<cute::tuple<int, int, int, int>, cute::tuple<int, cute::C<1>, int, int> > >, void>, cutlass::fmha::kernel::XeFHMAIndividualTileScheduler, false> >(cutlass::fmha::kernel::XeFMHAFwdKernel<cutlass::fmha::kernel::FMHAProblemShape<true>, cutlass::fmha::collective::FMHAFwdMainloop<cutlass::fmha::XeDefault<2>, true, false, true, cute::TiledMMA<cute::MMA_Atom<cute::XE_DPAS_TT<8, float, cutlass::bfloat16_t, cutlass::bfloat16_t, float> >, cute::Layout<cute::tuple<cute::C<16>, cute::C<1>, cute::C<1> >, cute::tuple<cute::C<1>, cute::C<0>, cute::C<0> > >, cute::tuple<cute::Layout<cute::tuple<cute::C<8>, cute::C<16>, cute::C<2> >, cute::tuple<cute::C<1>, cute::C<16>, cute::C<8> > >, cute::Layout<cute::C<32>, cute::C<1> >, cute::Layout<cute::C<32>, cute::C<1> > > const>, cute::TiledMMA<cute::MMA_Atom<cute::XE_DPAS_TT<8, float, cutlass::bfloat16_t, cutlass::bfloat16_t, float> >, cute::Layout<cute::tuple<cute::C<16>, cute::C<1>, cute::C<1> >, cute::tuple<cute::C<1>, cute::C<0>, cute::C<0> > >, cute::tuple<cute::Layout<cute::tuple<cute::C<8>, cute::C<16>, cute::C<2> >, cute::tuple<cute::C<1>, cute::C<16>, cute::C<8> > >, cute::Layout<cute::C<32>, cute::C<1> >, cute::Layout<cute::C<32>, cute::C<1> > > const>, 4, cute::Tensor<cute::ViewEngine<cute::gmem_ptr<cutlass::bfloat16_t*> >, cute::Layout<cute::tuple<int, int, int, int>, cute::tuple<int, cute::C<1>, int, int> > >, cute::Tensor<cute::ViewEngine<cute::gmem_ptr<cutlass::bfloat16_t*> >, cute::Layout<cute::tuple<int, int, int, int>, cute::tuple<int, cute::C<1>, int, int> > >, cute::Tensor<cute::ViewEngine<cute::gmem_ptr<cutlass::bfloat16_t*> >, cute::Layout<cute::tuple<int, int, int, int>, cute::tuple<cute::C<1>, int, int, int> > >, void, void, void>, cutlass::fmha::collective::FMHAFwdEpilogue<false, cutlass::fmha::collective::FMHAFwdMainloop<cutlass::fmha::XeDefault<2>, true, false, true, cute::TiledMMA<cute::MMA_Atom<cute::XE_DPAS_TT<8, float, cutlass::bfloat16_t, cutlass::bfloat16_t, float> >, cute::Layout<cute::tuple<cute::C<16>, cute::C<1>, cute::C<1> >, cute::tuple<cute::C<1>, cute::C<0>, cute::C<0> > >, cute::tuple<cute::Layout<cute::tuple<cute::C<8>, cute::C<16>, cute::C<2> >, cute::tuple<cute::C<1>, cute::C<16>, cute::C<8> > >, cute::Layout<cute::C<32>, cute::C<1> >, cute::Layout<cute::C<32>, cute::C<1> > > const>, cute::TiledMMA<cute::MMA_Atom<cute::XE_DPAS_TT<8, float, cutlass::bfloat16_t, cutlass::bfloat16_t, float> >, cute::Layout<cute::tuple<cute::C<16>, cute::C<1>, cute::C<1> >, cute::tuple<cute::C<1>, cute::C<0>, cute::C<0> > >, cute::tuple<cute::Layout<cute::tuple<cute::C<8>, cute::C<16>, cute::C<2> >, cute::tuple<cute::C<1>, cute::C<16>, cute::C<8> > >, cute::Layout<cute::C<32>, cute::C<1> >, cute::Layout<cute::C<32>, cute::C<1> > > const>, 4, cute::Tensor<cute::ViewEngine<cute::gmem_ptr<cutlass::bfloat16_t*> >, cute::Layout<cute::tuple<int, int, int, int>, cute::tuple<int, cute::C<1>, int, int> > >, cute::Tensor<cute::ViewEngine<cute::gmem_ptr<cutlass::bfloat16_t*> >, cute::Layout<cute::tuple<int, int, int, int>, cute::tuple<int, cute::C<1>, int, int> > >, cute::Tensor<cute::ViewEngine<cute::gmem_ptr<cutlass::bfloat16_t*> >, cute::Layout<cute::tuple<int, int, int, int>, cute::tuple<cute::C<1>, int, int, int> > >, void, void, void>, cute::tuple<cute::C<256>, cute::C<128> >, cute::Tensor<cute::ViewEngine<cute::gmem_ptr<cutlass::bfloat16_t*> >, cute::Layout<cute::tuple<int, int, int, int>, cute::tuple<int, cute::C<1>, int, int> > >, void>, cutlass::fmha::kernel::XeFHMAIndividualTileScheduler, false>::Params const&)), sycl::_V1::nd_range<3>, sycl::_V1::ext::oneapi::experimental::properties<sycl::_V1::ext::oneapi::experimental::detail::properties_type_list<sycl::_V1::ext::oneapi::experimental::property_value<sycl::_V1::ext::oneapi::experimental::sub_group_size_key, std::integral_constant<unsigned int, 16u> >, sycl::_V1::ext::oneapi::experimental::property_value<sycl::_V1::ext::intel::experimental::grf_size_key, std::integral_constant<unsigned int, 256u> > > >, false, cutlass::fmha::kernel::XeFMHAFwdKernel<cutlass::fmha::kernel::FMHAProblemShape<true>, cutlass::fmha::collective::FMHAFwdMainloop<cutlass::fmha::XeDefault<2>, true, false, true, cute::TiledMMA<cute::MMA_Atom<cute::XE_DPAS_TT<8, float, cutlass::bfloat16_t, cutlass::bfloat16_t, float> >, cute::Layout<cute::tuple<cute::C<16>, cute::C<1>, cute::C<1> >, cute::tuple<cute::C<1>, cute::C<0>, cute::C<0> > >, cute::tuple<cute::Layout<cute::tuple<cute::C<8>, cute::C<16>, cute::C<2> >, cute::tuple<cute::C<1>, cute::C<16>, cute::C<8> > >, cute::Layout<cute::C<32>, cute::C<1> >, cute::Layout<cute::C<32>, cute::C<1> > > const>, cute::TiledMMA<cute::MMA_Atom<cute::XE_DPAS_TT<8, float, cutlass::bfloat16_t, cutlass::bfloat16_t, float> >, cute::Layout<cute::tuple<cute::C<16>, cute::C<1>, cute::C<1> >, cute::tuple<cute::C<1>, cute::C<0>, cute::C<0> > >, cute::tuple<cute::Layout<cute::tuple<cute::C<8>, cute::C<16>, cute::C<2> >, cute::tuple<cute::C<1>, cute::C<16>, cute::C<8> > >, cute::Layout<cute::C<32>, cute::C<1> >, cute::Layout<cute::C<32>, cute::C<1> > > const>, 4, cute::Tensor<cute::ViewEngine<cute::gmem_ptr<cutlass::bfloat16_t*> >, cute::Layout<cute::tuple<int, int, int, int>, cute::tuple<int, cute::C<1>, int, int> > >, cute::Tensor<cute::ViewEngine<cute::gmem_ptr<cutlass::bfloat16_t*> >, cute::Layout<cute::tuple<int, int, int, int>, cute::tuple<int, cute::C<1>, int, int> > >, cute::Tensor<cute::ViewEngine<cute::gmem_ptr<cutlass::bfloat16_t*> >, cute::Layout<cute::tuple<int, int, int, int>, cute::tuple<cute::C<1>, int, int, int> > >, void, void, void>, cutlass::fmha::collective::FMHAFwdEpilogue<false, cutlass::fmha::collective::FMHAFwdMainloop<cutlass::fmha::XeDefault<2>, true, false, true, cute::TiledMMA<cute::MMA_Atom<cute::XE_DPAS_TT<8, float, cutlass::bfloat16_t, cutlass::bfloat16_t, float> >, cute::Layout<cute::tuple<cute::C<16>, cute::C<1>, cute::C<1> >, cute::tuple<cute::C<1>, cute::C<0>, cute::C<0> > >, cute::tuple<cute::Layout<cute::tuple<cute::C<8>, cute::C<16>, cute::C<2> >, cute::tuple<cute::C<1>, cute::C<16>, cute::C<8> > >, cute::Layout<cute::C<32>, cute::C<1> >, cute::Layout<cute::C<32>, cute::C<1> > > const>, cute::TiledMMA<cute::MMA_Atom<cute::XE_DPAS_TT<8, float, cutlass::bfloat16_t, cutlass::bfloat16_t, float> >, cute::Layout<cute::tuple<cute::C<16>, cute::C<1>, cute::C<1> >, cute::tuple<cute::C<1>, cute::C<0>, cute::C<0> > >, cute::tuple<cute::Layout<cute::tuple<cute::C<8>, cute::C<16>, cute::C<2> >, cute::tuple<cute::C<1>, cute::C<16>, cute::C<8> > >, cute::Layout<cute::C<32>, cute::C<1> >, cute::Layout<cute::C<32>, cute::C<1> > > const>, 4, cute::Tensor<cute::ViewEngine<cute::gmem_ptr<cutlass::bfloat16_t*> >, cute::Layout<cute::tuple<int, int, int, int>, cute::tuple<int, cute::C<1>, int, int> > >, cute::Tensor<cute::ViewEngine<cute::gmem_ptr<cutlass::bfloat16_t*> >, cute::Layout<cute::tuple<int, int, int, int>, cute::tuple<int, cute::C<1>, int, int> > >, cute::Tensor<cute::ViewEngine<cute::gmem_ptr<cutlass::bfloat16_t*> >, cute::Layout<cute::tuple<int, int, int, int>, cute::tuple<cute::C<1>, int, int, int> > >, void, void, void>, cute::tuple<cute::C<256>, cute::C<128> >, cute::Tensor<cute::ViewEngine<cute::gmem_ptr<cutlass::bfloat16_t*> >, cute::Layout<cute::tuple<int, int, int, int>, cute::tuple<int, cute::C<1>, int, int> > >, void>, cutlass::fmha::kernel::XeFHMAIndividualTileScheduler, false>::Params>": 5704.1,
+    "vllm::rms_norm_multi_row_kernel<sycl::_V1::ext::oneapi::bfloat16, 3, 8, 16, true>": 2188.1,
+    "vllm::fused_add_rms_norm_kernel<sycl::_V1::ext::oneapi::bfloat16, 8, true>": 2036.1,
+    "vllm::rotary_embedding_kernel<sycl::_V1::ext::oneapi::bfloat16, true>": 1347.2,
+    "vllm::reshape_and_cache_flash_strided_kernel<c10::BFloat16, c10::BFloat16, (vllm::Fp8KVCacheDataType)0>": 864.5,
+    "vllm::act_and_mul_vec_kernel<sycl::_V1::ext::oneapi::bfloat16, &(sycl::_V1::ext::oneapi::bfloat16 vllm::silu_kernel<sycl::_V1::ext::oneapi::bfloat16>(sycl::_V1::ext::oneapi::bfloat16 const&)), true, 4>": 830.5,
+    "_gumbel_sample_kernel": 183.8,
+    "at::native::xpu::ReduceKernel<1, at::native::xpu::ReduceOp<float, at::native::xpu::ArgMaxOps<float>, unsigned int, long, 4> >": 118.4,
+    "at::native::xpu::IndexSelectSmallIndexFunctor<c10::BFloat16, long, unsigned int, 2, 2, -2>": 83.2,
+    "_compute_slot_mappings_kernel": 68.8,
+    "Memcpy H2D (HOST -> DEVICE)": 65.5,
+    "Memcpy D2H (DEVICE -> HOST)": 56.0,
+    "at::native::xpu::IndexKernelFunctor<at::native::xpu::IndexFunctor<at::native::xpu::OpaqueType<8> >, char*, OffsetCalculator<3, unsigned int, false> >": 54.8,
+    "_gather_block_tables_kernel": 48.3,
+    "at::native::xpu::IndexKernelFunctor<at::native::xpu::IndexFunctor<at::native::xpu::OpaqueType<4> >, char*, OffsetCalculator<3, unsigned int, false> >": 46.0,
+    "_get_num_sampled_and_rejected_kernel": 36.8,
+    "at::native::xpu::UnrolledElementwiseKernel<at::native::xpu::BinaryFunctor<int, int, int, at::native::xpu::AddFunctor<int> >, at::detail::Array<char*, 3>, TrivialOffsetCalculator<2, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithoutCast, at::native::memory::StoreWithoutCast>": 34.9,
+    "_post_update_kernel": 32.9,
+    "at::native::xpu::VectorizedElementwiseKernel<4, at::native::xpu::CompareScalarFunctor<int, at::native::xpu::CompareFunctor<int> >, at::detail::Array<char*, 2>, TrivialOffsetCalculator<1, unsigned int> >": 30.9,
+    "_combine_sampled_and_draft_tokens_kernel": 27.5,
+    "at::native::xpu::ScatterGatherElementwiseKernelFunctor<at::native::xpu::ScatterGatherInternalKernelLoopFunctor<false, at::native::xpu::OpaqueType<8>, OffsetCalculator<3, unsigned int, false>, at::native::xpu::TensorAssign, long> >": 25.3,
+    "at::native::xpu::UnrolledElementwiseKernel<at::native::xpu::CopyScalarFunc<int>, at::detail::Array<char*, 2>, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1> >": 24.9,
+    "vllm::rms_norm_kernel<sycl::_V1::ext::oneapi::bfloat16, 2, 8, true>": 24.5,
+    "at::native::xpu::VectorizedElementwiseKernel<16, at::native::xpu::FillFunctor<bool>, at::detail::Array<char*, 1>, TrivialOffsetCalculator<0, unsigned int> >": 23.9,
+    "at::native::xpu::VectorizedElementwiseKernel<4, at::native::xpu::FillFunctor<int>, at::detail::Array<char*, 1>, TrivialOffsetCalculator<0, unsigned int> >": 20.1,
+    "at::native::xpu::VectorizedGatherKernel<16, long>": 19.5,
+    "_apply_write_kernel": 13.7,
+    "_prepare_pos_seq_lens_kernel": 13.6,
+    "at::native::xpu::ElementwiseKernelWithIndexFunctor<int, at::native::xpu::ArangeFunctor<int, long> >": 9.4,
+    "_prepare_prefill_inputs_kernel": 3.2
+  },
+  "ops": [
+    {
+      "op": "_C.fused_add_rms_norm.default",
+      "calls": 840,
+      "args": [
+        [
+          "T",
+          [
+            8,
+            1024
+          ],
+          "bfloat16"
+        ],
+        [
+          "T",
+          [
+            8,
+            1024
+          ],
+          "bfloat16"
+        ],
+        [
+          "T",
+          [
+            1024
+          ],
+          "bfloat16"
+        ],
+        1e-06
+      ]
+    },
+    {
+      "op": "aten.linear.default",
+      "calls": 420,
+      "args": [
+        [
+          "T",
+          [
+            8,
+            1024
+          ],
+          "bfloat16"
+        ],
+        [
+          "T",
+          [
+            4096,
+            1024
+          ],
+          "bfloat16"
+        ]
+      ]
+    },
+    {
+      "op": "aten.split_with_sizes.default",
+      "calls": 420,
+      "args": [
+        [
+          "T",
+          [
+            8,
+            4096
+          ],
+          "bfloat16"
+        ],
+        [
+          2048,
+          1024,
+          1024
+        ],
+        -1
+      ]
+    },
+    {
+      "op": "_C.rms_norm.default",
+      "calls": 420,
+      "args": [
+        [
+          "T",
+          [
+            8,
+            16,
+            128
+          ],
+          "bfloat16"
+        ],
+        [
+          "T",
+          [
+            8,
+            16,
+            128
+          ],
+          "bfloat16"
+        ],
+        [
+          "T",
+          [
+            128
+          ],
+          "bfloat16"
+        ],
+        1e-06
+      ]
+    },
+    {
+      "op": "_C.rms_norm.default",
+      "calls": 420,
+      "args": [
+        [
+          "T",
+          [
+            8,
+            8,
+            128
+          ],
+          "bfloat16"
+        ],
+        [
+          "T",
+          [
+            8,
+            8,
+            128
+          ],
+          "bfloat16"
+        ],
+        [
+          "T",
+          [
+            128
+          ],
+          "bfloat16"
+        ],
+        1e-06
+      ]
+    },
+    {
+      "op": "_C.rotary_embedding.default",
+      "calls": 420,
+      "args": [
+        [
+          "T",
+          [
+            8
+          ],
+          "int64"
+        ],
+        [
+          "T",
+          [
+            8,
+            2048
+          ],
+          "bfloat16"
+        ],
+        [
+          "T",
+          [
+            8,
+            1024
+          ],
+          "bfloat16"
+        ],
+        128,
+        [
+          "T",
+          [
+            40960,
+            128
+          ],
+          "bfloat16"
+        ],
+        true
+      ]
+    },
+    {
+      "op": "vllm.unified_kv_cache_update.default",
+      "calls": 420,
+      "args": [
+        [
+          "T",
+          [
+            8,
+            8,
+            128
+          ],
+          "bfloat16"
+        ],
+        [
+          "T",
+          [
+            8,
+            8,
+            128
+          ],
+          "bfloat16"
+        ],
+        "LayerName"
+      ]
+    },
+    {
+      "op": "vllm.unified_attention_with_output.default",
+      "calls": 420,
+      "args": [
+        [
+          "T",
+          [
+            8,
+            16,
+            128
+          ],
+          "bfloat16"
+        ],
+        [
+          "T",
+          [
+            8,
+            8,
+            128
+          ],
+          "bfloat16"
+        ],
+        [
+          "T",
+          [
+            8,
+            8,
+            128
+          ],
+          "bfloat16"
+        ],
+        [
+          "T",
+          [
+            8,
+            16,
+            128
+          ],
+          "bfloat16"
+        ],
+        "LayerName",
+        null,
+        null,
+        [
+          "T",
+          [
+            0
+          ],
+          "bfloat16"
+        ]
+      ]
+    },
+    {
+      "op": "aten.linear.default",
+      "calls": 420,
+      "args": [
+        [
+          "T",
+          [
+            8,
+            2048
+          ],
+          "bfloat16"
+        ],
+        [
+          "T",
+          [
+            1024,
+            2048
+          ],
+          "bfloat16"
+        ]
+      ]
+    },
+    {
+      "op": "aten.linear.default",
+      "calls": 420,
+      "args": [
+        [
+          "T",
+          [
+            8,
+            1024
+          ],
+          "bfloat16"
+        ],
+        [
+          "T",
+          [
+            6144,
+            1024
+          ],
+          "bfloat16"
+        ]
+      ]
+    },
+    {
+      "op": "_C.silu_and_mul.default",
+      "calls": 420,
+      "args": [
+        [
+          "T",
+          [
+            8,
+            3072
+          ],
+          "bfloat16"
+        ],
+        [
+          "T",
+          [
+            8,
+            6144
+          ],
+          "bfloat16"
+        ]
+      ]
+    },
+    {
+      "op": "aten.linear.default",
+      "calls": 420,
+      "args": [
+        [
+          "T",
+          [
+            8,
+            3072
+          ],
+          "bfloat16"
+        ],
+        [
+          "T",
+          [
+            1024,
+            3072
+          ],
+          "bfloat16"
+        ]
+      ]
+    },
+    {
+      "op": "_C.fused_add_rms_norm.default",
+      "calls": 56,
+      "args": [
+        [
+          "T",
+          [
+            5040,
+            1024
+          ],
+          "bfloat16"
+        ],
+        [
+          "T",
+          [
+            5040,
+            1024
+          ],
+          "bfloat16"
+        ],
+        [
+          "T",
+          [
+            1024
+          ],
+          "bfloat16"
+        ],
+        1e-06
+      ]
+    },
+    {
+      "op": "aten.new_empty.default",
+      "calls": 32,
+      "args": [
+        [
+          "T",
+          [
+            8,
+            151936
+          ],
+          "bfloat16"
+        ],
+        [
+          8,
+          149
+        ]
+      ]
+    },
+    {
+      "op": "aten.linear.default",
+      "calls": 28,
+      "args": [
+        [
+          "T",
+          [
+            5040,
+            1024
+          ],
+          "bfloat16"
+        ],
+        [
+          "T",
+          [
+            4096,
+            1024
+          ],
+          "bfloat16"
+        ]
+      ]
+    },
+    {
+      "op": "aten.split_with_sizes.default",
+      "calls": 28,
+      "args": [
+        [
+          "T",
+          [
+            5040,
+            4096
+          ],
+          "bfloat16"
+        ],
+        [
+          2048,
+          1024,
+          1024
+        ],
+        -1
+      ]
+    },
+    {
+      "op": "_C.rms_norm.default",
+      "calls": 28,
+      "args": [
+        [
+          "T",
+          [
+            5040,
+            16,
+            128
+          ],
+          "bfloat16"
+        ],
+        [
+          "T",
+          [
+            5040,
+            16,
+            128
+          ],
+          "bfloat16"
+        ],
+        [
+          "T",
+          [
+            128
+          ],
+          "bfloat16"
+        ],
+        1e-06
+      ]
+    },
+    {
+      "op": "_C.rms_norm.default",
+      "calls": 28,
+      "args": [
+        [
+          "T",
+          [
+            5040,
+            8,
+            128
+          ],
+          "bfloat16"
+        ],
+        [
+          "T",
+          [
+            5040,
+            8,
+            128
+          ],
+          "bfloat16"
+        ],
+        [
+          "T",
+          [
+            128
+          ],
+          "bfloat16"
+        ],
+        1e-06
+      ]
+    },
+    {
+      "op": "_C.rotary_embedding.default",
+      "calls": 28,
+      "args": [
+        [
+          "T",
+          [
+            5040
+          ],
+          "int64"
+        ],
+        [
+          "T",
+          [
+            5040,
+            2048
+          ],
+          "bfloat16"
+        ],
+        [
+          "T",
+          [
+            5040,
+            1024
+          ],
+          "bfloat16"
+        ],
+        128,
+        [
+          "T",
+          [
+            40960,
+            128
+          ],
+          "bfloat16"
+        ],
+        true
+      ]
+    },
+    {
+      "op": "vllm.unified_kv_cache_update.default",
+      "calls": 28,
+      "args": [
+        [
+          "T",
+          [
+            5040,
+            8,
+            128
+          ],
+          "bfloat16"
+        ],
+        [
+          "T",
+          [
+            5040,
+            8,
+            128
+          ],
+          "bfloat16"
+        ],
+        "LayerName"
+      ]
+    },
+    {
+      "op": "vllm.unified_attention_with_output.default",
+      "calls": 28,
+      "args": [
+        [
+          "T",
+          [
+            5040,
+            16,
+            128
+          ],
+          "bfloat16"
+        ],
+        [
+          "T",
+          [
+            5040,
+            8,
+            128
+          ],
+          "bfloat16"
+        ],
+        [
+          "T",
+          [
+            5040,
+            8,
+            128
+          ],
+          "bfloat16"
+        ],
+        [
+          "T",
+          [
+            5040,
+            16,
+            128
+          ],
+          "bfloat16"
+        ],
+        "LayerName",
+        null,
+        null,
+        [
+          "T",
+          [
+            0
+          ],
+          "bfloat16"
+        ]
+      ]
+    },
+    {
+      "op": "aten.linear.default",
+      "calls": 28,
+      "args": [
+        [
+          "T",
+          [
+            5040,
+            2048
+          ],
+          "bfloat16"
+        ],
+        [
+          "T",
+          [
+            1024,
+            2048
+          ],
+          "bfloat16"
+        ]
+      ]
+    },
+    {
+      "op": "aten.linear.default",
+      "calls": 28,
+      "args": [
+        [
+          "T",
+          [
+            5040,
+            1024
+          ],
+          "bfloat16"
+        ],
+        [
+          "T",
+          [
+            6144,
+            1024
+          ],
+          "bfloat16"
+        ]
+      ]
+    },
+    {
+      "op": "_C.silu_and_mul.default",
+      "calls": 28,
+      "args": [
+        [
+          "T",
+          [
+            5040,
+            3072
+          ],
+          "bfloat16"
+        ],
+        [
+          "T",
+          [
+            5040,
+            6144
+          ],
+          "bfloat16"
+        ]
+      ]
+    },
+    {
+      "op": "aten.linear.default",
+      "calls": 28,
+      "args": [
+        [
+          "T",
+          [
+            5040,
+            3072
+          ],
+          "bfloat16"
+        ],
+        [
+          "T",
+          [
+            1024,
+            3072
+          ],
+          "bfloat16"
+        ]
+      ]
+    },
+    {
+      "op": "aten.lift_fresh.default",
+      "calls": 19,
+      "args": [
+        [
+          "T",
+          [
+            8
+          ],
+          "int32"
+        ]
+      ]
+    },
+    {
+      "op": "aten.lift_fresh.default",
+      "calls": 16,
+      "args": [
+        [
+          "T",
+          [
+            8
+          ],
+          "int64"
+        ]
+      ]
+    },
+    {
+      "op": "aten.empty_like.default",
+      "calls": 16,
+      "args": [
+        [
+          "T",
+          [
+            8
+          ],
+          "int64"
+        ]
+      ]
+    },
+    {
+      "op": "aten.pin_memory.default",
+      "calls": 16,
+      "args": [
+        [
+          "T",
+          [
+            8
+          ],
+          "int64"
+        ]
+      ]
+    },
+    {
+      "op": "aten.lift_fresh.default",
+      "calls": 16,
+      "args": [
+        [
+          "T",
+          [
+            257
+          ],
+          "int32"
+        ]
+      ]
+    },
+    {
+      "op": "aten.pin_memory.default",
+      "calls": 16,
+      "args": [
+        [
+          "T",
+          [
+            257
+          ],
+          "int32"
+        ]
+      ]
+    },
+    {
+      "op": "aten.lift_fresh.default",
+      "calls": 16,
+      "args": [
+        [
+          "T",
+          [
+            9
+          ],
+          "int32"
+        ]
+      ]
+    },
+    {
+      "op": "aten.max.default",
+      "calls": 16,
+      "args": [
+        [
+          "T",
+          [
+            8
+          ],
+          "int32"
+        ]
+      ]
+    },
+    {
+      "op": "aten.lift_fresh.default",
+      "calls": 16,
+      "args": [
+        [
+          "T",
+          [
+            8
+          ],
+          "bool"
+        ]
+      ]
+    },
+    {
+      "op": "aten.linear.default",
+      "calls": 16,
+      "args": [
+        [
+          "T",
+          [
+            8,
+            1024
+          ],
+          "bfloat16"
+        ],
+        [
+          "T",
+          [
+            151936,
+            1024
+          ],
+          "bfloat16"
+        ]
+      ]
+    },
+    {
+      "op": "aten.alias.default",
+      "calls": 16,
+      "args": [
+        [
+          "T",
+          [
+            8,
+            151936
+          ],
+          "bfloat16"
+        ]
+      ]
+    },
+    {
+      "op": "aten.argmax.default",
+      "calls": 16,
+      "args": [
+        [
+          "T",
+          [
+            8,
+            149
+          ],
+          "float32"
+        ],
+        -1,
+        true
+      ]
+    },
+    {
+      "op": "aten.gather.default",
+      "calls": 16,
+      "args": [
+        [
+          "T",
+          [
+            8,
+            149
+          ],
+          "int64"
+        ],
+        -1,
+        [
+          "T",
+          [
+            8,
+            1
+          ],
+          "int64"
+        ]
+      ]
+    },
+    {
+      "op": "aten.new_ones.default",
+      "calls": 16,
+      "args": [
+        [
+          "T",
+          [
+            8
+          ],
+          "int32"
+        ],
+        [
+          8
+        ]
+      ]
+    },
+    {
+      "op": "aten.empty_like.default",
+      "calls": 16,
+      "args": [
+        [
+          "T",
+          [
+            8
+          ],
+          "int32"
+        ]
+      ]
+    },
+    {
+      "op": "aten.resolve_conj.default",
+      "calls": 16,
+      "args": [
+        [
+          "T",
+          [
+            8,
+            1
+          ],
+          "int64"
+        ]
+      ]
+    },
+    {
+      "op": "aten.resolve_neg.default",
+      "calls": 16,
+      "args": [
+        [
+          "T",
+          [
+            8,
+            1
+          ],
+          "int64"
+        ]
+      ]
+    },
+    {
+      "op": "aten.resolve_conj.default",
+      "calls": 16,
+      "args": [
+        [
+          "T",
+          [
+            8
+          ],
+          "int32"
+        ]
+      ]
+    },
+    {
+      "op": "aten.resolve_neg.default",
+      "calls": 16,
+      "args": [
+        [
+          "T",
+          [
+            8
+          ],
+          "int32"
+        ]
+      ]
+    },
+    {
+      "op": "aten.unbind.int",
+      "calls": 15,
+      "args": [
+        [
+          "T",
+          [
+            1,
+            8
+          ],
+          "int64"
+        ]
+      ]
+    },
+    {
+      "op": "aten.embedding.default",
+      "calls": 15,
+      "args": [
+        [
+          "T",
+          [
+            151936,
+            1024
+          ],
+          "bfloat16"
+        ],
+        [
+          "T",
+          [
+            8
+          ],
+          "int64"
+        ]
+      ]
+    },
+    {
+      "op": "_C.rms_norm.default",
+      "calls": 15,
+      "args": [
+        [
+          "T",
+          [
+            8,
+            1024
+          ],
+          "bfloat16"
+        ],
+        [
+          "T",
+          [
+            8,
+            1024
+          ],
+          "bfloat16"
+        ],
+        [
+          "T",
+          [
+            1024
+          ],
+          "bfloat16"
+        ],
+        1e-06
+      ]
+    },
+    {
+      "op": "aten.index.Tensor",
+      "calls": 15,
+      "args": [
+        [
+          "T",
+          [
+            8,
+            1024
+          ],
+          "bfloat16"
+        ],
+        [
+          [
+            "T",
+            [
+              8
+            ],
+            "int64"
+          ]
+        ]
+      ]
+    },
+    {
+      "op": "aten.index.Tensor",
+      "calls": 15,
+      "args": [
+        [
+          "T",
+          [
+            8
+          ],
+          "int64"
+        ],
+        [
+          [
+            "T",
+            [
+              8
+            ],
+            "int64"
+          ]
+        ]
+      ]
+    },
+    {
+      "op": "aten.index.Tensor",
+      "calls": 15,
+      "args": [
+        [
+          "T",
+          [
+            8
+          ],
+          "int32"
+        ],
+        [
+          [
+            "T",
+            [
+              8
+            ],
+            "int64"
+          ]
+        ]
+      ]
+    },
+    {
+      "op": "aten.zero_.default",
+      "calls": 8,
+      "args": [
+        [
+          "T",
+          [
+            0
+          ],
+          "int64"
+        ]
+      ]
+    },
+    {
+      "op": "aten.detach_.default",
+      "calls": 3,
+      "args": [
+        [
+          "T",
+          [
+            8
+          ],
+          "int32"
+        ]
+      ]
+    },
+    {
+      "op": "aten.lift_fresh.default",
+      "calls": 1,
+      "args": [
+        [
+          "T",
+          [
+            5040
+          ],
+          "int32"
+        ]
+      ]
+    },
+    {
+      "op": "aten.detach_.default",
+      "calls": 1,
+      "args": [
+        [
+          "T",
+          [
+            5040
+          ],
+          "int32"
+        ]
+      ]
+    },
+    {
+      "op": "aten.lift_fresh.default",
+      "calls": 1,
+      "args": [
+        [
+          "T",
+          [
+            80
+          ],
+          "int32"
+        ]
+      ]
+    },
+    {
+      "op": "aten.detach_.default",
+      "calls": 1,
+      "args": [
+        [
+          "T",
+          [
+            80
+          ],
+          "int32"
+        ]
+      ]
+    },
+    {
+      "op": "aten.unbind.int",
+      "calls": 1,
+      "args": [
+        [
+          "T",
+          [
+            1,
+            5040
+          ],
+          "int64"
+        ]
+      ]
+    },
+    {
+      "op": "aten.embedding.default",
+      "calls": 1,
+      "args": [
+        [
+          "T",
+          [
+            151936,
+            1024
+          ],
+          "bfloat16"
+        ],
+        [
+          "T",
+          [
+            5040
+          ],
+          "int64"
+        ]
+      ]
+    },
+    {
+      "op": "_C.rms_norm.default",
+      "calls": 1,
+      "args": [
+        [
+          "T",
+          [
+            5040,
+            1024
+          ],
+          "bfloat16"
+        ],
+        [
+          "T",
+          [
+            5040,
+            1024
+          ],
+          "bfloat16"
+        ],
+        [
+          "T",
+          [
+            1024
+          ],
+          "bfloat16"
+        ],
+        1e-06
+      ]
+    },
+    {
+      "op": "aten.index.Tensor",
+      "calls": 1,
+      "args": [
+        [
+          "T",
+          [
+            5040,
+            1024
+          ],
+          "bfloat16"
+        ],
+        [
+          [
+            "T",
+            [
+              8
+            ],
+            "int64"
+          ]
+        ]
+      ]
+    },
+    {
+      "op": "aten.index.Tensor",
+      "calls": 1,
+      "args": [
+        [
+          "T",
+          [
+            5040
+          ],
+          "int64"
+        ],
+        [
+          [
+            "T",
+            [
+              8
+            ],
+            "int64"
+          ]
+        ]
+      ]
+    },
+    {
+      "op": "aten.index.Tensor",
+      "calls": 1,
+      "args": [
+        [
+          "T",
+          [
+            5040
+          ],
+          "int32"
+        ],
+        [
+          [
+            "T",
+            [
+              8
+            ],
+            "int64"
+          ]
+        ]
+      ]
+    }
+  ],
+  "op_share": {
+    "_C.rms_norm.default": {
+      "device_us": 2212.6,
+      "share_pct": 2.35
+    },
+    "_C.fused_add_rms_norm.default": {
+      "device_us": 2036.1,
+      "share_pct": 2.17
+    },
+    "_C.rotary_embedding.default": {
+      "device_us": 1347.2,
+      "share_pct": 1.43
+    },
+    "_C.silu_and_mul.default": {
+      "device_us": 830.5,
+      "share_pct": 0.88
+    },
+    "aten.argmax.default": {
+      "device_us": 118.4,
+      "share_pct": 0.13
+    },
+    "aten.index.Tensor": {
+      "device_us": 117.8,
+      "share_pct": 0.13
+    },
+    "aten.gather.default": {
+      "device_us": 27.8,
+      "share_pct": 0.03
+    },
+    "aten.linear.default": {
+      "device_us": 0.0,
+      "share_pct": 0.0
+    },
+    "aten.split_with_sizes.default": {
+      "device_us": 0.0,
+      "share_pct": 0.0
+    },
+    "vllm.unified_kv_cache_update.default": {
+      "device_us": 0.0,
+      "share_pct": 0.0
+    },
+    "vllm.unified_attention_with_output.default": {
+      "device_us": 0.0,
+      "share_pct": 0.0
+    },
+    "aten.new_empty.default": {
+      "device_us": 0.0,
+      "share_pct": 0.0
+    },
+    "aten.lift_fresh.default": {
+      "device_us": 0.0,
+      "share_pct": 0.0
+    },
+    "aten.empty_like.default": {
+      "device_us": 0.0,
+      "share_pct": 0.0
+    },
+    "aten.pin_memory.default": {
+      "device_us": 0.0,
+      "share_pct": 0.0
+    },
+    "aten.max.default": {
+      "device_us": 0.0,
+      "share_pct": 0.0
+    },
+    "aten.alias.default": {
+      "device_us": 0.0,
+      "share_pct": 0.0
+    },
+    "aten.new_ones.default": {
+      "device_us": 0.0,
+      "share_pct": 0.0
+    },
+    "aten.resolve_conj.default": {
+      "device_us": 0.0,
+      "share_pct": 0.0
+    },
+    "aten.resolve_neg.default": {
+      "device_us": 0.0,
+      "share_pct": 0.0
+    },
+    "aten.unbind.int": {
+      "device_us": 0.0,
+      "share_pct": 0.0
+    },
+    "aten.embedding.default": {
+      "device_us": 0.0,
+      "share_pct": 0.0
+    },
+    "aten.zero_.default": {
+      "device_us": 0.0,
+      "share_pct": 0.0
+    },
+    "aten.detach_.default": {
+      "device_us": 0.0,
+      "share_pct": 0.0
+    }
+  },
+  "op_calls": {
+    "aten.linear.default": 1808,
+    "_C.rms_norm.default": 912,
+    "_C.fused_add_rms_norm.default": 896,
+    "aten.split_with_sizes.default": 448,
+    "_C.rotary_embedding.default": 448,
+    "vllm.unified_kv_cache_update.default": 448,
+    "vllm.unified_attention_with_output.default": 448,
+    "_C.silu_and_mul.default": 448,
+    "aten.lift_fresh.default": 85,
+    "aten.index.Tensor": 48,
+    "aten.new_empty.default": 32,
+    "aten.empty_like.default": 32,
+    "aten.pin_memory.default": 32,
+    "aten.resolve_conj.default": 32,
+    "aten.resolve_neg.default": 32,
+    "aten.max.default": 16,
+    "aten.alias.default": 16,
+    "aten.argmax.default": 16,
+    "aten.gather.default": 16,
+    "aten.new_ones.default": 16,
+    "aten.unbind.int": 16,
+    "aten.embedding.default": 16,
+    "aten.zero_.default": 8,
+    "aten.detach_.default": 5
+  },
+  "triton": [
+    {
+      "kernel": "_prepare_pos_seq_lens_kernel",
+      "source": "/home/sand/Projects/vllm/vllm/v1/worker/gpu/input_batch.py:326",
+      "calls": 16,
+      "constexprs": {
+        "BLOCK_SIZE": 1024
+      }
+    },
+    {
+      "kernel": "_combine_sampled_and_draft_tokens_kernel",
+      "source": "/home/sand/Projects/vllm/vllm/v1/worker/gpu/input_batch.py:384",
+      "calls": 16,
+      "constexprs": {
+        "BLOCK_SIZE": 1
+      }
+    },
+    {
+      "kernel": "_gather_block_tables_kernel",
+      "source": "/home/sand/Projects/vllm/vllm/v1/worker/gpu/block_table.py:236",
+      "calls": 16,
+      "constexprs": {
+        "BLOCK_SIZE": 1024
+      }
+    },
+    {
+      "kernel": "_compute_slot_mappings_kernel",
+      "source": "/home/sand/Projects/vllm/vllm/v1/worker/gpu/block_table.py:276",
+      "calls": 16,
+      "constexprs": {}
+    },
+    {
+      "kernel": "_gumbel_sample_kernel",
+      "source": "/home/sand/Projects/vllm/vllm/v1/worker/gpu/sample/gumbel.py:192",
+      "calls": 16,
+      "constexprs": {
+        "BLOCK_SIZE": 1024
+      }
+    },
+    {
+      "kernel": "_get_num_sampled_and_rejected_kernel",
+      "source": "/home/sand/Projects/vllm/vllm/v1/worker/gpu/input_batch.py:490",
+      "calls": 16,
+      "constexprs": {}
+    },
+    {
+      "kernel": "_post_update_kernel",
+      "source": "/home/sand/Projects/vllm/vllm/v1/worker/gpu/input_batch.py:539",
+      "calls": 16,
+      "constexprs": {
+        "num_warps": 1
+      }
+    },
+    {
+      "kernel": "_apply_write_kernel",
+      "source": "/home/sand/Projects/vllm/vllm/v1/worker/gpu/buffer_utils.py:274",
+      "calls": 5,
+      "constexprs": {
+        "BLOCK_SIZE": 1024
+      }
+    },
+    {
+      "kernel": "_prepare_prefill_inputs_kernel",
+      "source": "/home/sand/Projects/vllm/vllm/v1/worker/gpu/input_batch.py:249",
+      "calls": 1,
+      "constexprs": {
+        "BLOCK_SIZE": 1024
+      }
+    }
+  ],
+  "edges": [
+    {
+      "producer": "_C.fused_add_rms_norm.default",
+      "consumer": "_C.fused_add_rms_norm.default",
+      "count": 1720
+    },
+    {
+      "producer": "aten.split_with_sizes.default",
+      "consumer": "aten.view.default",
+      "count": 1344
+    },
+    {
+      "producer": "aten.empty.memory_format",
+      "consumer": "_C.rms_norm.default",
+      "count": 912
+    },
+    {
+      "producer": "aten.split_with_sizes.default",
+      "consumer": "_C.rms_norm.default",
+      "count": 896
+    },
+    {
+      "producer": "_C.rms_norm.default",
+      "consumer": "aten.view.default",
+      "count": 896
+    },
+    {
+      "producer": "_C.rms_norm.default",
+      "consumer": "_C.rotary_embedding.default",
+      "count": 896
+    },
+    {
+      "producer": "_C.rotary_embedding.default",
+      "consumer": "aten.view.default",
+      "count": 896
+    },
+    {
+      "producer": "_C.rotary_embedding.default",
+      "consumer": "vllm.unified_attention_with_output.default",
+      "count": 896
+    },
+    {
+      "producer": "aten.linear.default",
+      "consumer": "_C.fused_add_rms_norm.default",
+      "count": 896
+    },
+    {
+      "producer": "_C.rotary_embedding.default",
+      "consumer": "_C.rotary_embedding.default",
+      "count": 894
+    },
+    {
+      "producer": "_C.fused_add_rms_norm.default",
+      "consumer": "aten.linear.default",
+      "count": 880
+    },
+    {
+      "producer": "_C.rms_norm.default",
+      "consumer": "aten.detach.default",
+      "count": 855
+    },
+    {
+      "producer": "_C.rms_norm.default",
+      "consumer": "_C.rms_norm.default",
+      "count": 855
+    },
+    {
+      "producer": "_C.fused_add_rms_norm.default",
+      "consumer": "aten.detach.default",
+      "count": 840
+    },
+    {
+      "producer": "aten.linear.default",
+      "consumer": "aten.split_with_sizes.default",
+      "count": 448
+    },
+    {
+      "producer": "aten.empty.memory_format",
+      "consumer": "aten.view.default",
+      "count": 448
+    },
+    {
+      "producer": "_C.rotary_embedding.default",
+      "consumer": "vllm.unified_kv_cache_update.default",
+      "count": 448
+    },
+    {
+      "producer": "aten.split_with_sizes.default",
+      "consumer": "vllm.unified_kv_cache_update.default",
+      "count": 448
+    },
+    {
+      "producer": "aten.split_with_sizes.default",
+      "consumer": "vllm.unified_attention_with_output.default",
+      "count": 448
+    },
+    {
+      "producer": "aten.empty.memory_format",
+      "consumer": "vllm.unified_attention_with_output.default",
+      "count": 448
+    },
+    {
+      "producer": "vllm.unified_kv_cache_update.default",
+      "consumer": "vllm.unified_attention_with_output.default",
+      "count": 448
+    },
+    {
+      "producer": "vllm.unified_attention_with_output.default",
+      "consumer": "aten.view.default",
+      "count": 448
+    },
+    {
+      "producer": "vllm.unified_attention_with_output.default",
+      "consumer": "aten.linear.default",
+      "count": 448
+    },
+    {
+      "producer": "aten.empty.memory_format",
+      "consumer": "_C.silu_and_mul.default",
+      "count": 448
+    },
+    {
+      "producer": "aten.linear.default",
+      "consumer": "_C.silu_and_mul.default",
+      "count": 448
+    },
+    {
+      "producer": "_C.silu_and_mul.default",
+      "consumer": "aten.linear.default",
+      "count": 448
+    },
+    {
+      "producer": "aten.slice.Tensor",
+      "consumer": "aten.slice.Tensor",
+      "count": 256
+    },
+    {
+      "producer": "aten.detach.default",
+      "consumer": "_C.rms_norm.default",
+      "count": 57
+    },
+    {
+      "producer": "aten.detach.default",
+      "consumer": "_C.fused_add_rms_norm.default",
+      "count": 56
+    },
+    {
+      "producer": "aten.lift_fresh.default",
+      "consumer": "aten.lift_fresh.default",
+      "count": 42
+    },
+    {
+      "producer": "aten.slice.Tensor",
+      "consumer": "aten.fill_.Scalar",
+      "count": 32
+    },
+    {
+      "producer": "aten.lift_fresh.default",
+      "consumer": "aten.pin_memory.default",
+      "count": 32
+    },
+    {
+      "producer": "aten.pin_memory.default",
+      "consumer": "aten.copy_.default",
+      "count": 32
+    },
+    {
+      "producer": "aten.pin_memory.default",
+      "consumer": "aten.slice.Tensor",
+      "count": 32
+    },
+    {
+      "producer": "aten.lift_fresh.default",
+      "consumer": "aten.slice.Tensor",
+      "count": 32
+    },
+    {
+      "producer": "aten.alias.default",
+      "consumer": "aten.new_empty.default",
+      "count": 32
+    },
+    {
+      "producer": "aten.gather.default",
+      "consumer": "aten.view.default",
+      "count": 32
+    },
+    {
+      "producer": "aten.gather.default",
+      "consumer": "aten.to.dtype_layout",
+      "count": 32
+    },
+    {
+      "producer": "aten.resolve_conj.default",
+      "consumer": "aten.resolve_neg.default",
+      "count": 32
+    },
+    {
+      "producer": "aten.new_ones.default",
+      "consumer": "aten.to.dtype_layout",
+      "count": 32
+    },
+    {
+      "producer": "aten.lift_fresh.default",
+      "consumer": "aten.empty_like.default",
+      "count": 16
+    },
+    {
+      "producer": "aten.empty_like.default",
+      "consumer": "aten.copy_.default",
+      "count": 16
+    },
+    {
+      "producer": "aten.lift_fresh.default",
+      "consumer": "aten.max.default",
+      "count": 16
+    },
+    {
+      "producer": "aten.max.default",
+      "consumer": "aten.item.default",
+      "count": 16
+    },
+    {
+      "producer": "aten.slice.Tensor",
+      "consumer": "aten.to.dtype",
+      "count": 16
+    },
+    {
+      "producer": "aten.slice.Tensor",
+      "consumer": "aten.embedding.default",
+      "count": 16
+    },
+    {
+      "producer": "aten.embedding.default",
+      "consumer": "_C.rms_norm.default",
+      "count": 16
+    },
+    {
+      "producer": "_C.rms_norm.default",
+      "consumer": "aten.linear.default",
+      "count": 16
+    },
+    {
+      "producer": "_C.rms_norm.default",
+      "consumer": "_C.fused_add_rms_norm.default",
+      "count": 16
+    },
+    {
+      "producer": "_C.fused_add_rms_norm.default",
+      "consumer": "aten.index.Tensor",
+      "count": 16
+    },
+    {
+      "producer": "aten.index.Tensor",
+      "consumer": "aten.linear.default",
+      "count": 16
+    },
+    {
+      "producer": "aten.linear.default",
+      "consumer": "aten.alias.default",
+      "count": 16
+    },
+    {
+      "producer": "_C.rotary_embedding.default",
+      "consumer": "aten.index.Tensor",
+      "count": 16
+    },
+    {
+      "producer": "aten.slice.Tensor",
+      "consumer": "aten.index.Tensor",
+      "count": 16
+    },
+    {
+      "producer": "aten.new_empty.default",
+      "consumer": "aten.argmax.default",
+      "count": 16
+    },
+    {
+      "producer": "aten.new_empty.default",
+      "consumer": "aten.gather.default",
+      "count": 16
+    },
+    {
+      "producer": "aten.argmax.default",
+      "consumer": "aten.gather.default",
+      "count": 16
+    },
+    {
+      "producer": "aten.slice.Tensor",
+      "consumer": "aten.new_ones.default",
+      "count": 16
+    },
+    {
+      "producer": "aten.new_ones.default",
+      "consumer": "aten.empty_like.default",
+      "count": 16
+    },
+    {
+      "producer": "aten.gather.default",
+      "consumer": "aten.detach.default",
+      "count": 16
+    },
+    {
+      "producer": "aten.gather.default",
+      "consumer": "aten.resolve_conj.default",
+      "count": 16
+    },
+    {
+      "producer": "aten.new_ones.default",
+      "consumer": "aten.detach.default",
+      "count": 16
+    },
+    {
+      "producer": "aten.new_ones.default",
+      "consumer": "aten.resolve_conj.default",
+      "count": 16
+    },
+    {
+      "producer": "aten.unbind.int",
+      "consumer": "aten.unbind.int",
+      "count": 15
+    },
+    {
+      "producer": "aten.zero_.default",
+      "consumer": "aten.zero_.default",
+      "count": 7
+    },
+    {
+      "producer": "aten.lift_fresh.default",
+      "consumer": "aten.detach_.default",
+      "count": 5
+    },
+    {
+      "producer": "aten.detach_.default",
+      "consumer": "aten.to.device",
+      "count": 5
+    }
+  ]
+}

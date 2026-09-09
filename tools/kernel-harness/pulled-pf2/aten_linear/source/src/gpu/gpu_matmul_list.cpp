@@ -1,0 +1,71 @@
+/*******************************************************************************
+* Copyright 2021 Intel Corporation
+*
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License.
+*******************************************************************************/
+
+#include "gpu/gpu_impl_list.hpp"
+
+#if DNNL_GPU_VENDOR == DNNL_VENDOR_INTEL
+#include "gpu/intel/matmul/gemm.hpp"
+#include "gpu/intel/matmul/grouped_micro_gemm.hpp"
+#include "gpu/intel/matmul/ref.hpp"
+#if DNNL_EXPERIMENTAL_GROUPED_MEMORY
+#include "gpu/intel/matmul/ref_grouped_gemm.hpp"
+#endif
+#include "gpu/intel/matmul/sparse_ref.hpp"
+#endif
+
+#if DNNL_GPU_VENDOR == DNNL_VENDOR_NVIDIA
+#include "gpu/nvidia/cudnn_matmul.hpp"
+#include "gpu/nvidia/cudnn_matmul_lt.hpp"
+#endif
+
+#if DNNL_GPU_VENDOR == DNNL_VENDOR_AMD
+#include "gpu/amd/miopen_matmul.hpp"
+#endif
+
+#ifdef GENERIC_SYCL_KERNELS_ENABLED
+#include "gpu/generic/sycl/ref_matmul.hpp"
+#endif
+
+namespace dnnl {
+namespace impl {
+namespace gpu {
+
+namespace {
+
+// clang-format off
+constexpr impl_list_item_t impl_list[] = REG_MATMUL_P({
+        GPU_INSTANCE_INTEL(intel::matmul::gemm_t)
+        GPU_INSTANCE_INTEL(intel::matmul::ref_sparse_t)
+        GPU_INSTANCE_GROUPED(intel::matmul::grouped_micro_gemm_t)
+        GPU_INSTANCE_GROUPED(intel::matmul::ref_grouped_t)
+        GPU_INSTANCE_INTEL_REF(intel::matmul::ref_t)
+        GPU_INSTANCE_NVIDIA(nvidia::cudnn_matmul_lt_t)
+        GPU_INSTANCE_NVIDIA(nvidia::cudnn_matmul_t)
+        GPU_INSTANCE_AMD(amd::miopen_matmul_t)
+        GPU_INSTANCE_GENERIC_SYCL(generic::sycl::ref_matmul_t)
+        nullptr,
+});
+// clang-format on
+} // namespace
+
+const impl_list_item_t *get_matmul_impl_list(const matmul_desc_t *desc) {
+    UNUSED(desc);
+    return impl_list;
+}
+
+} // namespace gpu
+} // namespace impl
+} // namespace dnnl
