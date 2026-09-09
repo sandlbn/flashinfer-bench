@@ -245,6 +245,10 @@ Start with `.claude/skills/`. Each subdirectory contains a `SKILL.md` with full 
 - **measure-serving-win**: Convert a per-kernel speedup into tokens/sec under vLLM, A/B, with
   the dispatch counters that prove the substitution happened. Run before claiming any
   deployment win — a kernel is worth at most its share of serving device time
+- **discover-model-kernels**: Discover the ops a model actually runs under its serving
+  stack, resolve each to the kernel that really implements it (the dispatcher is the
+  authority, not a table), and emit a verified harness per (op, shape). Use instead of
+  naming a definition by hand
 
 ## Common Misunderstandings
 
