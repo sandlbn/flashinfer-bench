@@ -66,7 +66,7 @@ def _entry_point_of(source: str, path: str) -> str:
 
 
 def build(
-    definition_name: str,
+    definition_name,
     source: str,
     entry_point: str | None = None,
     dependencies: List[str] | None = None,
@@ -82,7 +82,10 @@ def build(
     from flashinfer_bench.compile import BuilderRegistry
     from flashinfer_bench.data import Solution
 
-    definition = _definition(definition_name)
+    # A trial for an op the dataset has no definition of (a fusion of two ops, say) may
+    # hand in a Definition object built in memory; a name is looked up in the dataset.
+    definition = definition_name if hasattr(definition_name, "inputs") else _definition(definition_name)
+    definition_name = definition.name
     entry_point = entry_point or _entry_point_of(source, source_path)
     path = entry_point.split("::")[0]
     solution = Solution.model_validate(

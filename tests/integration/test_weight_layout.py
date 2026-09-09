@@ -137,19 +137,23 @@ class TestChannelPeriodRule:
         assert not wl.camps_on_one_channel(torch.zeros(2, 4, 3072, dtype=torch.bfloat16), PERIOD)
         assert not wl.camps_on_one_channel(torch.zeros(3072, 4, dtype=torch.bfloat16).t(), PERIOD)
 
-    def test_a_different_channel_count_derives_a_different_period(self, monkeypatch):
-        """The period is channels x granule; it is never a fixed number in the rule."""
-        monkeypatch.setenv(wl.CHANNELS_ENV, "5")
-        assert wl.channel_period_bytes() == 5 * wl.INTERLEAVE_BYTES
-        # 6144-byte rows camp on a six-channel part and not on a five-channel one.
-        w = torch.zeros(4, 3072, dtype=torch.bfloat16)
-        assert wl.camps_on_one_channel(w, wl.channel_period_bytes()) is False
-        assert wl.camps_on_one_channel(w, 6 * wl.INTERLEAVE_BYTES) is True
+    def test_a_different_period_makes_different_pitches_camp(self):
+        """The period is whatever was measured for the device; the rule carries no number."""
+        w = torch.zeros(4, 3072, dtype=torch.bfloat16)  # 6144-byte pitch
+        assert wl.camps_on_one_channel(w, 5 * 1024) is False
+        assert wl.camps_on_one_channel(w, 6 * 1024) is True
+        assert wl.camps_on_one_channel(w, 3 * 1024) is True
 
-    def test_rejects_a_non_positive_channel_override(self, monkeypatch):
-        monkeypatch.setenv(wl.CHANNELS_ENV, "0")
+    def test_period_override_is_taken_as_given(self, monkeypatch):
+        monkeypatch.setenv(wl.PERIOD_ENV, "5120")
+        assert wl.channel_period_bytes() == 5120
+        assert wl.camps_on_one_channel(torch.zeros(4, 2560, dtype=torch.bfloat16))
+        assert not wl.camps_on_one_channel(torch.zeros(4, 3072, dtype=torch.bfloat16))
+
+    def test_rejects_a_non_positive_period_override(self, monkeypatch):
+        monkeypatch.setenv(wl.PERIOD_ENV, "0")
         with pytest.raises(ValueError, match="positive"):
-            wl.memory_channel_count()
+            wl.channel_period_bytes()
 
     def test_pad_never_lands_back_on_the_period(self):
         with pytest.raises(ValueError, match="channel period"):
@@ -159,6 +163,69 @@ class TestChannelPeriodRule:
         """Unknown is not a win: with nothing to stream from, the probe answers None."""
         w = torch.randn(8, 3072, dtype=torch.bfloat16)
         assert wl.streaming_pad_wins(w, wl.pad_rows_off_channel_period(w, PERIOD)) is None
+
+
+class TestUnknownPeriodIsNotAnAnswer:
+    """With no measured period the rule has nothing to test a pitch against. It says so;
+    it does not answer False, which a caller would read as "does not camp"."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh(self, monkeypatch):
+        monkeypatch.delenv(wl.PERIOD_ENV, raising=False)
+        monkeypatch.setattr(wl, "_PERIODS", {})
+
+    def test_host_memory_has_no_period_and_asks_no_calibration(self, monkeypatch):
+        from flashinfer_bench.device import calibration
+
+        monkeypatch.setattr(
+            calibration, "get", lambda *a, **k: pytest.fail("calibration measured for host memory")
+        )
+        assert wl.channel_period_bytes(torch.device("cpu")) is None
+        assert wl.channel_period_bytes("cpu") is None
+
+    def test_an_unresolved_calibration_is_none(self, monkeypatch):
+        from flashinfer_bench.device import calibration
+
+        monkeypatch.setattr(calibration, "get", lambda *a, **k: None)
+        assert wl.channel_period_bytes("xpu:0") is None
+        record = calibration.Calibration("p", "t", 1.0, 1.0, 1.0, 1.0, {}, None)
+        monkeypatch.setattr(wl, "_PERIODS", {})
+        monkeypatch.setattr(calibration, "get", lambda *a, **k: record)
+        assert wl.channel_period_bytes("xpu:0") is None
+
+    def test_a_resolved_calibration_is_read_once_per_device(self, monkeypatch):
+        from flashinfer_bench.device import calibration
+
+        calls = []
+        record = calibration.Calibration("p", "t", 1.0, 1.0, 1.0, 1.0, {}, 5120)
+        monkeypatch.setattr(calibration, "get", lambda d=None, **k: calls.append(d) or record)
+        assert wl.channel_period_bytes("xpu:0") == 5120
+        assert wl.channel_period_bytes(torch.device("xpu", 0)) == 5120
+        assert calls == ["xpu:0"]
+
+    def test_the_rule_refuses_rather_than_answers(self):
+        w = torch.zeros(4, 3072, dtype=torch.bfloat16)  # host memory: no period
+        with pytest.raises(wl.ChannelPeriodUnknown):
+            wl.camps_on_one_channel(w)
+        with pytest.raises(wl.ChannelPeriodUnknown):
+            wl.pad_rows_off_channel_period(w)
+        assert isinstance(wl.ChannelPeriodUnknown("x"), LookupError)
+
+    def test_tensors_that_can_never_camp_need_no_period(self):
+        assert wl.camps_on_one_channel(torch.zeros(3072, dtype=torch.bfloat16)) is False
+        assert wl.pad_rows_off_channel_period(torch.zeros(3072, dtype=torch.bfloat16)) is None
+
+    def test_an_explicit_period_needs_no_calibration(self, monkeypatch):
+        from flashinfer_bench.device import calibration
+
+        monkeypatch.setattr(calibration, "get", lambda *a, **k: pytest.fail("not needed"))
+        w = torch.zeros(4, 3072, dtype=torch.bfloat16)
+        assert wl.camps_on_one_channel(w, PERIOD) is True
+        assert wl.pad_rows_off_channel_period(w, PERIOD) is not None
+
+    def test_a_non_positive_period_is_rejected(self):
+        with pytest.raises(ValueError, match="positive"):
+            wl.camps_on_one_channel(torch.zeros(4, 3072, dtype=torch.bfloat16), 0)
 
 
 class TestPadRowsOffChannelPeriod:

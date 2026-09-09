@@ -1,6 +1,6 @@
 ---
 name: profile-intel
-description: Profile a model on an Intel GPU, rank kernel families by recoverable device time, and route each to the skill that fixes it. Covers unitrace and torch.profiler usage on XPU. Run before any Intel optimization work.
+description: Profile a model on an Intel GPU, rank kernel families by recoverable device time, and route each to the skill that fixes it. Covers unitrace, VTune and torch.profiler usage on XPU. Run before any Intel optimization work.
 ---
 
 # Profile and route
@@ -68,7 +68,7 @@ target is chosen, `/wrap-kernel-for-tuning` is how it gets optimized.
 A `transformers` profile cannot rank attention or KV-cache the way a serving stack would —
 it is not paging a KV cache. Profile vLLM-XPU or SGLang-XPU for those.
 
-## Two profilers, and which to use
+## Three profilers, and which to use
 
 ### unitrace — per-kernel timing, spill, SIMD and GRF
 
@@ -102,8 +102,68 @@ metrics (`-q`, `-k`, `--stall-sampling`) need `sudo sysctl dev.xe.observation_pa
 `aten` ops that launched them, which is what makes family routing possible. It does not
 report spill, SIMD or GRF.
 
+### VTune — where a kernel's time goes: counters, occupancy, stall reasons
+
+unitrace says how long each kernel took; VTune says why. Its hardware-counter modes report,
+per kernel, the XVE active / stalled / idle split, thread occupancy, L3 and GPU-memory
+bytes (so achieved bandwidth per kernel), instruction mix per pipe, and in stall-sampling
+mode the stall reason per instruction. That is what decides between two explanations of
+one slowdown: a memory-system effect and a latency effect leave different counter
+signatures on the same kernel, where a timer shows the same number for both.
+
+The repo wraps it in `flashinfer_bench/agents/vtune.py`. The wrapper finds the binary
+(`FIB_VTUNE`, then PATH, then the oneAPI default prefix), pins VTune to the GPU behind the
+torch device (a box with an integrated and a discrete Intel GPU shows two adapters, and
+VTune samples both unless told which; `-target-gpu` is not a global option, the knob is),
+checks the prerequisites *before* launching, and translates VTune's late, indirect failures
+into the cause and the fix:
+
+```bash
+python -m flashinfer_bench.agents.vtune --check --device xpu:0      # what is missing, and whether it needs root
+python -m flashinfer_bench.agents.vtune --list-modes
+python -m flashinfer_bench.agents.vtune --mode timing --harness tools/kernel-harness/auto/<op>.py --seconds 5
+python -m flashinfer_bench.agents.vtune --mode characterization --metric-group full-compute \
+    --harness <harness.py> --result-dir prof-vt              # keep the result for vtune-gui
+python -m flashinfer_bench.agents.vtune --mode stall -- python your_script.py
+```
+
+`--harness` loops a `Model`/`get_inputs` file for `--seconds`: a tracing profiler records
+every launch, but a sampling one attributes each sample to whatever kernel is running when
+it fires, so a short kernel run once collects nothing in the counter modes. From Python,
+`flashinfer_bench_run_vtune(solution, workload, mode=...)` profiles a Solution on a Workload
+the way the unitrace tool does, with `iterations` playing the role of `--seconds`.
+
+**Prerequisites, and which need root.** VTune reaches a kernel through two independent
+channels; each has its own gate, and VTune checks neither before running the whole
+workload. `--check` reports the state of every gate the chosen mode needs.
+
+Source: `python -m flashinfer_bench.agents.vtune --check`
+
+| Channel | Gives | Gate | Root |
+| --- | --- | --- | --- |
+| API tracing (Pin) | kernel names and per-launch device time; the `timing` mode | `<vtune>/lib64/pinruntime` loadable; `kernel.yama.ptrace_scope=0` | yes |
+| Counter stream (OA metrics, EU stall sampling) | every hardware metric; the `characterization` and `stall` modes | `dev.xe.observation_paranoid=0` on the xe driver, `dev.i915.perf_stream_paranoid=0` on i915, or `CAP_PERFMON`; `libigdmd.so` installed | yes |
+| Sampling driver (sep/pax) | memory bandwidth (`--bandwidth`) | driver built and loaded from `<vtune>/sepdk/src` | yes |
+
+With both channels gated, nothing per kernel is reachable on the discrete GPU without
+root; the wrapper says so before launching and names the modes the present state allows.
+
+**What VTune prints, and what it means.** The console shows one line per failure; the
+reason is in `<result>/log/perfrun-*.log`, which the wrapper reads and quotes.
+
+Source: `<result>/log/perfrun-*.log`
+
+| Console | Cause | Fix |
+| --- | --- | --- |
+| `pinbin: error while loading shared libraries: libc++.so`, or the application exits at once | Pin's runtime carries percent-encoded file names (`libc%2B%2B.so`), a packaging defect. Pin's own linker ignores `LD_LIBRARY_PATH` and `LD_PRELOAD`, so there is no user-level override; attach mode fails the same way | one symlink per file, printed by `--check` (root) |
+| `Cannot stop collection of GPU events` | the counter stream was refused (`OpenIoStream returned error` in the log) and VTune disabled its GPU plugin for the run; every counter mode is affected, `timing` is not | the observation sysctl for the device's driver (root) |
+| `Failed to connect to PMU reservation service (PAX)` | `--bandwidth` needs the sampling driver | build and load it (root), or drop `--bandwidth` |
+| `%ThisTargetTypeNotWorking` | `-target-gpu` given as a global option | `-knob target-gpu=<bdf>`; the wrapper does this |
+| `Elapsed Time` of nothing and no GPU rows | the command ran no kernel: an interpreter without torch, or a harness file with no `__main__` | `--harness`, under the venv's python |
+
 Use `profile_intel.py` to decide *what* to optimize, unitrace on a kernel you wrote to check
-it is not spilling.
+it is not spilling, and VTune when the question is *why* a kernel is slow rather than how
+slow.
 
 ## A family that says "other"
 

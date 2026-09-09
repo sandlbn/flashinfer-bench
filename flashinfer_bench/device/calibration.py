@@ -13,27 +13,42 @@ stack) and cached on disk, and a new chip gets its own answer with no edit.
 from __future__ import annotations
 
 import contextlib
+import functools
+import itertools
 import json
 import logging
+import math
 import os
 import pathlib
 import statistics
 import time
 from dataclasses import asdict, dataclass
-from typing import TYPE_CHECKING, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import (
+    TYPE_CHECKING,
+    Callable,
+    Dict,
+    Iterator,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 if TYPE_CHECKING:
     import torch
 
 logger = logging.getLogger(__name__)
 
-CACHE_VERSION = 3
+CACHE_VERSION = 4
 """Bumped when a stored record can no longer be trusted.
 
 v1 records wrote an unmeasurable dispatch cost as ``0.0`` -- the claim that a substitution
 is free -- so a v1 file is never read. v2 records predate ``launch_floor_us`` and
 ``matmul_peak_tflops``; a reader that filled those in with a default would be classifying
-regimes against a number nobody measured, so a v2 file is not read either.
+regimes against a number nobody measured, so a v2 file is not read either. v3 records
+predate ``channel_period_bytes``; a period filled in from anywhere but the sweep would pad
+weights that do not camp and miss ones that do, so a v3 file is not read.
 """
 
 MATMUL_DTYPES = ("bfloat16", "float16", "float32")
@@ -83,6 +98,21 @@ class Calibration:
     peak``. Only dtypes the part runs natively are probed; a dtype whose rounds did not
     settle maps to ``None``. What ``torch.matmul`` reaches through this stack, not a
     datasheet figure."""
+    channel_period_bytes: Optional[int]
+    """Distance in bytes at which row pitches put every row on the same memory channel.
+
+    Found by sweeping the row pitch of a streaming read and taking the spacing of the
+    pitches at which it is slow (:func:`measure_channel_period_bytes`). A 2-D weight whose
+    row pitch is a multiple of it streams at a fraction of the bandwidth of one whose pitch
+    is not, and the load-time row pad in ``flashinfer_bench.integration.weight_layout`` is
+    keyed on it. The spacing is what the transform needs; whether it factors into a channel
+    count times an interleave granule is an interpretation the sweep does not make.
+
+    ``None`` when the sweep resolved no period -- its pitches did not settle, or no pitch in
+    its range was slow -- and never a default: a caller that reads ``None`` must treat the
+    row-pad transform as unavailable, since a period taken from another part pads the wrong
+    weights and nothing downstream can tell.
+    """
 
     @property
     def complete(self) -> bool:
@@ -92,6 +122,7 @@ class Calibration:
             self.dispatch_us is not None
             and self.launch_floor_us is not None
             and all(v is not None for v in self.matmul_peak_tflops.values())
+            and self.channel_period_bytes is not None
         )
 
 
@@ -128,6 +159,64 @@ field records what this size achieved, and the docstring of ``matmul_peak_tflops
 PATTERN_BUFFER_BYTES = 256 * 1024 * 1024
 """Size of the buffer the strided-read probe sweeps, chosen to exceed any last-level cache
 this project targets so the number is memory bandwidth and not cache bandwidth."""
+
+CHANNEL_PERIOD_PROBE_ROWS = 4096
+"""Rows the channel-period probe reads at every pitch.
+
+Fixed across the sweep so that the kernel -- its work-group count, how it splits the rows --
+is identical at every pitch and only the addresses differ. A reduction whose row count
+followed the pitch changes its own schedule from one pitch to the next and buries the
+address effect under that.
+"""
+
+CHANNEL_PERIOD_PROBE_RUN_BYTES = 2048
+"""Contiguous bytes the probe reads at the start of every row.
+
+The column window it holds in flight across many rows at once, which is how a decode GEMM
+reads a weight. It also bounds what the sweep can resolve: a period no longer than the run
+is covered by every row, no pitch is slow, and the sweep reports none found.
+"""
+
+CHANNEL_PERIOD_PITCH_STEP_BYTES = 256
+"""Spacing of the pitches swept. A period is resolved to a multiple of it."""
+
+CHANNEL_PERIOD_MAX_PITCH_BYTES = 32 * 1024
+"""Largest pitch swept. A period has to repeat inside the range to be one, so the largest
+resolvable is half of this."""
+
+CHANNEL_PERIOD_PROBE_CALLS = 20
+"""Probe reads per timed region: enough that a region is long against the host's
+synchronisation jitter, so the regions can agree to :data:`DEVICE_SPREAD_TOLERANCE`."""
+
+CHANNEL_PERIOD_WARMUP_S = 0.3
+"""Sustained load over the whole sweep before any pitch is timed, so the part has left its
+gated clock before the first pitch rather than during the tenth."""
+
+CHANNEL_PERIOD_PITCH_BUDGET_S = 0.5
+"""Longest one pitch keeps sampling for its window to settle. Shorter than
+:data:`SETTLE_BUDGET_S` because there are a hundred-odd pitches and the device is shared."""
+
+CHANNEL_PERIOD_SWEEP_BUDGET_S = 10.0
+"""Longest the whole sweep runs. Pitches not reached by then are unmeasured, not slow."""
+
+CAMPING_DEFICIT = 0.20
+"""How much longer than its neighbours a pitch's read must take to count as camping.
+
+A property of the estimator, set from the shape of the curve and not from any part's
+numbers. The curve is a flat baseline with isolated spikes: the spikes are a fraction of
+the memory channels idling, which costs a large fraction of the read, while a pitch at a
+fraction of the period and the sweep's own scatter cost a few percent. A fifth sits between
+the two with room on both sides.
+"""
+
+CHANNEL_PERIOD_NEIGHBOURHOOD = 4
+"""Measured pitches on each side that a pitch is compared against.
+
+The baseline is local so that a slow drift over the sweep -- a clock still settling,
+another process on the device -- is not read as a slow pitch. A resolvable period is longer
+than the run, which is longer than this many steps, so a neighbourhood holds at most one
+camping pitch and its median never is one.
+"""
 
 
 def _cache_path(hardware_id: str, timer: str) -> pathlib.Path:
@@ -319,6 +408,14 @@ def measure(device: str) -> Calibration:
         if value is None:
             logger.warning("Matrix throughput at %s did not settle on %s.", name, device)
 
+    period = measure_channel_period_bytes(device)
+    if period is None:
+        logger.warning(
+            "No memory channel period resolved on %s; channel_period_bytes is None. The "
+            "row-pad weight transform is unavailable here, not keyed on a borrowed period.",
+            device,
+        )
+
     dispatch = measure_dispatch_us(device)
     if dispatch is None:
         logger.warning(
@@ -334,6 +431,7 @@ def measure(device: str) -> Calibration:
         bandwidth_gbs=bandwidth,
         launch_floor_us=launch,
         matmul_peak_tflops=peak,
+        channel_period_bytes=period,
     )
 
 
@@ -460,6 +558,165 @@ def strided_read_bandwidth_gbs(
     except OSError:
         pass
     return gbs
+
+
+def _camping_pitches(
+    times: Mapping[int, Optional[float]], deficit: float, neighbourhood: int
+) -> Optional[List[int]]:
+    """Pitches whose read exceeds the median of their nearest measured neighbours by more
+    than `deficit`, or None when too few pitches were measured to have neighbours."""
+    measured = sorted((p, t) for p, t in times.items() if t is not None and t > 0)
+    if len(measured) < 2 * neighbourhood + 1:
+        return None
+    slow = []
+    for i, (pitch, t) in enumerate(measured):
+        around = measured[max(0, i - neighbourhood) : i] + measured[i + 1 : i + 1 + neighbourhood]
+        if t > statistics.median(q for _, q in around) * (1.0 + deficit):
+            slow.append(pitch)
+    return slow
+
+
+def channel_period_from_sweep(
+    times: Mapping[int, Optional[float]],
+    deficit: float = CAMPING_DEFICIT,
+    neighbourhood: int = CHANNEL_PERIOD_NEIGHBOURHOOD,
+) -> Optional[int]:
+    """The spacing of the slow pitches in a pitch sweep, or None.
+
+    `times` maps a row pitch in bytes to the settled per-call time of the probe read at that
+    pitch, or None where it did not settle. A pitch is slow when it exceeds the median of
+    its nearest measured neighbours by more than `deficit`. The period is the greatest
+    common divisor of the slow pitches, accepted only when it is itself slow and every
+    measured multiple of it is slow: the first refuses a spacing assembled from unrelated
+    slow pitches, the second a divisor finer than the repeat. Fewer than two slow pitches is
+    no repeat and no period.
+
+    Pure arithmetic over the sweep, so it is testable without a device. It never guesses: a
+    sweep with no slow pitch returns None, the same as one that did not settle.
+    """
+    slow = _camping_pitches(times, deficit, neighbourhood)
+    if not slow or len(slow) < 2:
+        return None
+    period = functools.reduce(math.gcd, slow)
+    if period not in slow:
+        logger.debug("slow pitches %s share %d, which is not itself slow", slow, period)
+        return None
+    missing = [p for p, t in times.items() if t is not None and p % period == 0 and p not in slow]
+    if missing:
+        logger.debug("slow pitches %s share %d, but %s are not slow", slow, period, missing)
+        return None
+    return period
+
+
+def _measure_pitch_sweep_us(
+    device: str,
+    pitches: Sequence[int],
+    rows: int = CHANNEL_PERIOD_PROBE_ROWS,
+    run_bytes: int = CHANNEL_PERIOD_PROBE_RUN_BYTES,
+    budget_s: float = CHANNEL_PERIOD_SWEEP_BUDGET_S,
+) -> Dict[int, Optional[float]]:
+    """Settled per-call microseconds of the probe read at each pitch; None where it did not.
+
+    The probe is a column-wise reduction over a ``[rows, run]`` window of a big buffer whose
+    row pitch is the pitch under test: many rows in flight at the same column window, the
+    access a decode GEMM makes to a weight. Rows and run are the same at every pitch, so the
+    kernel is the same and only the addresses move. Each pitch rotates over enough disjoint
+    windows that what the rotation touches exceeds the last-level cache -- the effect does
+    not exist while the window is cache-resident. The sweep runs under sustained load from
+    a time-based warm-up through the last pitch, and each pitch is accepted by
+    :func:`_settled_device_us`.
+    """
+    import torch
+
+    from flashinfer_bench.device import get_accelerator
+
+    backend = _backend(device)
+    l2_bytes = int(get_accelerator(device).capabilities(device).l2_bytes)
+    itemsize = 2
+    run_e = run_bytes // itemsize
+    windows = max(2, math.ceil(2 * l2_bytes / (rows * run_bytes)))
+    nbytes = max(PATTERN_BUFFER_BYTES, windows * rows * max(pitches))
+    # Random contents, as for every read probe here: a constant fill reads faster than data
+    # does through this memory path, and the probe would then be measuring the fill.
+    buf = torch.randn(nbytes // itemsize, dtype=torch.float16, device=device)
+    out = torch.empty(run_e, dtype=torch.float16, device=device)
+
+    probes: Dict[int, Callable[[], object]] = {}
+    for pitch in pitches:
+        stride_e = pitch // itemsize
+        per_window = rows * stride_e
+        count = min(windows, buf.numel() // per_window)
+        views = [
+            buf[j * per_window : (j + 1) * per_window].view(rows, stride_e)[:, :run_e]
+            for j in range(count)
+        ]
+        rotation = itertools.cycle(views)
+        probes[pitch] = lambda it=rotation: torch.sum(next(it), dim=0, out=out)
+
+    def sync() -> None:
+        backend.synchronize()
+
+    deadline = time.perf_counter() + CHANNEL_PERIOD_WARMUP_S
+    while time.perf_counter() < deadline:
+        for fn in probes.values():
+            fn()
+    sync()
+
+    end = time.perf_counter() + budget_s
+    result: Dict[int, Optional[float]] = {}
+    for pitch in pitches:
+        left = end - time.perf_counter()
+        if left <= 0:
+            result[pitch] = None
+            continue
+        result[pitch] = _settled_device_us(
+            probes[pitch],
+            sync,
+            calls=CHANNEL_PERIOD_PROBE_CALLS,
+            budget_s=min(CHANNEL_PERIOD_PITCH_BUDGET_S, left),
+        )
+    return result
+
+
+def measure_channel_period_bytes(device: str) -> Optional[int]:
+    """Distance in bytes at which row pitches camp on one memory channel, or None.
+
+    A streaming read is timed at every row pitch from :data:`CHANNEL_PERIOD_PROBE_RUN_BYTES`
+    to :data:`CHANNEL_PERIOD_MAX_PITCH_BYTES` in steps of
+    :data:`CHANNEL_PERIOD_PITCH_STEP_BYTES` (:func:`_measure_pitch_sweep_us`), and the period
+    is read off the sweep as the spacing of the slow pitches
+    (:func:`channel_period_from_sweep`). Nothing about a channel count or an interleave
+    granule is assumed: the spacing is what a weight's pitch is tested against, and it is
+    established from where the reads are slow.
+
+    None when the sweep resolved no period -- pitches that did not settle on a shared
+    device, no slow pitch within the range, or slow pitches that do not repeat at one
+    spacing -- and never a value from elsewhere. Cheap enough to run at every calibration:
+    a fraction of a second of device time when the pitches settle.
+    """
+    pitches = list(
+        range(
+            CHANNEL_PERIOD_PROBE_RUN_BYTES,
+            CHANNEL_PERIOD_MAX_PITCH_BYTES + 1,
+            CHANNEL_PERIOD_PITCH_STEP_BYTES,
+        )
+    )
+    try:
+        times = _measure_pitch_sweep_us(device, pitches)
+    except Exception as exc:
+        logger.debug("channel period sweep failed on %s: %s", device, exc)
+        return None
+    period = channel_period_from_sweep(times)
+    if period is None:
+        unsettled = sum(t is None for t in times.values())
+        logger.debug(
+            "no channel period on %s: %d of %d pitches unsettled, slow pitches %s",
+            device,
+            unsettled,
+            len(pitches),
+            _camping_pitches(times, CAMPING_DEFICIT, CHANNEL_PERIOD_NEIGHBOURHOOD),
+        )
+    return period
 
 
 _MISS = object()
@@ -621,9 +878,9 @@ def get(device: Optional[str] = None, refresh: bool = False) -> Optional[Calibra
 
     Returns None when it cannot be measured here, so a caller can fall back to a documented
     behaviour instead of acting on a fabricated threshold. A record with any field still
-    None (``dispatch_us``, ``launch_floor_us``, a dtype's matrix throughput) is returned but
-    not cached: an unmeasured cost is not a result to remember, and the next process gets
-    another attempt.
+    None (``dispatch_us``, ``launch_floor_us``, a dtype's matrix throughput,
+    ``channel_period_bytes``) is returned but not cached: an unmeasured cost is not a result
+    to remember, and the next process gets another attempt.
     """
     try:
         from flashinfer_bench.device import default_device_type, get_accelerator

@@ -1,11 +1,11 @@
 """Integration layer for external frameworks like FlashInfer."""
 
 from .weight_layout import (
+    ChannelPeriodUnknown,
     camps_on_one_channel,
     channel_period_bytes,
     deinterleave_output,
     interleave_gate_up,
-    memory_channel_count,
     pad_rows_off_channel_period,
     qwen_style_mlp_weights,
     rms_row_scale,
@@ -23,11 +23,11 @@ from .xpu_kernels import (
 
 __all__ = [
     "BaselineKernel",
+    "ChannelPeriodUnknown",
     "camps_on_one_channel",
     "channel_period_bytes",
     "deinterleave_output",
     "interleave_gate_up",
-    "memory_channel_count",
     "pad_rows_off_channel_period",
     "qwen_style_mlp_weights",
     "rms_row_scale",

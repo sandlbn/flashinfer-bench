@@ -35,7 +35,7 @@ flashinfer-bench/
 │   ├── integration/            #   FlashInfer and vLLM adapters; Intel kernel providers,
 │   │                           #   upstream-kernel baselines, in-tree kernel templates
 │   ├── tracing/                #   Workload tracing utilities
-│   ├── agents/                 #   Agent-facing tools: FFI/SYCL prompts, ncu/unitrace, sanitizer
+│   ├── agents/                 #   Agent-facing tools: FFI/SYCL prompts, ncu/unitrace/vtune, sanitizer
 │   └── cli/                    #   The `flashinfer-bench` entry point
 ├── tests/                      # Pytest suite; tests/scripts/ covers the pipeline scripts
 ├── scripts/                    # Standalone entry points: onboarding (workload collection,
@@ -342,7 +342,8 @@ reason against the external dataset
   vllm-xpu-kernels / sgl-kernel-xpu / Xe-Fuse / SYCL, and triage of a slow or wrong op to
   reference, harness or provider
 - **profile-intel**: Rank kernel families by recoverable device time on Intel and route each
-  to the skill that fixes it; unitrace and torch.profiler usage on XPU
+  to the skill that fixes it; unitrace, VTune (`flashinfer_bench/agents/vtune.py`, with its
+  root-gated prerequisites) and torch.profiler usage on XPU
 - **find-kernel-gaps**: Hot ops that no definition covers; rewrite versus new kernel; a
   definition plus solution for the ones worth it
 - **discover-model-kernels**, **wrap-kernel-for-tuning**, **measure-serving-win**: the

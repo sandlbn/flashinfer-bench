@@ -65,7 +65,7 @@ class TestGetNeverFabricatesZero:
         monkeypatch.setenv("FIB_CACHE_PATH", str(tmp_path))
         return tmp_path / "calibration"
 
-    def _record(self, dispatch, launch=2.0, peak=None):
+    def _record(self, dispatch, launch=2.0, peak=None, period=5120):
         return calibration.Calibration(
             hardware_id="CPU",
             timer="wall",
@@ -74,7 +74,28 @@ class TestGetNeverFabricatesZero:
             bandwidth_gbs=1.0,
             launch_floor_us=launch,
             matmul_peak_tflops={"bfloat16": 10.0} if peak is None else peak,
+            channel_period_bytes=period,
         )
+
+    def test_unresolved_channel_period_is_returned_as_none_and_not_cached(
+        self, cache_dir, monkeypatch
+    ):
+        monkeypatch.setattr(calibration, "measure", lambda device: self._record(5.0, period=None))
+        result = calibration.get("cpu", refresh=True)
+        assert result.channel_period_bytes is None and not result.complete
+        assert not cache_dir.exists() or not list(cache_dir.glob("*.json"))
+
+    def test_v3_records_lacking_the_period_are_not_read(self, cache_dir, monkeypatch):
+        monkeypatch.setattr(calibration, "measure", lambda device: self._record(4.0))
+        result = calibration.get("cpu", refresh=True)
+        (path,) = cache_dir.glob("*.json")
+        stale = path.with_name(path.name.replace(f"v{calibration.CACHE_VERSION}-", "v3-"))
+        old = json.loads(path.read_text())
+        old.pop("channel_period_bytes")
+        stale.write_text(json.dumps(old))
+        path.unlink()
+        monkeypatch.setattr(calibration, "measure", lambda device: replace(result, dispatch_us=7.0))
+        assert calibration.get("cpu").dispatch_us == pytest.approx(7.0)
 
     def test_unsettled_launch_floor_is_returned_as_none_and_not_cached(
         self, cache_dir, monkeypatch
@@ -277,9 +298,85 @@ class TestStridedReadArguments:
             calibration.strided_read_bandwidth_gbs("cpu", 64, calibration.PATTERN_BUFFER_BYTES * 2)
 
     def test_complete_requires_every_field(self):
-        full = calibration.Calibration("p", "t", 1.0, 1.0, 1.0, 1.0, {"bfloat16": 1.0})
+        full = calibration.Calibration("p", "t", 1.0, 1.0, 1.0, 1.0, {"bfloat16": 1.0}, 4096)
         assert full.complete
         assert not replace(full, dispatch_us=None).complete
         assert not replace(full, launch_floor_us=None).complete
         assert not replace(full, matmul_peak_tflops={"bfloat16": None}).complete
+        assert not replace(full, channel_period_bytes=None).complete
         assert replace(full, matmul_peak_tflops={}).complete
+
+
+STEP = 256
+GRID = list(range(2048, 32768 + 1, STEP))
+"""A pitch grid like the sweep's. The times below are synthetic: a flat baseline with the
+spikes the period detector is meant to read, in units of the baseline."""
+
+
+def _sweep(spikes, baseline=None, unsettled=()):
+    """`spikes` maps a pitch to its time in baseline units; everything else is baseline."""
+    baseline = baseline or (lambda p: 1.0)
+    return {p: None if p in unsettled else baseline(p) * spikes.get(p, 1.0) for p in GRID}
+
+
+def _multiples(period, factor, start=1):
+    return {p: factor for p in GRID if p % period == 0 and p >= start * period}
+
+
+class TestChannelPeriodFromSweep:
+    """The detector reads the spacing of the slow pitches and nothing else; it refuses a
+    sweep whose slow pitches do not repeat at one spacing, and never invents one."""
+
+    def test_reads_the_spacing_of_the_slow_pitches(self):
+        assert calibration.channel_period_from_sweep(_sweep(_multiples(5120, 1.3))) == 5120
+
+    def test_a_deeper_spike_at_twice_the_period_does_not_hide_it(self):
+        # Every other multiple is much slower than the ones between; the period is still the
+        # spacing of all of them, not of the deep ones.
+        spikes = {**_multiples(5120, 1.3), **_multiples(10240, 2.5)}
+        assert calibration.channel_period_from_sweep(_sweep(spikes)) == 5120
+
+    def test_a_residual_at_a_fraction_of_the_period_is_not_slow(self):
+        # A pitch at an odd number of half periods shows a few percent; that is not
+        # camping, and counting it would halve the period.
+        half_periods = {p: 1.10 for p in GRID if p % 2560 == 0 and p % 5120 != 0}
+        spikes = {**_multiples(5120, 1.3), **half_periods}
+        assert calibration.channel_period_from_sweep(_sweep(spikes)) == 5120
+
+    def test_a_single_slow_pitch_is_no_period(self):
+        assert calibration.channel_period_from_sweep(_sweep({20480: 1.5})) is None
+
+    def test_unrelated_slow_pitches_are_refused(self):
+        # Two slow pitches whose common divisor is itself a fast pitch: no periodic
+        # structure, so no period -- not the divisor, and not the smaller of the two.
+        assert calibration.channel_period_from_sweep(_sweep({6144: 1.4, 9216: 1.4})) is None
+
+    def test_a_fast_multiple_of_the_candidate_is_refused(self):
+        spikes = {5120: 1.3, 15360: 1.3, 20480: 1.3}  # 10240 measured and fast
+        assert calibration.channel_period_from_sweep(_sweep(spikes)) is None
+
+    def test_unsettled_pitches_are_skipped_not_read_as_fast(self):
+        spikes = _multiples(5120, 1.3)
+        times = _sweep(spikes, unsettled={10240, 20480, 3072, 3328})
+        assert calibration.channel_period_from_sweep(times) == 5120
+
+    def test_a_drift_across_the_sweep_is_not_a_slow_pitch(self):
+        drift = lambda p: 1.0 + 0.6 * (p - GRID[0]) / (GRID[-1] - GRID[0])  # noqa: E731
+        assert calibration.channel_period_from_sweep(_sweep({}, baseline=drift)) is None
+        assert (
+            calibration.channel_period_from_sweep(_sweep(_multiples(5120, 1.3), baseline=drift))
+            == 5120
+        )
+
+    def test_a_flat_sweep_has_no_period(self):
+        assert calibration.channel_period_from_sweep(_sweep({})) is None
+
+    def test_a_sweep_that_barely_settled_anywhere_has_no_period(self):
+        times = {p: (1.3 if p % 5120 == 0 else 1.0) for p in GRID[:6]}
+        assert calibration.channel_period_from_sweep(times) is None
+
+    def test_the_deficit_is_the_stated_one(self):
+        just_under = 1.0 + calibration.CAMPING_DEFICIT - 0.01
+        just_over = 1.0 + calibration.CAMPING_DEFICIT + 0.01
+        assert calibration.channel_period_from_sweep(_sweep(_multiples(5120, just_under))) is None
+        assert calibration.channel_period_from_sweep(_sweep(_multiples(5120, just_over))) == 5120

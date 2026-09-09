@@ -80,16 +80,18 @@ comparison, and report medians. Set a performance power profile first
 
 ### A row pitch on the memory-channel period streams at reduced bandwidth
 
-A 2-D weight whose row pitch in bytes is a multiple of the channel period (channels × the
-interleave granule; `flashinfer_bench.integration.weight_layout.channel_period_bytes()`)
-puts every row on the same channel, and a decode GEMM that walks many rows at one column
-offset serialises on it; a plain row reduction over the same tensor slows too, less. It is
-invisible while the weight is cache-resident, so a one-weight loop cannot see it — stream
-a pool larger than `caps.l2_bytes`. The channel count is not queryable on the current
-driver (sysman answers −1), so the period rests on a documented default; the fix
-(`pad_rows_off_channel_period`) is keyed on the pitch arithmetic and verified per shape at
-load, because a taller weight at the same pitch measured a small loss from the pad.
-Numbers and the sweep: `tools/kernel-harness/trials/linear_row_pad.py`.
+A 2-D weight whose row pitch in bytes is a multiple of the memory-channel period
+(`flashinfer_bench.integration.weight_layout.channel_period_bytes()`) puts every row on the
+same channel, and a decode GEMM that walks many rows at one column offset serialises on it;
+a plain row reduction over the same tensor slows too, less. It is invisible while the weight
+is cache-resident, so a one-weight loop cannot see it — stream a pool larger than
+`caps.l2_bytes`. No driver interface reports the period, so it is calibrated per part:
+`calibration.get().channel_period_bytes` sweeps the row pitch of a streaming read and takes
+the spacing of the pitches at which it is slow (`scripts/calibrate_part.py` prints it), and
+where the sweep resolves none the transform stands down rather than borrow a period. The
+fix (`pad_rows_off_channel_period`) is keyed on the pitch arithmetic and verified per shape
+at load, because a taller weight at the same pitch measured a small loss from the pad. The
+harness A/B that cross-checks one pitch: `tools/kernel-harness/trials/linear_row_pad.py`.
 
 ## Traps when deploying a kernel through `apply()`
 

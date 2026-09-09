@@ -203,6 +203,28 @@ class TestTransformApplies:
         layer(torch.randn(4, 3072, dtype=torch.bfloat16))
         assert stats.dispatch_stats()[f"{hook.FAMILY} forward-lost-padding"] == 1
 
+    def test_an_unmeasured_period_leaves_every_weight_alone(
+        self, stub_vllm, device_like, monkeypatch, caplog
+    ):
+        """No period, no nomination: the hook does not guess one, probes nothing, and says
+        so once rather than once per weight."""
+        monkeypatch.setattr(hook, "channel_period_bytes", lambda device: None)
+        monkeypatch.setattr(hook, "_PERIOD_WARNED", set())
+
+        def never(w, p):
+            raise AssertionError("nothing to probe without a period")
+
+        monkeypatch.setattr(hook, "streaming_pad_wins", never)
+        hook.install_weight_row_padding(force=True)
+        method = _StubMethod()
+        layers = [_StubLinear(64, 3072, method), _StubLinear(64, 3072, method)]
+        with caplog.at_level("WARNING", logger=hook.__name__):
+            for layer in layers:
+                method.process_weights_after_loading(layer)
+        assert all(layer.weight.is_contiguous() for layer in layers)
+        assert stats.dispatch_stats() == {f"{hook.FAMILY} unsupported period-unmeasured": 2}
+        assert sum("No memory channel period" in r.message for r in caplog.records) == 1
+
     def test_cpu_weights_are_left_alone(self, stub_vllm):
         hook.install_weight_row_padding(force=True)
         method = _StubMethod()

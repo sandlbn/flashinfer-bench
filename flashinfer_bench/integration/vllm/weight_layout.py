@@ -8,7 +8,10 @@ the device that will read them, and before any forward pass.
 
 The decision is the pitch test in :mod:`flashinfer_bench.integration.weight_layout` and
 nothing else. No model, layer or shape is named here; a weight is padded because its row
-pitch in bytes lands on the device's channel period, whatever produced it.
+pitch in bytes lands on the device's channel period, whatever produced it. The period is
+the part's calibrated one; on a part where none was resolved the hook examines nothing,
+counts every weight as ``unsupported period-unmeasured`` and says so once -- a period
+borrowed from another part would pad the wrong weights with no sign that it had.
 
 **Opt-in** via ``FIB_VLLM_PAD_WEIGHT_ROWS``, like every other change this package makes to
 a serving stack. **Counted**: the exit report says how many weights were examined and how
@@ -22,7 +25,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Set, Tuple
 
 from flashinfer_bench.integration.patch_manager import PatchSpec, get_manager
 from flashinfer_bench.integration.weight_layout import (
@@ -64,6 +67,9 @@ def _mode() -> Optional[str]:
 
 _DECISIONS: Dict[Tuple[Any, ...], Optional[PadProbe]] = {}
 """One measured decision per (shape, pitch, dtype, device); a model repeats its shapes."""
+
+_PERIOD_WARNED: Set[str] = set()
+"""Devices already warned about having no period, so a model's worth of weights logs once."""
 
 
 def _decide(data: Any, padded: Any) -> Optional[PadProbe]:
@@ -117,6 +123,17 @@ def pad_layer_weight(layer: Any) -> bool:
         stats.record(FAMILY, "unsupported", "cpu")
         return False
     period = channel_period_bytes(data.device)
+    if period is None:
+        stats.record(FAMILY, "unsupported", "period-unmeasured")
+        if str(data.device) not in _PERIOD_WARNED:
+            _PERIOD_WARNED.add(str(data.device))
+            logger.warning(
+                "No memory channel period is known for %s; weights are left as loaded. "
+                "Calibration resolved none (a shared device, or no slow pitch in its sweep); "
+                "set FIB_CHANNEL_PERIOD_BYTES from a measured sweep to supply one.",
+                data.device,
+            )
+        return False
     padded = pad_rows_off_channel_period(data, period)
     if padded is None:
         stats.record(FAMILY, "no-op", f"pitch-off-period-{period}")

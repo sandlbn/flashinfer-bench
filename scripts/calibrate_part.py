@@ -1,10 +1,11 @@
 """Measure the part-specific constants the tuning and deploy gates depend on.
 
 Every threshold in this repo's Intel work is a measurement of one GPU, not a property of the
-software: what a kernel substitution costs, where the timing instrument's floor sits, and
-what bandwidth is actually reachable. On new silicon all three move, and a gate carrying the
-old numbers is silently wrong -- it will deploy kernels that lose, or refuse kernels that
-win, without saying anything.
+software: what a kernel substitution costs, where the timing instrument's floor sits, what
+bandwidth is actually reachable, and at what row pitch a weight camps on one memory channel.
+On new silicon all of them move, and a gate carrying the old numbers is silently wrong -- it
+will deploy kernels that lose, refuse kernels that win, or pad the wrong weights, without
+saying anything.
 
 Run this first on a new part. It prints the values, and the flags that carry them.
 
@@ -174,6 +175,19 @@ def main() -> None:
             print(f"\n  strided read {run}:{stride:<12} {bw_pattern:8.1f} GB/s of useful bytes")
             print(f"     against {gb:.1f} GB/s contiguous: t_mem_pattern for a kernel obliged to")
             print("     read in runs of this length.")
+
+    period = calibration.measure_channel_period_bytes(device)
+    if period is None:
+        print("\n  memory channel period       unavailable (no periodic slow pitch resolved)")
+        print("     Either the pitches did not settle (another process on the device?) or no")
+        print("     pitch in the sweep streamed slow. The row-pad weight transform stands down")
+        print("     on this part until a sweep resolves one; FIB_CHANNEL_PERIOD_BYTES carries")
+        print("     a period measured another way.")
+    else:
+        print(f"\n  memory channel period       {period:8d} bytes")
+        print("     row pitches that are multiples of this put every row on one memory channel;")
+        print("     the load-time row pad nominates weights by it and keeps a pad only on a")
+        print("     measured win for that shape.")
 
     cost = dispatch_cost(device, args.dataset)
     if cost is None:

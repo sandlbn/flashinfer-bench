@@ -13,7 +13,7 @@ and an interleave is the same kind of operation in the same place.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, List, NamedTuple, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, NamedTuple, Optional, Tuple
 
 if TYPE_CHECKING:
     import torch
@@ -162,35 +162,21 @@ def qwen_style_mlp_weights(
 # others idle. Padding the pitch by a few elements breaks the coincidence; the values, the
 # kernel and the numerics are unchanged (oneDNN takes the strided descriptor as-is).
 #
+# The distance is a property of one part's memory system. No driver interface reports it
+# reliably, and a value carried over from another part pads the wrong weights without any
+# sign that it did, so it is measured: ``flashinfer_bench.device.calibration`` sweeps the
+# row pitch of a streaming read and takes the spacing of the pitches at which the read is
+# slow, once per part, and caches it with the part's other calibrated costs.
+#
 # The transform is keyed on the pitch arithmetic and nothing else: not on a model, a layer
-# name or a shape. Any weight of any model whose pitch lands on the period gets it; any weight
-# that does not is left alone.
+# name or a shape. Any weight of any model whose pitch lands on the period gets nominated;
+# any weight that does not is left alone; and a nomination is only kept on a measured win.
 
-INTERLEAVE_BYTES = 1024
-"""Address granule at which consecutive addresses move to the next memory channel.
-
-Not reported by any driver interface, so it is a measurement. On the first part (six
-channels) the deficit appears at row pitches that are multiples of 6144 bytes -- 6144 and
-12288 -- and at no other pitch tried between 2048 and 9216 (2048, 3072, 4096, 6160 ... 8192
-are all clear; 9216, one and a half periods, shows a residual few percent). Six channels
-into 6144 bytes is a 1024-byte granule. An earlier guess of 256 bytes predicted that 7680
-would camp; it does not. The sweep is reproducible with ``scripts/kernel_trials.py ab`` over
-``tools/kernel-harness/trials/linear_row_pad.py``.
-"""
-
-DEFAULT_MEMORY_CHANNELS = 6
-"""Channel count used when the driver does not report one.
-
-Level Zero sysman's ``zesMemoryGetProperties`` has a ``numChannels`` field; the discrete
-Arc driver in use here (1.17.x) fills it with -1, and the bus width PyTorch reports for the
-same part is one channel's, not the device's, so neither can derive the count. Six is the
-first part this was measured on: a 192-bit GDDR6 bus is six 32-bit channels, and the
-period the sweep found is six granules. Set ``FIB_MEMORY_CHANNELS`` on a part whose driver
-reports nothing and whose bus is not six channels wide.
-"""
-
-CHANNELS_ENV = "FIB_MEMORY_CHANNELS"
-"""Explicit channel count. Overrides discovery; for parts whose driver reports none."""
+PERIOD_ENV = "FIB_CHANNEL_PERIOD_BYTES"
+"""Explicit channel period in bytes, for a box where the calibration sweep cannot settle --
+another process on the device throughout -- and the period has been measured another way,
+such as the harness pitch sweep. An operator's measurement, not a default: unset, the
+period is the calibrated one, and when there is none the transform stands down."""
 
 ROW_PAD_BYTES = 64
 """How far the pitch is moved off the period.
@@ -221,114 +207,69 @@ class PadProbe(NamedTuple):
     spread: float
 
 
-def memory_channel_count(device: object = None) -> int:
-    """How many memory channels the device interleaves addresses over.
+class ChannelPeriodUnknown(LookupError):
+    """No memory channel period is known for a device, so the pitch rule cannot be applied.
 
-    Resolution order: ``FIB_MEMORY_CHANNELS`` if set; Level Zero sysman if it reports a
-    positive count for the device; otherwise :data:`DEFAULT_MEMORY_CHANNELS`. The answer is
-    what the pitch rule is derived from, so a part with a different channel count gets a
-    different period from the same code.
+    Raised rather than answered: the rule with a guessed period pads weights that do not
+    camp and misses ones that do, and nothing downstream can tell which happened. A caller
+    that wants to stand down quietly asks :func:`channel_period_bytes` first.
+    """
+
+
+_PERIODS: Dict[str, Optional[int]] = {}
+"""One resolution per device per process. The calibration record caches a measured period
+on disk, but a record that could not complete is measured again by every process that asks,
+and a model asks once per weight."""
+
+
+def channel_period_bytes(device: object = None) -> Optional[int]:
+    """Distance in bytes at which row pitches camp on one memory channel, or None.
+
+    Measured per part by ``flashinfer_bench.device.calibration`` -- a sweep of row pitches
+    under a streaming read, the period being the spacing of the pitches at which the read
+    is slow -- and cached with the rest of the part's calibration. ``FIB_CHANNEL_PERIOD_BYTES``
+    overrides it with a period measured another way.
+
+    ``None`` means no period is known for this device: the sweep resolved none, or the
+    tensor is in host memory, which the accelerator's GEMM does not read. A caller must
+    then treat the row-pad transform as unavailable rather than pick a period. ``None`` is
+    not "does not camp": it is "cannot tell", and the two must not be conflated silently.
     """
     import os
 
-    override = os.environ.get(CHANNELS_ENV)
+    override = os.environ.get(PERIOD_ENV)
     if override:
-        count = int(override)
-        if count <= 0:
-            raise ValueError(f"{CHANNELS_ENV} must be a positive channel count, got {override!r}")
-        return count
-    reported = _sysman_memory_channels(device)
-    if reported is not None and reported > 0:
-        return reported
-    return DEFAULT_MEMORY_CHANNELS
+        period = int(override)
+        if period <= 0:
+            raise ValueError(f"{PERIOD_ENV} must be a positive period in bytes, got {override!r}")
+        return period
+    key = "" if device is None else str(device)
+    if key not in _PERIODS:
+        _PERIODS[key] = _calibrated_period(key or None)
+    return _PERIODS[key]
 
 
-def _sysman_memory_channels(device: object = None) -> Optional[int]:
-    """``numChannels`` from Level Zero sysman for the device's local memory, or None.
+def _calibrated_period(device: Optional[str]) -> Optional[int]:
+    from flashinfer_bench.device import calibration
+    from flashinfer_bench.device.accelerator import parse_device
 
-    Sysman is queried through its standalone ``zesInit`` path, which works whether or not
-    the runtime already initialised Level Zero for compute. The sysman device is matched to
-    the torch device by local-memory size, since the two APIs do not share an enumeration
-    order. Anything that fails -- no loader, no sysman, a driver that answers -1 -- is None:
-    unknown is not a count.
-    """
-    try:
-        import ctypes
-
-        import torch
-    except Exception:
+    if device is not None and parse_device(device)[0] == "cpu":
         return None
-    if not (hasattr(torch, "xpu") and torch.xpu.is_available()):
-        return None
-    try:
-        index = torch.device(device).index if device is not None else None
-        props = torch.xpu.get_device_properties(index or 0)
-        want_bytes = int(props.total_memory)
-    except Exception:
-        return None
-
-    class _MemProps(ctypes.Structure):
-        # zes_mem_properties_t
-        _fields_ = [
-            ("stype", ctypes.c_int),
-            ("pNext", ctypes.c_void_p),
-            ("type", ctypes.c_int),
-            ("onSubdevice", ctypes.c_uint8),
-            ("subdeviceId", ctypes.c_uint32),
-            ("location", ctypes.c_int),
-            ("physicalSize", ctypes.c_uint64),
-            ("busWidth", ctypes.c_int32),
-            ("numChannels", ctypes.c_int32),
-        ]
-
-    _ZES_STRUCTURE_TYPE_MEM_PROPERTIES = 0x0001000C
-    _ZES_MEM_LOC_DEVICE = 1
-    try:
-        ze = ctypes.CDLL("libze_loader.so.1")
-        if ze.zesInit(0) != 0:
-            return None
-        n = ctypes.c_uint32(0)
-        if ze.zesDriverGet(ctypes.byref(n), None) != 0 or n.value == 0:
-            return None
-        drivers = (ctypes.c_void_p * n.value)()
-        ze.zesDriverGet(ctypes.byref(n), drivers)
-        best: Optional[Tuple[int, int]] = None
-        for drv in drivers:
-            nd = ctypes.c_uint32(0)
-            ze.zesDeviceGet(ctypes.c_void_p(drv), ctypes.byref(nd), None)
-            devs = (ctypes.c_void_p * nd.value)()
-            ze.zesDeviceGet(ctypes.c_void_p(drv), ctypes.byref(nd), devs)
-            for dev in devs:
-                nm = ctypes.c_uint32(0)
-                ze.zesDeviceEnumMemoryModules(ctypes.c_void_p(dev), ctypes.byref(nm), None)
-                mods = (ctypes.c_void_p * nm.value)()
-                ze.zesDeviceEnumMemoryModules(ctypes.c_void_p(dev), ctypes.byref(nm), mods)
-                for mod in mods:
-                    p = _MemProps()
-                    p.stype = _ZES_STRUCTURE_TYPE_MEM_PROPERTIES
-                    if ze.zesMemoryGetProperties(ctypes.c_void_p(mod), ctypes.byref(p)) != 0:
-                        continue
-                    if p.location != _ZES_MEM_LOC_DEVICE:
-                        continue
-                    distance = abs(int(p.physicalSize) - want_bytes)
-                    if best is None or distance < best[0]:
-                        best = (distance, int(p.numChannels))
-        return None if best is None else best[1]
-    except Exception:
-        return None
+    record = calibration.get(device)
+    return None if record is None else record.channel_period_bytes
 
 
-def channel_period_bytes(device: object = None) -> int:
-    """Distance in bytes at which the memory-channel pattern repeats: channels x granule.
-
-    Established on the first part by measurement, not by reading a datasheet: a weight of
-    pitch ``P`` bytes was timed under a streaming decode GEMM against copies of itself at
-    pitch ``P + d`` for a range of ``d``, with the values, the kernel and the implementation
-    oneDNN selected held identical (``scripts/kernel_trials.py ab`` over
-    ``tools/kernel-harness/trials/linear_row_pad.py``). The deficit is present at every pitch
-    that is a multiple of the returned period and absent otherwise.
-    """
-    return memory_channel_count(device) * INTERLEAVE_BYTES
+def _resolve_period(device: object, period_bytes: Optional[int]) -> int:
+    if period_bytes is None:
+        period_bytes = channel_period_bytes(device)
+        if period_bytes is None:
+            raise ChannelPeriodUnknown(
+                f"no memory channel period is known for {device}: calibration resolved none "
+                f"and {PERIOD_ENV} is unset, so the pitch rule cannot say whether a weight camps"
+            )
+    if period_bytes <= 0:
+        raise ValueError(f"channel period must be positive bytes, got {period_bytes}")
+    return period_bytes
 
 
 def row_pitch_bytes(weight: "torch.Tensor") -> int:
@@ -341,13 +282,13 @@ def camps_on_one_channel(weight: "torch.Tensor", period_bytes: Optional[int] = N
 
     True exactly when the row pitch in bytes is a multiple of the channel period. Only a
     row-major 2-D tensor can qualify; anything else is False. Pure arithmetic: whether the
-    tensor lives in a memory that has channels is the caller's decision.
+    tensor lives in a memory that has channels is the caller's decision. With no period
+    given, the device's calibrated one is used, and :class:`ChannelPeriodUnknown` is raised
+    when there is none -- the rule has no answer then, and False would be one.
     """
     if weight.ndim != 2 or weight.stride(1) != 1:
         return False
-    if period_bytes is None:
-        period_bytes = channel_period_bytes(weight.device)
-    return row_pitch_bytes(weight) % period_bytes == 0
+    return row_pitch_bytes(weight) % _resolve_period(weight.device, period_bytes) == 0
 
 
 def padded_row_pitch(pitch_bytes: int, period_bytes: int, pad_bytes: int = ROW_PAD_BYTES) -> int:
@@ -371,15 +312,17 @@ def pad_rows_off_channel_period(
     """A copy of ``weight`` whose rows are spread across memory channels, or None.
 
     Returns None when the weight does not camp -- the caller keeps what it has and nothing
-    was allocated. Otherwise the result is a ``[n, k]`` view into ``[n, k + pad]`` storage:
+    was allocated. Raises :class:`ChannelPeriodUnknown` when no period is given and none is
+    known for the device. Otherwise the result is a ``[n, k]`` view into ``[n, k + pad]`` storage:
     same values, same dtype, same device, same shape; only ``stride(0)`` differs. Passing
     it where the original went is bit-identical (the GEMM reads the same numbers in the
     same order), and it costs ``pad / pitch`` extra memory on that one tensor.
     """
+    if weight.ndim != 2 or weight.stride(1) != 1:
+        return None
+    period_bytes = _resolve_period(weight.device, period_bytes)
     if not camps_on_one_channel(weight, period_bytes):
         return None
-    if period_bytes is None:
-        period_bytes = channel_period_bytes(weight.device)
     esize = weight.element_size()
     if pad_bytes % esize:
         raise ValueError(f"pad of {pad_bytes} bytes is not whole {weight.dtype} elements")
