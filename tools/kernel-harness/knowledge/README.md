@@ -62,6 +62,27 @@ implementation agreeing with another.
 `num_warps=4` is **64 work-items** on Intel, not 128: Triton runs 16 threads per warp here, so
 a warp count carried from an NVIDIA tuning guide describes a different workgroup.
 
+## Where the time actually is on Intel + vLLM
+
+Measured before choosing a target, which is the step worth not skipping.
+
+| path | share | who owns it | headroom |
+| --- | --- | --- | --- |
+| GEMM | ~82% of device time | oneDNN, via `F.linear` | ~1% recoverable; you will not beat oneDNN at a matmul |
+| Attention | large at decode | **Flash Attention** (compiled), the XPU default | Triton is a *fallback* path and is 11.6% slower end to end |
+| Elementwise norms/activations | ~12% | `vllm-xpu-kernels` (compiled C++) | our SYCL wins 2.5-3.7x per kernel, but they are microsecond-scale and dispatch (~5.9us) eats it |
+| **All Triton kernels combined** | **<4.5% of wall** | `v1.worker.gpu.*` -- sampling, block tables, input batching | making every one free gains under 4.5% |
+
+That last row is the one that redirects effort. On XPU, Triton runs orchestration and
+sampling, not compute: attention goes to Flash Attention, GEMM to oneDNN, norms and
+activations to compiled C++. A Triton tuning loop therefore optimizes a few percent of wall
+at best, however good it is -- and if it targets `triton_unified_attention` specifically, it
+optimizes a backend the platform does not select.
+
+**Check which backend is live before choosing a target.** One command
+(`observe_triton_kernels.py`, or reading the "Using ... backend" line at startup) would have
+saved a nine-trial loop that produced a genuine 1.35x on a path nobody runs.
+
 ## Correctness constraints that have actually bitten
 
 - **Output buffers may alias inputs.** Destination-passing callers pass
