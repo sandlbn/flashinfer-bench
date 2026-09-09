@@ -9,11 +9,19 @@ The two arms run in separate processes because the patch installs at interpreter
 `sitecustomize`, and cannot be toggled inside one run. That is also why the switches are
 environment variables: vLLM's V1 engine runs the model in a worker subprocess, and a launcher
 that patches its own process patches a class that never sees a forward pass.
+
+`--plain-arm` is for a subject that is not `apply()`: a provider build or a source patch.
+Neither arm then carries the integration -- every `FIB_*` variable is removed from both --
+and the arms differ only by `--env`, so what is measured is the patch and nothing else.
+
+Every arm prints a digest of the tokens it generated. Under greedy decoding the two arms
+must agree; a "win" whose digests differ is a correctness change wearing a throughput number.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -22,7 +30,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 _CHILD = "--_run-arm"
 
@@ -31,6 +39,31 @@ def _median(values: List[float]) -> float:
     ordered = sorted(values)
     mid = len(ordered) // 2
     return ordered[mid] if len(ordered) % 2 else (ordered[mid - 1] + ordered[mid]) / 2
+
+
+def _token_digest(sequences: Iterable[Iterable[int]]) -> str:
+    """One hash over every generated sequence, in prompt order.
+
+    Under greedy decoding two arms that compute the same thing produce the same tokens. If
+    the digests differ, the faster arm was faster at a different computation, and the
+    delta between them is not a kernel comparison.
+    """
+    h = hashlib.sha256()
+    for seq in sequences:
+        h.update(",".join(str(int(t)) for t in seq).encode())
+        h.update(b"\n")
+    return h.hexdigest()[:16]
+
+
+def _tokens_identical(a: List[str], b: List[str]) -> Optional[bool]:
+    """Whether two arms' digest sets prove they generated the same tokens.
+
+    None when an arm reported none. False also when an arm was not stable across its own
+    repeats: a comparison against a moving target is not a comparison.
+    """
+    if not a or not b:
+        return None
+    return a == b and len(a) == 1
 
 
 def _bench(model: str, prompts: int, out_tokens: int, gpu_util: float, max_len: int) -> None:
@@ -66,6 +99,7 @@ def _bench(model: str, prompts: int, out_tokens: int, gpu_util: float, max_len: 
                 "generated_tokens": generated,
                 "seconds": round(elapsed, 4),
                 "tokens_per_sec": round(generated / elapsed, 2),
+                "token_digest": _token_digest(o.outputs[0].token_ids for o in outputs),
             }
         ),
         flush=True,
@@ -96,24 +130,52 @@ def _parse(stdout: str) -> Dict[str, Any]:
     return result
 
 
-def _run_arm(
-    args: argparse.Namespace, patched: bool, empty_dataset: Optional[str] = None
-) -> Dict[str, Any]:
-    env = dict(os.environ)
+def _env_overrides(args: argparse.Namespace) -> Dict[str, str]:
+    """The --env KEY=VALUE pairs, which belong to the patched arm only."""
+    overrides: Dict[str, str] = {}
+    for item in getattr(args, "env", None) or []:
+        key, _, value = item.partition("=")
+        overrides[key] = value
+    return overrides
+
+
+def _arm_env(
+    base: Mapping[str, str],
+    args: argparse.Namespace,
+    patched: bool,
+    empty_dataset: Optional[str] = None,
+) -> Dict[str, str]:
+    """The environment one arm runs under. Pure, so both modes can be checked without vLLM.
+
+    Default (apply) mode: the baseline is stock vLLM with the integration switched off; the
+    patched arm switches it on, points it at the dataset, and gets --env on top.
+
+    Plain mode (--plain-arm): neither arm carries the integration -- every ``FIB_*``
+    variable is removed from both -- and the patched arm differs from the baseline only by
+    --env. A provider or source patch measured with apply() in the path would otherwise be
+    measured together with apply()'s own dispatch cost and substitutions.
+    """
+    env = dict(base)
     # Invoking the interpreter by absolute path leaves its venv's bin/ off PATH, so the
     # SYCL builder cannot find `ninja` and every SYCL solution falls back silently -- which
     # surfaces as applied: 0, indistinguishable from having no solution at all.
     bindir = str(Path(sys.executable).parent)
     if bindir not in env.get("PATH", "").split(os.pathsep):
         env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
+
+    if getattr(args, "plain_arm", False):
+        for key in [k for k in env if k.startswith("FIB_")]:
+            env.pop(key)
+        if patched:
+            env.update(_env_overrides(args))
+        return env
+
     if patched:
         env["FIB_VLLM_INTEGRATION"] = "1"
         # Extra integration flags belong to the patched arm only: the baseline is stock
         # vLLM, and setting them there would make the two arms differ in more than the
         # thing under test.
-        for item in getattr(args, "env", None) or []:
-            key, _, value = item.partition("=")
-            env[key] = value
+        env.update(_env_overrides(args))
         env["FIB_ENABLE_APPLY"] = "1"
         # An empty dataset installs the patch and runs every interception, but nothing can
         # ever match -- which is exactly the cost of being in the path, with none of the
@@ -123,7 +185,13 @@ def _run_arm(
     else:
         for key in ("FIB_VLLM_INTEGRATION", "FIB_ENABLE_APPLY", "FIB_DATASET_PATH"):
             env.pop(key, None)
+    return env
 
+
+def _run_arm(
+    args: argparse.Namespace, patched: bool, empty_dataset: Optional[str] = None
+) -> Dict[str, Any]:
+    env = _arm_env(os.environ, args, patched, empty_dataset)
     cmd = [
         sys.executable,
         __file__,
@@ -231,7 +299,7 @@ def _supported(model: str) -> Optional[bool]:
         return None
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--model", required=True)
     ap.add_argument(
@@ -256,15 +324,27 @@ def main() -> None:
         help="KEY=VALUE set in the patched arm only, e.g. FIB_VLLM_MLP_FUSION=1. Use to "
         "A/B an integration flag against the same baseline. Repeatable.",
     )
-    ap.add_argument(
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument(
         "--overhead-arm",
         action="store_true",
         help="Add a third arm: patched, but pointed at an empty dataset, so nothing can "
         "match. Separates what apply() costs to sit in the path from what the kernels win.",
     )
+    mode.add_argument(
+        "--plain-arm",
+        action="store_true",
+        help="Run both arms with no apply() in the path: every FIB_* variable is removed "
+        "from both, and the arms differ only by --env. For a provider build or a source "
+        "patch, which apply() would otherwise mask. No dispatch counters exist in this mode.",
+    )
     ap.add_argument("--json", type=Path, help="Also write the result here.")
     ap.add_argument(_CHILD, dest="child", action="store_true", help=argparse.SUPPRESS)
-    args = ap.parse_args()
+    return ap
+
+
+def main() -> None:
+    args = build_parser().parse_args()
 
     if args.child:
         _bench(args.model, args.prompts, args.out_tokens, args.gpu_util, args.max_model_len)
@@ -329,8 +409,39 @@ def main() -> None:
             print(f"  dispatch  {tax * 100:+.2f}%  (patched, nothing matchable)")
             print(f"  kernels   {(o / h - 1.0) * 100:+.2f}%  (ours vs that)")
 
+    # Same tokens, or not a comparison. Greedy decoding with a fixed length makes the two
+    # arms' outputs a deterministic function of the model, so a differing digest means an
+    # arm computed something else -- and a differing digest within one arm means its own
+    # repeats disagree, which no delta can be read against.
+    digests = {
+        arm: sorted({r["token_digest"] for r in rs if r.get("token_digest")})
+        for arm, rs in runs.items()
+    }
+    identical = _tokens_identical(digests["baseline"], digests["ours"])
+    print("  tokens:")
+    for label in arms:
+        got = digests.get(label) or []
+        flag = "" if len(got) <= 1 else "   <- not stable across its own repeats"
+        print(f"    {label:9} digest {' '.join(got) or 'n/a'}{flag}")
+    if identical is True:
+        print("    identical across arms")
+    elif identical is False:
+        print(
+            "    DIFFER -- the arms did not generate the same tokens under greedy decoding; "
+            "the delta above includes a correctness change and is not a kernel comparison"
+        )
+    else:
+        print("    not compared -- an arm reported no digest")
+
     # The validity gate. Without this the throughput number cannot be interpreted.
-    if ours["dispatch"]:
+    if args.plain_arm:
+        diff = _env_overrides(args)
+        print("  substitution: n/a -- plain arm, no apply() in either arm")
+        print(
+            "  arms differ by: "
+            + (", ".join(f"{k}={v}" for k, v in diff.items()) or "nothing (A/A: noise floor)")
+        )
+    elif ours["dispatch"]:
         print("  substitution:")
         for family, (calls, applied) in sorted(ours["dispatch"].items()):
             pct = 100.0 * applied / calls if calls else 0.0
@@ -347,7 +458,15 @@ def main() -> None:
     if args.json:
         args.json.write_text(
             json.dumps(
-                {"model": args.model, "runs": runs, "baseline": base, "ours": ours},
+                {
+                    "model": args.model,
+                    "mode": "plain" if args.plain_arm else "apply",
+                    "runs": runs,
+                    "baseline": base,
+                    "ours": ours,
+                    "digests": digests,
+                    "tokens_identical": identical,
+                },
                 indent=2,
                 default=str,
             )

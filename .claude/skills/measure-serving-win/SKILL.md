@@ -40,7 +40,17 @@ def _min_gain():
     from flashinfer_bench.device import calibration
 
     cal = calibration.get()  # measures once, caches; None when it cannot
-    return cal.dispatch_us if cal and cal.dispatch_us else 0.0
+    gain = cal.dispatch_us if cal is not None else None
+    if gain is None:
+        # Unknown is not zero. With no threshold the gate admits everything, and a run
+        # with the gate open lost 41% of throughput -- so refuse to enable apply() at
+        # all, and say why. FIB_APPLY_MIN_GAIN_US=0 turns the gate off deliberately.
+        raise RuntimeError(
+            "substitution cost could not be measured here (calibration.dispatch_us is "
+            "None); not enabling apply(). Run scripts/calibrate_part.py, or set "
+            "FIB_APPLY_MIN_GAIN_US explicitly."
+        )
+    return gain
 
 
 if os.environ.get("FIB_VLLM_INTEGRATION", "").lower() in ("1", "true", "yes", "on"):
@@ -136,7 +146,9 @@ headroom for everything else is small by construction.
 - **Gate deployment on the margin, not the ratio.** `ApplyConfig(min_gain_us=...)`
   (`FIB_APPLY_MIN_GAIN_US` in the `sitecustomize.py` above) indexes a shape only where the
   solution beats the provider baseline by more than a substitution costs. Default is `0.0`;
-  set it from the calibration. Shapes are judged individually; once any shape is rejected,
+  set it from the calibration. When the calibration reports `dispatch_us=None` the cost is
+  unknown, not zero: the `sitecustomize.py` above then refuses to enable `apply()` rather
+  than run it with the gate open. Shapes are judged individually; once any shape is rejected,
   `def_best` is withheld for that definition. A definition with no provider baseline is
   left alone.
 - **Measure the dispatch tax with `--overhead-arm`.** A third arm, patched but pointed at

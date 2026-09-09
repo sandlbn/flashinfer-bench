@@ -156,10 +156,20 @@ def main() -> None:
         from flashinfer_bench.device.calibration import get as get_calibration
 
         calibration = get_calibration()
+    dispatch_unknown = False
     if args.dispatch_us is None:
-        args.dispatch_us = calibration.dispatch_us if calibration else 0.0
-        if calibration is None:
-            print("  note: substitution cost could not be measured here; not gating on it.")
+        if calibration is not None and calibration.dispatch_us is not None:
+            args.dispatch_us = calibration.dispatch_us
+        else:
+            # Unknown is not zero. Rank without subtracting it, but say so in the header
+            # and in the verdict, so no row below reads as a net win.
+            dispatch_unknown = True
+            args.dispatch_us = 0.0
+            print(
+                "  WARNING: the cost of a substitution could not be measured on this part "
+                "(calibration.dispatch_us is None).\n  Margins below are GROSS, not net of "
+                "it, and no row is a deploy verdict. Pass --dispatch-us to gate."
+            )
     if args.floor_us is None and calibration is not None:
         args.floor_us = calibration.timing_floor_us * 1.5
 
@@ -207,7 +217,8 @@ def main() -> None:
         return "        -        " if ratio is None else f"{ratio:6.2f}x {value * 1000:8.1f}us"
 
     print(f"\n  hardware: {hardware_id}   ours vs the provider kernel; >1 means ours is faster\n")
-    print(f"  {'definition':44} {'decode, net of dispatch':>18} {'prefill, gross':>18}   n")
+    decode_head = "decode, GROSS" if dispatch_unknown else "decode, net of dispatch"
+    print(f"  {'definition':44} {decode_head:>18} {'prefill, gross':>18}   n")
     print("  " + "-" * 92)
     shown = 0
     for definition, d_ratio, d_saved, p_ratio, p_saved, n_d, n_p in rows:
@@ -217,7 +228,8 @@ def main() -> None:
         shown += 1
         print(
             f"  {definition[:44]:44} {cell(d_ratio, net(d_saved)):>18} "
-            f"{cell(p_ratio, p_saved):>18}   {n_d}/{n_p}{'  <- deploy' if worth else ''}"
+            f"{cell(p_ratio, p_saved):>18}   {n_d}/{n_p}"
+            f"{'  <- deploy' if worth and not dispatch_unknown else ''}"
         )
     if not shown:
         print("  (none)")
@@ -225,11 +237,18 @@ def main() -> None:
     worth_n = sum(
         1 for r in rows if r[1] is not None and r[1] >= args.min_ratio and (net(r[2]) or 0) > 0
     )
-    print(
-        f"\n  {len(rows)} comparable on this part. {worth_n} beat the provider at decode "
-        f"sizes by >={args.min_ratio}x AND save more than the {args.dispatch_us:.2f}us a "
-        "substitution costs."
-    )
+    if dispatch_unknown:
+        print(
+            f"\n  {len(rows)} comparable on this part. {worth_n} beat the provider at decode "
+            f"sizes by >={args.min_ratio}x, but the substitution cost is UNKNOWN here, so "
+            "none of them is shown to be worth deploying."
+        )
+    else:
+        print(
+            f"\n  {len(rows)} comparable on this part. {worth_n} beat the provider at decode "
+            f"sizes by >={args.min_ratio}x AND save more than the {args.dispatch_us:.2f}us a "
+            "substitution costs."
+        )
     print(
         "  n is decode/prefill workloads compared. A large prefill win with no decode win "
         "moves little in a\n  serving run, which is mostly decode."

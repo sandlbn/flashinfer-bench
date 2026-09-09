@@ -235,7 +235,7 @@ Rules:
 - `ceiling_us <= 0` ⇒ unroutable **for that mechanism**. Record it with the arithmetic and
   either change mechanism or drop the row. Elementwise work is routinely unroutable through
   `apply()` and routable as a source patch or a fusion.
-- `cal is None` or `cal.dispatch_us == 0` ⇒ the `apply()` mechanism is unavailable, not free.
+- `cal is None` or `cal.dispatch_us is None` ⇒ the `apply()` mechanism is unavailable, not free.
 - Rank by `worth`, not by share. The largest share is often the least movable.
 - Fusion rows come from `python scripts/fusion_candidates.py --report tools/kernel-harness/auto/discovered.json`;
   their `worth` is the consumer's share (a launch and a round trip removed), not a ratio.

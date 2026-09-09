@@ -324,7 +324,7 @@ Bound it. `flashinfer_bench.device.calibration.get()` gives this part's substitu
 timing floor and achievable bandwidth; a win smaller than what taking it costs is a loss.
 See `.claude/skills/route-kernel-work/PLAN.md`.
 
-Then: `python scripts/kernel_trials.py init --harness <this dir>/harness.py`
+Then: `python scripts/kernel_trials.py init {series} <this-dir>/harness.py`
 """
 
 
@@ -377,6 +377,7 @@ def bundle(
     (d / "PROVENANCE.md").write_text(
         _PROVENANCE.format(
             op=op,
+            series=op.replace("::", "_"),
             device=device,
             keys=", ".join(keys) or "(none)",
             registered=sources[0] if sources else "(unknown)",

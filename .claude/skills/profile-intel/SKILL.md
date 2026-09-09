@@ -74,6 +74,7 @@ it is not paging a KV cache. Profile vLLM-XPU or SGLang-XPU for those.
 
 ```bash
 export PATH="<your pti-gpu checkout>/tools/unitrace/build:$PATH"
+# or: export FIB_UNITRACE=<that build>/unitrace -- the repo's tools look there before PATH
 unitrace -d -v -o prof python your_script.py      # -v splits by launch shape
 ```
 

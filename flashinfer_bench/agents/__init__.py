@@ -7,6 +7,8 @@ from .schema import function_to_schema, get_all_tool_schemas
 from .solution_handler import extract_solution_to_files, pack_solution_from_files
 from .sycl_prompt import SYCL_PROMPT, SYCL_PROMPT_SIMPLE
 from .unitrace import (
+    UNITRACE_ENV,
+    find_unitrace,
     flashinfer_bench_list_unitrace_modes,
     flashinfer_bench_run_unitrace,
     is_unitrace_available,
@@ -19,6 +21,8 @@ __all__ = [
     "flashinfer_bench_list_unitrace_modes",
     "flashinfer_bench_run_unitrace",
     "is_unitrace_available",
+    "find_unitrace",
+    "UNITRACE_ENV",
     "function_to_schema",
     "get_all_tool_schemas",
     "FFI_PROMPT_SIMPLE",

@@ -34,17 +34,46 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 logger = logging.getLogger("optimize-intel")
 
-# Work-group sizes worth trying on Intel. Must be a multiple of the sub-group width and
-# within the device's max_work_group_size; both are checked against the capability record.
-WORK_GROUP_SIZES = (64, 128, 256, 512, 1024)
 
-# Intel GPUs support 16 and 32 wide sub-groups. Pinning it matters: left unspecified the
-# compiler picks, and the choice interacts with how a row-wise reduction schedules.
-SUB_GROUP_SIZES = (16, 32)
+def sweep_space(extra: Mapping[str, Any], device: str) -> Tuple[List[int], List[int]]:
+    """(work-group sizes, sub-group widths) this device can launch, read from the driver.
+
+    Sub-group widths are exactly the ones the device enumerates; pinning one matters
+    because, left unspecified, the compiler picks, and the pick interacts with how a
+    row-wise reduction schedules. Work-group sizes are every power of two from the
+    narrowest sub-group up to ``max_work_group_size``, plus that maximum itself when it is
+    not a power of two.
+
+    Nothing is assumed when the device does not report these. A literal table was wrong
+    the moment a part with a different limit appeared, and wrong silently: a geometry the
+    device cannot launch fails at run time and reads as noise in the search.
+    """
+    try:
+        max_wg = int(extra["max_work_group_size"])
+        sub_groups = sorted({int(v) for v in extra["sub_group_sizes"]})
+    except (KeyError, TypeError, ValueError) as e:
+        raise SystemExit(
+            f"{device} did not report max_work_group_size and sub_group_sizes (its capability "
+            f"record carries {sorted(extra)}), so the tuning space cannot be derived. Nothing "
+            "is assumed in their place."
+        ) from e
+    if max_wg <= 0 or not sub_groups or min(sub_groups) <= 0:
+        raise SystemExit(
+            f"{device} reported max_work_group_size={max_wg} and sub_group_sizes={sub_groups}; "
+            "neither can be empty or non-positive."
+        )
+    work_groups: List[int] = []
+    size = min(sub_groups)
+    while size <= max_wg:
+        work_groups.append(size)
+        size *= 2
+    if max_wg not in work_groups:
+        work_groups.append(max_wg)
+    return work_groups, sub_groups
 
 
 @dataclass
@@ -143,12 +172,14 @@ TVM_FFI_DLL_EXPORT_TYPED_FUNC(rmsnorm_tuned, RMSNormTuned);
 
 
 def find_unitrace() -> Optional[str]:
-    """Locate the unitrace binary, including a local pti-gpu build."""
-    found = shutil.which("unitrace")
-    if found:
-        return found
-    local = Path("tmp/pti-gpu/tools/unitrace/build/unitrace")
-    return str(local.resolve()) if local.exists() else None
+    """Locate the unitrace binary: FIB_UNITRACE, then PATH, then a pti-gpu build under tmp/.
+
+    One discovery rule for the whole repo, so a binary that profiles here is the one the
+    agent tool profiles with. A misconfigured FIB_UNITRACE raises rather than being skipped.
+    """
+    from flashinfer_bench.agents.unitrace import find_unitrace as _find
+
+    return _find()
 
 
 def profile_model(
@@ -161,8 +192,11 @@ def profile_model(
     """
     unitrace = find_unitrace()
     if unitrace is None:
+        from flashinfer_bench.agents.unitrace import unitrace_missing_message
+
         logger.warning(
-            "unitrace not found; skipping profile (target must be given with --definition)"
+            f"{unitrace_missing_message()} Skipping profile; the target must be given with "
+            "--definition."
         )
         return []
 
@@ -230,25 +264,19 @@ def _tuned_solution(definition_name: str, candidate: Candidate) -> Dict[str, Any
 def viable_candidates(device: str) -> List[Candidate]:
     """Tuning points this device can actually launch.
 
-    Filtered against the driver's reported limits rather than tried and failed: a
-    work-group larger than ``max_work_group_size``, or a sub-group width the device does
-    not support, fails at launch and would pollute the search with noise.
+    Derived from the driver's reported limits rather than tried and failed: a work-group
+    larger than ``max_work_group_size``, or a sub-group width the device does not support,
+    fails at launch and would pollute the search with noise. A work-group must also be a
+    whole number of sub-groups.
     """
     from flashinfer_bench.device import get_accelerator
 
     caps = get_accelerator(device).capabilities(device)
-    max_wg = int(caps.extra.get("max_work_group_size", 1024) or 1024)
-    supported_sg = {int(s) for s in (caps.extra.get("sub_group_sizes") or SUB_GROUP_SIZES)}
-
-    candidates = [
-        Candidate(wg, sg)
-        for wg in WORK_GROUP_SIZES
-        for sg in SUB_GROUP_SIZES
-        if wg <= max_wg and sg in supported_sg and wg % sg == 0
-    ]
+    work_groups, sub_groups = sweep_space(caps.extra, device)
+    candidates = [Candidate(wg, sg) for wg in work_groups for sg in sub_groups if wg % sg == 0]
     logger.info(
         f"Tuning space: {len(candidates)} candidate(s) "
-        f"(max_work_group_size={max_wg}, sub_group_sizes={sorted(supported_sg)})"
+        f"(work_group_sizes={work_groups}, sub_group_sizes={sub_groups})"
     )
     return candidates
 

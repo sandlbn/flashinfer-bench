@@ -70,3 +70,6 @@ python.*.json
 # scripts; vendoring the providers' source into this repo is not intended.
 tools/kernel-harness/auto/
 tools/kernel-harness/pulled/
+
+# Captured serving-stack state for context-requiring harnesses (hundreds of MB each)
+*.state.pt

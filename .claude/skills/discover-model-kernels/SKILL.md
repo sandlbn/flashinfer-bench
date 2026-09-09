@@ -33,7 +33,7 @@ model saw, and be finite — and discarded with a reason if it fails. Read the d
 | Discard reason | What it means |
 | --- | --- |
 | `returned list, not a tensor` | multi-output op; harness it by hand or skip |
-| `Forward context is not set` | needs the stack's per-step context (attention); not reachable this way |
+| `wait ... raised inside <module>: capturing its state from the run` | the op reads state the stack sets around each forward step (attention, KV-cache update). Not a discard: the model is run once more, the values that module held during the call are captured, pruned to what the op consulted, and stored in a `.state.pt` beside the harness, which re-establishes them around each call. A `drop` after this names what could not be captured |
 | `shape (a) != (b) seen in the model` | the recorded args do not reproduce the call — a real defect, not a nuisance |
 
 Ops that are plumbing (views, copies, allocation) are skipped: harnessing them measures the
@@ -163,7 +163,7 @@ nothing. See `../route-kernel-work/PLAN.md`.
 ## Step 4: Optimize the one that survives
 
 ```bash
-python scripts/kernel_trials.py init --harness tools/kernel-harness/pulled/<op>/harness.py
+python scripts/kernel_trials.py init <series> tools/kernel-harness/pulled/<op>/harness.py
 ```
 
 The bundle's `source/` is the starting point, not a reference to admire. The fastest first

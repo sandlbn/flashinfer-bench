@@ -181,7 +181,8 @@ against the kernel they would actually replace. Compare against the provider bas
 definition, building a lookup key, checking dtypes and invoking the built kernel cost real
 time per call and do not shrink with the kernel. That cost is a property of the part, so
 read it rather than assuming it: `flashinfer_bench.device.calibration.get().dispatch_us`
-(`scripts/calibrate_part.py` prints it). A kernel whose total runtime is comparable to that
+(`scripts/calibrate_part.py` prints it; `None` means it could not be measured, which makes
+the apply() mechanism unavailable there, not free). A kernel whose total runtime is comparable to that
 cost cannot pay for its own replacement however large its ratio -- what it saves is
 `provider_us - ours_us`, and that has to exceed `dispatch_us`. Before optimizing, ask what
 the kernel costs in absolute terms; below a few multiples of the dispatch cost, the win has

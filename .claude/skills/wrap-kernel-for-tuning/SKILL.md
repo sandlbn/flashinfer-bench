@@ -130,7 +130,9 @@ the same bytes in the same shape the kernel is obliged to touch.
 
 - `tools/kernel-harness/knowledge/README.md` — what a trial should know before it starts
 - `scripts/kernel_trials.py` — the trial loop
-- `tools/kernel-harness/vllm_unified_attention.py` — a worked wrapper, with its spec YAML beside it
+- `scripts/harness_from_model.py` — emits these wrappers from the run itself, including
+  for ops that read state the stack establishes around each step; a wrapper written by
+  hand is a claim about production that nothing verified
 - `scripts/capture_triton_kernel.py` — records a real launch when shapes must come from
   production rather than from a definition; it does not verify the capture replays
 - `/measure-serving-win` — whether the win is worth deploying

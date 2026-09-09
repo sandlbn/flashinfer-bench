@@ -14,6 +14,15 @@ Each generated harness is then verified before it is offered: it must run, retur
 and dtype the model saw, and produce finite values. A harness that fails is reported and
 discarded rather than left for someone to optimize against.
 
+Some ops only run inside the serving stack's per-step context -- on a transformer, the
+attention and the KV-cache update, which look their metadata and cache up from state the
+model runner establishes around each forward. Such an op fails verification by raising from
+the module that holds that state. Rather than special-case any op, the failure itself is the
+trigger: the model is run once more, the state that module had during the real call is
+captured, pruned to the entries the op consulted, and stored next to the harness, which
+re-establishes it around each call. Nothing is fabricated; the harness calls the production
+op against the state the production run gave it.
+
     python scripts/harness_from_model.py --model <repo_id> --out-dir tools/kernel-harness/auto
 """
 
@@ -21,10 +30,15 @@ from __future__ import annotations
 
 import argparse
 import collections
+import copy
+import io
 import json
 import os
 import pathlib
-from typing import Any, Dict, Tuple
+import pickle
+import sys
+import types
+from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
 
 RECORDS: Dict[Tuple[str, tuple], Dict[str, Any]] = {}
 
@@ -78,6 +92,8 @@ _SKIP_OPS = frozenset(
     }
 )
 
+_PRIMITIVE = (int, float, bool, str, type(None))
+
 
 def _jsonable(x: Any) -> Any:
     """Records hold tuples for hashing; JSON needs lists."""
@@ -96,6 +112,17 @@ def _describe(x: Any) -> Any:
     if isinstance(x, (list, tuple)):
         return tuple(_describe(i) for i in x)
     return type(x).__name__
+
+
+def _is_tensor_desc(d: Any) -> bool:
+    return isinstance(d, tuple) and len(d) == 3 and d[0] == "T"
+
+
+def _numel(desc: Any) -> int:
+    n = 1
+    for dim in desc[1]:
+        n *= int(dim)
+    return n
 
 
 def device_time(llm, prompts: int, out_tokens: int, device: str) -> Dict[str, object]:
@@ -184,6 +211,40 @@ def observe_triton():
     return lambda: setattr(JITFunction, "run", original)
 
 
+def _caller_modules(limit: int = 6) -> List[str]:
+    """The stack's modules between the dispatcher and the model, innermost first.
+
+    A custom op exists only in a process that imported whatever registered it, and the
+    harness runs in a fresh process. The module that called the op is the best evidence of
+    what to import to get it back -- in a serving stack the caller and the registrar are
+    usually the same file -- and the frames above it are the fallbacks.
+    """
+    out: List[str] = []
+    frame = sys._getframe(1)
+    while frame is not None and len(out) < limit:
+        name = frame.f_globals.get("__name__", "")
+        if (
+            name
+            and name != __name__
+            and not name.startswith(("torch", "importlib", "__main__", "contextlib"))
+            and name not in out
+        ):
+            out.append(name)
+        frame = frame.f_back
+    return out
+
+
+def _extension_modules() -> List[str]:
+    """Compiled extensions this process loaded; the same list the resolver hands its probe."""
+    try:
+        sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+        from pull_kernel_source import _op_registering_modules
+
+        return [m for m in _op_registering_modules() if "." in m]
+    except Exception:
+        return []
+
+
 def record_mode():
     """A TorchDispatchMode that tallies every op with the shapes it ran on."""
     from torch.utils._python_dispatch import TorchDispatchMode
@@ -234,36 +295,450 @@ def record_mode():
             if ".".join(name.split(".")[:2]) not in _SKIP_OPS:
                 sig = tuple(_describe(a) for a in args)
                 key = (name, sig)
-                rec = RECORDS.setdefault(
-                    key, {"op": name, "args": sig, "calls": 0, "out": _describe(out)}
-                )
+                rec = RECORDS.get(key)
+                if rec is None:
+                    rec = RECORDS[key] = {
+                        "op": name,
+                        "args": sig,
+                        "calls": 0,
+                        "out": _describe(out),
+                        "callers": _caller_modules(),
+                    }
                 rec["calls"] += 1
             return out
 
     return Recorder()
 
 
+# ----------------------------------------------------------------------------- ambient state
+#
+# An op that raises because "the context is not set" reads module-level state that the
+# stack establishes around each forward and clears afterwards. Nothing here names that
+# module or that op: the failing frame names the module, the difference between that
+# module's globals during the real call and outside it names the state, and an observing
+# proxy installed for the duration of one call names the parts of it the op consulted.
+
+
+def _globals_snapshot(module: types.ModuleType) -> Dict[str, Any]:
+    """Module-level values that could be state: not names of code, not other modules."""
+    code = (types.ModuleType, type, types.FunctionType, types.BuiltinFunctionType)
+    return {
+        k: v for k, v in vars(module).items() if not k.startswith("__") and not isinstance(v, code)
+    }
+
+
+def _tensors_in(
+    obj: Any, path: tuple = (), depth: int = 0, seen=None
+) -> Iterator[Tuple[tuple, Any]]:
+    """Every tensor reachable from `obj` through dict keys, sequence indices and attributes.
+
+    The path is how the harness will reach the same tensor again: `("attr", name)` and
+    `("key", k)` steps from the root. Objects that are code rather than data are not
+    entered -- a module's globals lead everywhere.
+    """
+    import torch
+
+    seen = set() if seen is None else seen
+    if depth > 8 or id(obj) in seen:
+        return
+    seen.add(id(obj))
+    if isinstance(obj, torch.Tensor):
+        yield path, obj
+        return
+    if isinstance(obj, (types.ModuleType, type, types.FunctionType, types.MethodType)):
+        return
+    if isinstance(obj, dict):
+        items = [(("key", k), v) for k, v in obj.items() if isinstance(k, (str, int))]
+    elif isinstance(obj, (list, tuple)):
+        items = [(("key", i), v) for i, v in enumerate(obj)]
+    elif hasattr(obj, "__dict__") and not isinstance(obj, _PRIMITIVE):
+        items = [(("attr", k), v) for k, v in vars(obj).items()]
+    else:
+        return
+    for step, v in items:
+        yield from _tensors_in(v, path + (step,), depth + 1, seen)
+
+
+class _LogDict(dict):
+    """A dict that reports which of its entries a caller looks up."""
+
+    def __init__(self, source: dict, on_key, on_all):
+        super().__init__(source)
+        self._on_key, self._on_all = on_key, on_all
+
+    def __getitem__(self, k):
+        v = super().__getitem__(k)
+        self._on_key(k, v)
+        return v
+
+    def get(self, k, default=None):
+        return self[k] if super().__contains__(k) else default
+
+    def __contains__(self, k):
+        present = super().__contains__(k)
+        if present:
+            self._on_key(k, super().__getitem__(k))
+        return present
+
+    def _whole(self, method):
+        def call(*a, **kw):
+            self._on_all()
+            return getattr(super(_LogDict, self), method)(*a, **kw)
+
+        return call
+
+    def __iter__(self):
+        return self._whole("__iter__")()
+
+    def items(self):
+        return self._whole("items")()
+
+    def values(self):
+        return self._whole("values")()
+
+    def keys(self):
+        return self._whole("keys")()
+
+
+class _AttrProxy:
+    """Stands in for one state object during one call, reporting the attributes read."""
+
+    def __init__(self, target, observed: "_Observed"):
+        object.__setattr__(self, "_target", target)
+        object.__setattr__(self, "_observed", observed)
+
+    def __getattr__(self, name):
+        value = getattr(self._target, name)
+        obs = self._observed
+        if isinstance(value, dict) and obs.attrs.get(name, set()) is not None:
+            return _LogDict(
+                value,
+                lambda k, v: obs.hit(name, k, v),
+                lambda: obs.hit_all(name, value),
+            )
+        obs.hit_all(name, value)
+        return value
+
+    def __setattr__(self, name, value):
+        setattr(self._target, name, value)
+
+
+class _Observed:
+    """One module-level value, watched through a single op call.
+
+    Records which attributes and dict entries the op consulted, snapshots every tensor
+    reachable from each consulted entry at the moment it is reached -- before the op has
+    computed anything -- and afterwards yields the value pruned to what was consulted, with
+    the tensors the call mutated identified. The snapshot is what the harness stores: the
+    state the call started from, not the state it left behind.
+    """
+
+    def __init__(self, value: Any):
+        self.value = value
+        self.attrs: Dict[Optional[str], Optional[Set[Any]]] = {}
+        self.before: Dict[int, Tuple[Any, Any]] = {}  # id(tensor) -> (tensor, pre-call copy)
+        self.whole = False
+        if isinstance(value, dict):
+            self.proxy = _LogDict(
+                value, lambda k, v: self.hit(None, k, v), lambda: self.hit_all(None, value)
+            )
+        elif hasattr(value, "__dict__") and not isinstance(value, _PRIMITIVE):
+            self.proxy = _AttrProxy(value, self)
+        else:
+            self.proxy, self.whole = value, True
+            self.snapshot(value)
+
+    def snapshot(self, value: Any) -> None:
+        for _, t in _tensors_in(value):
+            if id(t) not in self.before:
+                self.before[id(t)] = (t, t.detach().clone())
+
+    def hit(self, attr: Optional[str], key: Any, value: Any) -> None:
+        keys = self.attrs.setdefault(attr, set())
+        if keys is not None:
+            keys.add(key)
+        self.snapshot(value)
+
+    def hit_all(self, attr: Optional[str], value: Any) -> None:
+        self.attrs[attr] = None
+        self.snapshot(value)
+
+    def _prune_dict(self, d: dict, keys: Optional[Set[Any]]) -> dict:
+        if keys is None:
+            return d
+        pruned = copy.copy(d)
+        pruned.clear()
+        pruned.update((k, d[k]) for k in keys if k in d)
+        return pruned
+
+    def pruned(self) -> Any:
+        if self.whole:
+            return self.value
+        if isinstance(self.value, dict):
+            return self._prune_dict(self.value, self.attrs.get(None, set()))
+        p = copy.copy(self.value)
+        for name, val in list(vars(self.value).items()):
+            if isinstance(val, dict):
+                setattr(p, name, self._prune_dict(val, self.attrs.get(name, set())))
+        return p
+
+    def consulted(self) -> Dict[str, Any]:
+        return {
+            str(attr): (sorted(map(str, keys)) if keys is not None else "all")
+            for attr, keys in self.attrs.items()
+        }
+
+    def mutated(self, pruned: Any) -> List[Tuple[tuple, Any]]:
+        """Tensors of the pruned state whose contents the call changed.
+
+        A weak witness on its own: a write of values already present leaves the contents
+        unchanged, and a run that repeats the same prompts does exactly that. It is the
+        fallback when the probe below cannot run.
+        """
+        import torch
+
+        out = []
+        for path, t in _tensors_in(pruned):
+            snap = self.before.get(id(t))
+            if snap is not None and not torch.equal(t, snap[1]):
+                out.append((path, t))
+        return out
+
+
+def _probe_writes(func, args, kwargs, tensors: List[Tuple[Any, Any]]) -> Optional[List[Any]]:
+    """Which of `tensors` the op writes, found by calling it once more and watching.
+
+    The op's own schema cannot say -- a stack may declare no mutation at all so a compiler
+    will not reorder it -- and no dispatch mode sees the ops a Python custom op issues
+    inside its body. So the op is called again with its floating-point arguments replaced by
+    random values of the same shape, which makes any write visible however idempotent the
+    real one was, and every tensor it touched is then put back exactly as the real call had
+    left it. Integer arguments are left alone: they may be indices, and random indices
+    would write somewhere no call ever writes. Returns None when the probe is inconclusive.
+    """
+    import torch
+
+    kept = [(path, t, t.detach().clone()) for path, t in tensors]
+    probe_args = []
+    for a in args:
+        if isinstance(a, torch.Tensor):
+            probe_args.append(torch.randn_like(a) if a.is_floating_point() else a.clone())
+        else:
+            probe_args.append(a)
+    try:
+        func(*probe_args, **kwargs)
+    except Exception:
+        return None
+    written = []
+    for path, t, snap in kept:
+        if not torch.equal(t, snap):
+            written.append(path)
+            t.copy_(snap)
+    return written
+
+
+def _dump_state(path: pathlib.Path, payload: Any, before: Dict[int, Tuple[Any, Any]]) -> int:
+    """Pickle `payload` with its tensors lifted out, pre-call copies substituted; return bytes.
+
+    A plain pickle of a tensor view serializes the whole allocation behind it -- a KV-cache
+    slice would drag the entire cache along -- so tensors are extracted, cloned, and stored
+    beside the object graph with the device type they lived on. The harness restores them
+    to its own device.
+    """
+    import torch
+
+    tensors: List[Tuple[Any, str]] = []
+
+    class Lift(pickle.Pickler):
+        def persistent_id(self, obj):
+            if isinstance(obj, torch.Tensor):
+                src = before.get(id(obj), (None, obj))[1]
+                tensors.append((src.detach().to("cpu", copy=True), obj.device.type))
+                return len(tensors) - 1
+            return None
+
+    buf = io.BytesIO()
+    Lift(buf, protocol=pickle.HIGHEST_PROTOCOL).dump(payload)
+    torch.save({"pickle": buf.getvalue(), "tensors": tensors}, path)
+    return sum(t.numel() * t.element_size() for t, _ in tensors) + len(buf.getvalue())
+
+
+def capture_state(
+    llm,
+    targets: Dict[Tuple[str, tuple], Set[str]],
+    prompts: int,
+    out_tokens: int,
+    out_dir: pathlib.Path,
+) -> Dict[Tuple[str, tuple], Dict[str, Any]]:
+    """Run the model again and capture, for each target op, the state its modules held.
+
+    `targets` maps a recorded (op, signature) to the modules whose accessors raised when the
+    harness ran without the stack. The baseline for "what differs during the call" is taken
+    now, outside any forward -- the same situation the harness found itself in.
+    """
+    import torch
+    from torch.utils._python_dispatch import TorchDispatchMode
+    from vllm import SamplingParams
+
+    modules = {m for ms in targets.values() for m in ms}
+    outside = {m: _globals_snapshot(sys.modules[m]) for m in modules}
+    results: Dict[Tuple[str, tuple], Dict[str, Any]] = {}
+
+    def capture_one(key, func, args, kwargs):
+        watched: Dict[str, Dict[str, _Observed]] = {}
+        for mod_name in targets[key]:
+            mod = sys.modules[mod_name]
+            now = _globals_snapshot(mod)
+            changed = {
+                k: v
+                for k, v in now.items()
+                if k not in outside[mod_name] or outside[mod_name][k] is not v
+            }
+            if changed:
+                watched[mod_name] = {k: _Observed(v) for k, v in changed.items()}
+        if not watched:
+            results[key] = {
+                "error": f"no value in {sorted(targets[key])} differs between the model's "
+                "call and the harness; the failure is not missing state"
+            }
+            return func(*args, **kwargs)
+        for mod_name, obs in watched.items():
+            for k, o in obs.items():
+                setattr(sys.modules[mod_name], k, o.proxy)
+        try:
+            out = func(*args, **kwargs)
+        finally:
+            for mod_name, obs in watched.items():
+                for k, o in obs.items():
+                    setattr(sys.modules[mod_name], k, o.value)
+
+        before: Dict[int, Tuple[Any, Any]] = {}
+        state: Dict[str, Dict[str, Any]] = {}
+        consulted: Dict[str, Dict[str, Any]] = {}
+        changed: List[Tuple[list, Any]] = []
+        reachable: List[Tuple[list, Any]] = []
+        for mod_name, obs in watched.items():
+            state[mod_name], consulted[mod_name] = {}, {}
+            for k, o in obs.items():
+                pruned = o.pruned()
+                state[mod_name][k] = pruned
+                consulted[mod_name][k] = o.consulted()
+                before.update(o.before)
+                changed += [([mod_name, k, list(p)], t) for p, t in o.mutated(pruned)]
+                reachable += [([mod_name, k, list(p)], t) for p, t in _tensors_in(pruned)]
+        # The state is real again (the proxies are gone), so the op can be probed in place.
+        written = _probe_writes(func, args, kwargs, reachable)
+        by_path = {json.dumps(p): t for p, t in reachable}
+        mutated = [(p, by_path[json.dumps(p)]) for p in written] if written is not None else changed
+        concrete = {
+            i: a
+            for i, a in enumerate(args)
+            if not isinstance(a, (torch.Tensor, list, tuple) + _PRIMITIVE)
+        }
+        payload = {
+            "modules": state,
+            "args": concrete,
+            "consulted": consulted,
+            "mutated": [p for p, _ in mutated],
+            "recorded_with": sys.executable,
+        }
+        path = out_dir / f"{_harness_name(RECORDS[key])}.state.pt"
+        try:
+            size = _dump_state(path, payload, before)
+        except Exception as exc:
+            path.unlink(missing_ok=True)
+            results[key] = {
+                "error": f"state of {sorted(watched)} is not serializable: "
+                f"{type(exc).__name__}: {str(exc)[:80]}"
+            }
+            return out
+        results[key] = {
+            "file": path,
+            "modules": {m: sorted(v) for m, v in state.items()},
+            "consulted": consulted,
+            "arg_indices": sorted(concrete),
+            "result_path": mutated[0][0] if mutated else None,
+            "result_desc": _describe(mutated[0][1]) if mutated else None,
+            "bytes": size,
+        }
+        return out
+
+    class Capturer(TorchDispatchMode):
+        def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+            kwargs = kwargs or {}
+            key = (str(func), tuple(_describe(a) for a in args))
+            if key in targets and key not in results:
+                return capture_one(key, func, args, kwargs)
+            return func(*args, **kwargs)
+
+    with Capturer():
+        llm.generate(
+            [f"Topic {i}." for i in range(prompts)],
+            SamplingParams(temperature=0.0, max_tokens=out_tokens, ignore_eos=True),
+        )
+    return results
+
+
+# ------------------------------------------------------------------------------------ emit
+
 _TEMPLATE = '''"""Auto-generated harness for `{op}`.
 
 Emitted by scripts/harness_from_model.py from a run of {model}: this op was called
 {calls} time(s) at this shape. `forward` calls the same op the model called, so a trial is
-measured against production rather than against a reimplementation.
+measured against production rather than against a reimplementation.{state_doc}
 """
+
+import importlib
+import sys
 
 import torch
 import torch.nn as nn
 
 OP = "{op}"
 CALLS = {calls}
+RECORDED_WITH = "{interpreter}"
+# Modules on the stack when the model reached this op, innermost first, then the compiled
+# extensions the serving process had loaded. An op is registered as a side effect of
+# importing whatever provides it, so these are imported in order until the op resolves.
+PROVIDERS = {providers}
+{state_block}
+_OP = None
+
+
+def _op():
+    global _OP
+    if _OP is None:
+        ns, name = OP.split(".")[:2]
+        for provider in (None, *PROVIDERS):
+            if provider is not None:
+                try:
+                    importlib.import_module(provider)
+                except Exception:
+                    continue
+            try:
+                _OP = getattr(getattr(torch.ops, ns), name)
+                break
+            except (AttributeError, RuntimeError):
+                pass
+        else:
+            raise ImportError(
+                f"{{OP}} is not registered in {{sys.executable}}; the harness was recorded "
+                f"under {{RECORDED_WITH}}, which has the stack that provides it."
+            )
+    return _OP
+
+
+def _device():
+    return "xpu:0" if hasattr(torch, "xpu") and torch.xpu.is_available() else "cpu"
 
 
 class Model(nn.Module):
     def forward(self, {params}):
-        return {call}
+{body}
 
 
 def get_inputs():
-    device = "xpu:0" if hasattr(torch, "xpu") and torch.xpu.is_available() else "cpu"
+    device = _device()
     return [
 {inputs}
     ]
@@ -273,19 +748,156 @@ def get_init_inputs():
     return []
 '''
 
+_STATE_DOC = """
+
+This op reads state the stack establishes around each forward step rather than taking it
+as arguments. That state was captured from the recorded run -- the values {modules}
+held during the call, pruned to the entries the op consulted, tensors as they were before
+the call -- and lives in the `.state.pt` beside this file. `forward` re-establishes it for
+the duration of each call and restores whatever was there before."""
+
+_STATE_BLOCK = """
+import contextlib
+import io
+import pathlib
+import pickle
+
+STATE_FILE = pathlib.Path(__file__).with_suffix(".state.pt")
+CONSULTED = {consulted}
+# Where, inside the state, the tensor this call writes its result lives (None: the result
+# is the return value or an argument).
+RESULT = {result}
+
+_STATE = None
+_MISSING = object()
+
+
+class _Unpickler(pickle.Unpickler):
+    def __init__(self, data, tensors, device):
+        super().__init__(io.BytesIO(data))
+        self._tensors, self._device = tensors, device
+
+    def persistent_load(self, pid):
+        tensor, was_on = self._tensors[pid]
+        return tensor.to(self._device if was_on != "cpu" else "cpu")
+
+
+def _state():
+    global _STATE
+    if _STATE is None:
+        _op()  # the classes inside the state come from the stack that provides the op
+        if not STATE_FILE.is_file():
+            raise FileNotFoundError(f"{{STATE_FILE}} must sit beside this harness")
+        blob = torch.load(STATE_FILE, weights_only=False, map_location="cpu")
+        _STATE = _Unpickler(blob["pickle"], blob["tensors"], _device()).load()
+        _STATE["_bound"] = [
+            (importlib.import_module(m), name, value)
+            for m, values in _STATE["modules"].items()
+            for name, value in values.items()
+        ]
+    return _STATE
+
+
+@contextlib.contextmanager
+def _established():
+    state = _state()
+    saved = []
+    for module, name, value in state["_bound"]:
+        saved.append((module, name, getattr(module, name, _MISSING)))
+        setattr(module, name, value)
+    try:
+        yield state
+    finally:
+        for module, name, previous in reversed(saved):
+            if previous is _MISSING:
+                delattr(module, name)
+            else:
+                setattr(module, name, previous)
+
+
+def _ambient(state, path):
+    node = state["modules"][path[0]][path[1]]
+    for kind, key in path[2]:
+        node = getattr(node, key) if kind == "attr" else node[key]
+    return node
+
+"""
+
+
+def _written_args(op: str) -> List[int]:
+    """Indices of the arguments the op's schema declares it writes into (`Tensor(a!)`)."""
+    import torch
+
+    ns, name, overload = (op.split(".") + ["default"])[:3]
+    try:
+        schema = getattr(getattr(getattr(torch.ops, ns), name), overload)._schema
+    except Exception:
+        return []
+    return [
+        i
+        for i, a in enumerate(schema.arguments)
+        if a.alias_info is not None and a.alias_info.is_write
+    ]
+
+
+def _providers(op: str, callers: List[str]) -> List[str]:
+    """What the harness should import to get the op registered, most likely first.
+
+    The stack modules that were on the stack when the op ran, then the compiled extensions
+    that plausibly registered it: one whose module is named for the op's namespace, or one
+    from a package related by name to the stack that called it. The rest of the loaded
+    extensions -- parsers, serializers, a dozen numeric libraries -- register no ops and
+    would only pad the list.
+    """
+    ns = op.split(".")[0]
+    tops = {c.split(".")[0] for c in callers}
+    related = []
+    for ext in _extension_modules():
+        top, last = ext.split(".")[0], ext.split(".")[-1]
+        if last == ns or any(top.startswith(t) or t.startswith(top) for t in tops):
+            related.append(ext)
+    return list(dict.fromkeys(callers + related))
+
+
+_NAMES: Dict[str, int] = {}
+
+
+def _harness_name(record: Dict[str, Any]) -> str:
+    """A file name for this record: the op and the first tensor's shape, made unique.
+
+    Two records of one op can share a first shape and differ in the rest -- a projection
+    at the same input width with different weights -- and the later would silently
+    overwrite the earlier. Further shapes are appended until the name is this record's.
+    """
+    if "name" in record:
+        return record["name"]
+    safe = record["op"].replace("::", "_").replace(".", "_")
+    shapes = ["x".join(str(d) for d in a[1]) for a in record["args"] if _is_tensor_desc(a)]
+    for n in range(1, len(shapes) + 1):
+        name = "_".join([safe, *shapes[:n]])
+        if _NAMES.get(name, id(record)) == id(record):
+            break
+    _NAMES[name] = id(record)
+    record["name"] = name
+    return name
+
 
 def _emit(record: Dict[str, Any], model: str, out_dir: pathlib.Path) -> pathlib.Path | None:
-    """Write a harness for one recorded op, or None when it cannot be expressed."""
+    """Write a harness for one recorded op, or None when it cannot be expressed.
+
+    Sets `record["expect"]` to the description of what the harness returns, which is what
+    verification checks against: the op's own result when it returns one, else the argument
+    its schema says it writes, else the ambient tensor the recorded call mutated.
+    """
     op = record["op"]
-    tensors = [
-        (i, a) for i, a in enumerate(record["args"]) if isinstance(a, tuple) and a and a[0] == "T"
-    ]
+    state = record.get("state")
+    tensors = [(i, a) for i, a in enumerate(record["args"]) if _is_tensor_desc(a)]
     if not tensors:
         return None  # nothing to feed it; not a kernel worth a harness
 
     params, inputs, call_args = [], [], []
     for i, a in enumerate(record["args"]):
-        if isinstance(a, tuple) and a and a[0] == "T":
+        if _is_tensor_desc(a):
             name = f"t{i}"
             params.append(name)
             _, shape, dtype = a
@@ -294,61 +906,107 @@ def _emit(record: Dict[str, Any], model: str, out_dir: pathlib.Path) -> pathlib.
                 f"        torch.{maker}({list(shape)}, dtype=torch.{dtype}, device=device),"
             )
             call_args.append(name)
+        elif state and i in state["arg_indices"]:
+            call_args.append(f"state['args'][{i}]")
         else:
             call_args.append(repr(a))
 
-    ns, opname = op.split(".")[0], op.split(".")[1]
-    invoke = f"torch.ops.{ns}.{opname}({', '.join(call_args)})"
-    if record["out"] is None:
+    invoke = f"_op()({', '.join(call_args)})"
+    out = record["out"]
+    written = [i for i in _written_args(op) if _is_tensor_desc(record["args"][i])]
+    # An empty tensor is "returns nothing useful": the result must be somewhere else.
+    returns_result = (_is_tensor_desc(out) and _numel(out) > 0) or (
+        out is not None and not _is_tensor_desc(out)
+    )
+    if returns_result:
+        call, expect = f"return {invoke}", out
+    elif written:
         # Destination-passing: the op returns nothing and writes into an argument. Return
         # that argument so the harness has a result to compare, and record which one so
         # verification checks it rather than the return value.
-        dps = f"t{tensors[0][0]}"
-        call = f"{invoke} or {dps}"
-        record["result_is"] = tensors[0][1]
+        call, expect = f"return {invoke} or t{written[0]}", record["args"][written[0]]
+    elif state and state["result_path"]:
+        # Its result is in neither the return value nor an argument: it wrote into the
+        # ambient state. Return that tensor, so the trial loop compares what the op did.
+        call, expect = f"{invoke}\n    return _ambient(state, RESULT)", state["result_desc"]
     else:
-        call = invoke
-    body = _TEMPLATE.format(
+        call, expect = f"return {invoke} or t{tensors[0][0]}", tensors[0][1]
+    record["expect"] = expect
+
+    if state:
+        body = "        with _established() as state:\n" + "\n".join(
+            "            " + line for line in call.split("\n    ")
+        )
+        state_block = _STATE_BLOCK.format(
+            consulted=repr(state["consulted"]), result=repr(state["result_path"])
+        )
+        modules = ", ".join(f"`{m}.{n}`" for m, names in state["modules"].items() for n in names)
+        state_doc = _STATE_DOC.format(modules=modules)
+    else:
+        body = "        " + call
+        state_block, state_doc = "", ""
+
+    providers = _providers(op, record.get("callers", []))
+    body_text = _TEMPLATE.format(
         op=op,
         model=model,
         calls=record["calls"],
+        interpreter=sys.executable,
+        providers=repr(providers),
+        state_block=state_block,
+        state_doc=state_doc,
         params=", ".join(params),
-        call=call,
+        body=body,
         inputs="\n".join(inputs),
     )
-    safe = op.replace("::", "_").replace(".", "_")
-    shape_tag = "x".join(str(d) for _, a in tensors[:1] for d in a[1])
-    path = out_dir / f"{safe}_{shape_tag}.py"
-    path.write_text(body)
+    path = out_dir / f"{_harness_name(record)}.py"
+    path.write_text(body_text)
     return path
 
 
-def verify(path: pathlib.Path, expected_out: Any) -> Tuple[bool, str]:
-    """Run the harness and check it reproduces the shape and dtype the model saw."""
-    import importlib.util
+def verify(path: pathlib.Path, expected: Any) -> Tuple[bool, str, Optional[str]]:
+    """Run the harness and check it reproduces the shape and dtype the model saw.
 
+    Returns (ok, reason, raised_in): when the harness raised, `raised_in` is the module of
+    the innermost frame, which is what tells a missing-context failure apart from a broken
+    harness -- the former raises from the stack's own module, the latter from the harness.
+    """
     import torch
 
     try:
-        spec = importlib.util.spec_from_file_location(path.stem, path)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        # Executed from source, not imported: the import system caches bytecode by the
+        # file's mtime and size, and two harnesses written in the same second at the same
+        # length would have one verified as the other.
+        module = types.ModuleType(path.stem)
+        module.__file__ = str(path)
+        exec(compile(path.read_text(), str(path), "exec"), module.__dict__)
         out = module.Model()(*module.get_inputs())
     except Exception as exc:
-        return False, f"{type(exc).__name__}: {str(exc)[:90]}"
+        raised_in, tb = None, exc.__traceback__
+        while tb is not None:
+            raised_in, tb = tb.tb_frame.f_globals.get("__name__"), tb.tb_next
+        return False, f"{type(exc).__name__}: {str(exc)[:90]}", raised_in
     if not isinstance(out, torch.Tensor):
-        return False, f"returned {type(out).__name__}, not a tensor"
+        return False, f"returned {type(out).__name__}, not a tensor", None
     if not torch.isfinite(out).all():
-        return False, "produced non-finite values"
-    if expected_out is None:
-        return True, "ok (destination-passing; returns the mutated argument)"
-    if isinstance(expected_out, tuple) and expected_out and expected_out[0] == "T":
-        _, shape, dtype = expected_out
+        return False, "produced non-finite values", None
+    if _is_tensor_desc(expected):
+        _, shape, dtype = expected
         if tuple(out.shape) != shape:
-            return False, f"shape {tuple(out.shape)} != {shape} seen in the model"
+            return False, f"shape {tuple(out.shape)} != {shape} seen in the model", None
         if str(out.dtype).replace("torch.", "") != dtype:
-            return False, f"dtype {out.dtype} != {dtype} seen in the model"
-    return True, "ok"
+            return False, f"dtype {out.dtype} != {dtype} seen in the model", None
+    return True, "ok", None
+
+
+def _needs_state(raised_in: Optional[str], harness_module: str) -> bool:
+    """Did the harness fail inside a module of the stack, rather than in itself or torch?"""
+    return bool(
+        raised_in
+        and raised_in != harness_module
+        and raised_in in sys.modules
+        and not raised_in.startswith(("torch", "importlib", "builtins"))
+    )
 
 
 def main() -> None:
@@ -446,19 +1104,57 @@ def main() -> None:
     }
     (out_dir / "discovered.json").write_text(json.dumps(report, indent=2))
     print(f"  full op list -> {out_dir / 'discovered.json'}\n")
+
     made, failed = 0, 0
-    for record in ranked[: args.top]:
-        path = _emit(record, args.model, out_dir)
-        if path is None:
-            continue
-        ok, why = verify(path, record["out"])
-        if ok:
-            made += 1
-            print(f"  ok    {record['calls']:>6} calls  {record['op']:38} -> {path.name}")
-        else:
-            failed += 1
+    todo = list(ranked[: args.top])
+    # A harness may fail because the op reads state the stack sets around each forward.
+    # Such failures are collected, the state is captured from another run of the model, and
+    # the harness is emitted again with it. Bounded, because an op can need state from more
+    # than one module and each round reveals one.
+    for attempt in range(3):
+        needs: Dict[Tuple[str, tuple], Set[str]] = {}
+        for record in todo:
+            key = (record["op"], record["args"])
+            path = _emit(record, args.model, out_dir)
+            if path is None:
+                continue
+            ok, why, raised_in = verify(path, record["expect"])
+            state = record.get("state")
+            if ok:
+                made += 1
+                note = ""
+                if state:
+                    where = ", ".join(f"{m}.{n}" for m, ns in state["modules"].items() for n in ns)
+                    note = f"  (+ {state['bytes'] / 2**20:.0f} MB of state from {where})"
+                print(f"  ok    {record['calls']:>6} calls  {record['op']:38} -> {path.name}{note}")
+                continue
             path.unlink(missing_ok=True)
+            if attempt < 2 and _needs_state(raised_in, path.stem):
+                needs[key] = {raised_in} | set(state["modules"] if state else ())
+                print(
+                    f"  wait  {record['calls']:>6} calls  {record['op']:38} {why}"
+                    f"\n        raised inside {raised_in}: capturing its state from the run"
+                )
+                continue
+            if state:
+                pathlib.Path(state["file"]).unlink(missing_ok=True)
+            failed += 1
             print(f"  drop  {record['calls']:>6} calls  {record['op']:38} {why}")
+        if not needs:
+            break
+        print()
+        captured = capture_state(llm, needs, args.prompts, args.out_tokens, out_dir)
+        todo = []
+        for key in needs:
+            record, result = RECORDS[key], captured.get(key)
+            if result is None or "error" in result:
+                failed += 1
+                why = result["error"] if result else "op did not recur in the capture run"
+                print(f"  drop  {record['calls']:>6} calls  {record['op']:38} {why}")
+                continue
+            record["state"] = result
+            todo.append(record)
+        print()
     print(f"\n  {made} harness(es) written to {out_dir}, {failed} discarded as unverifiable.")
     print("  Next: pick one and run scripts/kernel_trials.py against it.")
 

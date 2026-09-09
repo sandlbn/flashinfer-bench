@@ -15,12 +15,16 @@ unitrace is not a dependency and is not on PyPI. Build it from source:
     git clone https://github.com/intel/pti-gpu.git
     cd pti-gpu/tools/unitrace && mkdir build && cd build
     cmake -DCMAKE_BUILD_TYPE=Release .. && cmake --build . -j
-    export PATH="$PWD:$PATH"
+    export FIB_UNITRACE="$PWD/unitrace"      # or put $PWD on PATH
+
+The binary is found, in order, through ``FIB_UNITRACE``, ``unitrace`` on ``PATH``, and a
+pti-gpu checkout under ``tmp/`` (see :func:`find_unitrace`).
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import subprocess
 import sys
@@ -58,9 +62,69 @@ string through to a subprocess is not something to allow casually.
 """
 
 
-def is_unitrace_available(unitrace_path: str = "unitrace") -> bool:
-    """Whether the unitrace binary can be found."""
-    return shutil.which(unitrace_path) is not None
+UNITRACE_ENV = "FIB_UNITRACE"
+"""Environment variable naming the unitrace binary. Consulted before ``PATH``."""
+
+_SEARCH_RELATIVE = (Path("tmp") / "pti-gpu" / "tools" / "unitrace" / "build" / "unitrace",)
+"""Where a pti-gpu build lands when the checkout lives under ``tmp/`` like this repo's other
+external checkouts. Tried relative to the working directory and to the repo root. This is
+the whole search beyond ``PATH``: a build anywhere else is named with :data:`UNITRACE_ENV`
+rather than guessed at, because a guess that happens to hit a different build profiles
+with a tool other than the one asked for."""
+
+
+def find_unitrace(unitrace_path: Optional[str] = None) -> Optional[str]:
+    """Locate the unitrace binary, or return None when nothing names one.
+
+    Order: ``unitrace_path`` if given, then :data:`UNITRACE_ENV`, then ``unitrace`` on
+    ``PATH``, then :data:`_SEARCH_RELATIVE` under the working directory and the repo root.
+
+    An explicit path or a set environment variable that does not name an executable raises
+    :class:`FileNotFoundError` instead of falling through: it is a configuration error, and
+    quietly using some other binary is the outcome the variable exists to prevent.
+    """
+    for source, value in (
+        ("unitrace_path", unitrace_path),
+        (UNITRACE_ENV, os.environ.get(UNITRACE_ENV)),
+    ):
+        if not value:
+            continue
+        found = shutil.which(value)
+        if found is None:
+            raise FileNotFoundError(
+                f"{source}={value!r} does not name an executable unitrace binary. Point it at "
+                "the `unitrace` built from https://github.com/intel/pti-gpu (tools/unitrace)."
+            )
+        return found
+    found = shutil.which("unitrace")
+    if found:
+        return found
+    repo_root = Path(__file__).resolve().parents[2]
+    for base in (Path.cwd(), repo_root):
+        for rel in _SEARCH_RELATIVE:
+            candidate = base / rel
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return str(candidate)
+    return None
+
+
+def unitrace_missing_message() -> str:
+    """What to do when :func:`find_unitrace` returns None, naming every place it looked."""
+    searched = ", ".join(str(rel) for rel in _SEARCH_RELATIVE)
+    return (
+        f"unitrace not found: {UNITRACE_ENV} is unset, `unitrace` is not on PATH, and there is "
+        f"no build at {searched} under the working directory or the repo root. It is not on "
+        "PyPI; build it from https://github.com/intel/pti-gpu (tools/unitrace) and set "
+        f"{UNITRACE_ENV}=/path/to/unitrace, or put its directory on PATH."
+    )
+
+
+def is_unitrace_available(unitrace_path: Optional[str] = None) -> bool:
+    """Whether a unitrace binary can be found (a misconfigured name counts as not found)."""
+    try:
+        return find_unitrace(unitrace_path) is not None
+    except FileNotFoundError:
+        return False
 
 
 def flashinfer_bench_list_unitrace_modes() -> str:
@@ -131,7 +195,7 @@ def flashinfer_bench_run_unitrace(
     device: str = "xpu:0",
     trace_set_path: Optional[str] = None,
     modes: Optional[List[str]] = None,
-    unitrace_path: str = "unitrace",
+    unitrace_path: Optional[str] = None,
     timeout: int = 300,
     tmpdir: Optional[str] = None,
     max_lines: Optional[int] = 200,
@@ -154,8 +218,8 @@ def flashinfer_bench_run_unitrace(
     modes : Optional[List[str]]
         unitrace modes to enable; see :func:`flashinfer_bench_list_unitrace_modes`.
         Defaults to device timing.
-    unitrace_path : str
-        Path to the unitrace binary.
+    unitrace_path : Optional[str]
+        Path to the unitrace binary. When omitted it is discovered; see :func:`find_unitrace`.
     timeout : int
         Seconds before the profiling run is abandoned.
     tmpdir : Optional[str]
@@ -170,11 +234,12 @@ def flashinfer_bench_run_unitrace(
     """
     from flashinfer_bench.agents.solution_handler import extract_solution_to_files
 
-    if not is_unitrace_available(unitrace_path):
-        return (
-            f"unitrace not found at '{unitrace_path}'. It is not on PyPI; build it from "
-            "https://github.com/intel/pti-gpu (tools/unitrace) and put it on PATH."
-        )
+    try:
+        binary = find_unitrace(unitrace_path)
+    except FileNotFoundError as e:
+        return str(e)
+    if binary is None:
+        return unitrace_missing_message()
 
     selected = list(modes) if modes else list(DEFAULT_MODES)
     invalid = [m for m in selected if m not in VALID_MODES]
@@ -196,7 +261,7 @@ def flashinfer_bench_run_unitrace(
             modes=selected,
             device=device,
             trace_set_path=Path(trace_set_path) if trace_set_path else None,
-            unitrace_path=unitrace_path,
+            unitrace_path=binary,
             output_dir=data_dir,
         )
 

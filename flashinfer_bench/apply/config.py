@@ -41,6 +41,9 @@ class ApplyConfig(BaseModel):
 
     Zero disables the check, which is the default so that no existing deployment changes
     behaviour on upgrade. Set it from the calibration, not from a number read elsewhere.
+    When the calibration reports ``dispatch_us=None`` the cost is unknown, not zero: do
+    not enable apply() with the gate open on that basis -- a run that did lost 41% of its
+    throughput, half of it interception overhead on calls that matched nothing.
     """
 
 

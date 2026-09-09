@@ -153,3 +153,76 @@ class TestMedian:
 
     def test_single_run(self):
         assert msw._median([7.5]) == 7.5
+
+
+class TestArmEnv:
+    """Which FIB_* variables each arm carries decides what the A/B is *of*."""
+
+    def _args(self, **overrides):
+        base = {"env": [], "dataset": "ds", "plain_arm": False}
+        base.update(overrides)
+        return __import__("argparse").Namespace(**base)
+
+    def test_apply_mode_patched_arm_switches_the_integration_on(self):
+        env = msw._arm_env({"PATH": "/bin"}, self._args(env=["FIB_X=1"]), patched=True)
+        assert env["FIB_VLLM_INTEGRATION"] == "1"
+        assert env["FIB_ENABLE_APPLY"] == "1"
+        assert env["FIB_DATASET_PATH"].endswith("ds")
+        assert env["FIB_X"] == "1"
+
+    def test_apply_mode_baseline_strips_the_switches_it_inherited(self):
+        inherited = {"PATH": "/bin", "FIB_VLLM_INTEGRATION": "1", "FIB_ENABLE_APPLY": "1"}
+        env = msw._arm_env(inherited, self._args(env=["FIB_X=1"]), patched=False)
+        assert "FIB_VLLM_INTEGRATION" not in env and "FIB_ENABLE_APPLY" not in env
+        assert "FIB_X" not in env  # --env belongs to the patched arm only
+
+    def test_plain_mode_carries_no_fib_variable_in_either_arm(self):
+        """A provider or source patch must be measured with no apply() in the path."""
+        inherited = {
+            "PATH": "/bin",
+            "FIB_VLLM_INTEGRATION": "1",
+            "FIB_DATASET_PATH": "/d",
+            "FIB_OTHER": "x",
+        }
+        args = self._args(plain_arm=True, env=["MY_PATCH=1"])
+        base = msw._arm_env(inherited, args, patched=False)
+        ours = msw._arm_env(inherited, args, patched=True)
+        assert not [k for k in base if k.startswith("FIB_")]
+        assert not [k for k in ours if k.startswith("FIB_")]
+
+    def test_plain_mode_arms_differ_only_by_env(self):
+        inherited = {"PATH": "/bin", "HOME": "/h", "FIB_VLLM_INTEGRATION": "1"}
+        args = self._args(plain_arm=True, env=["MY_PATCH=1", "OTHER=2"])
+        base = msw._arm_env(inherited, args, patched=False)
+        ours = msw._arm_env(inherited, args, patched=True)
+        assert {k: ours[k] for k in ours if base.get(k) != ours[k]} == {
+            "MY_PATCH": "1",
+            "OTHER": "2",
+        }
+        assert set(base) - set(ours) == set()
+
+    def test_plain_and_overhead_arms_are_mutually_exclusive(self):
+        with pytest.raises(SystemExit):
+            msw.build_parser().parse_args(["--model", "m", "--plain-arm", "--overhead-arm"])
+        assert msw.build_parser().parse_args(["--model", "m", "--plain-arm"]).plain_arm is True
+
+
+class TestTokenDigest:
+    def test_same_tokens_same_digest_and_order_matters(self):
+        a = msw._token_digest([[1, 2, 3], [4, 5]])
+        assert a == msw._token_digest([[1, 2, 3], [4, 5]])
+        assert a != msw._token_digest([[4, 5], [1, 2, 3]])
+        assert a != msw._token_digest([[1, 2, 3], [4, 6]])
+
+    def test_digest_is_read_back_from_the_result_line(self):
+        parsed = msw._parse(
+            'FIB_RESULT {"generated_tokens": 8, "seconds": 1.0, "tokens_per_sec": 8.0, '
+            '"token_digest": "abc123"}'
+        )
+        assert parsed["token_digest"] == "abc123"
+
+    def test_identity_needs_one_stable_digest_on_each_side(self):
+        assert msw._tokens_identical(["a"], ["a"]) is True
+        assert msw._tokens_identical(["a"], ["b"]) is False
+        assert msw._tokens_identical(["a", "b"], ["a", "b"]) is False  # unstable arms
+        assert msw._tokens_identical([], ["a"]) is None

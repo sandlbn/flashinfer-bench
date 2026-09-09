@@ -16,66 +16,33 @@ import argparse
 import collections
 import re
 
-# kernel-name pattern -> (family, which skill owns it, what to do)
+# kernel-name pattern -> (family, which skill owns that class of op). What the profile
+# found is reported as measured; what to do about it is the owning skill's to decide.
 ROUTES = [
     (
         # Must precede the gemm route: these names usually contain "gemm" too, and a
-        # quantized GEMM is a different problem. Xe2's kernel.db is overwhelmingly tuned
-        # for low-bit weights against f16 compute (s4/nf4/s8 x f16) and has zero native
-        # bf16 rows, so a quantized path here is running on Intel's *tuned* strategies
-        # while a bf16 one inherits PVC's. Standalone dequant/repack kernels are the usual
-        # cost -- they are a separate launch and a full pass over the weights.
+        # quantized GEMM is a different class of op from a dense one.
         r"quant|dequant|awq|gptq|woq|mxfp|nvfp|fp8|fp4|int4|s4|u4|scaled_mm",
         "quantized gemm",
         "/optimize-intel-kernels",
-        "check xe-matrix.md first: fp8 and block-scaled mxfp4/mxfp8 are Crescent Island only "
-        "and run emulated here; s4/nf4/s8 x f16 is native. Fold dequant into the GEMM rather "
-        "than beating the matmul",
     ),
-    (
-        r"gemm|matmul|linear|xetla|dnnl",
-        "gemm",
-        "/optimize-onednn",
-        "oneDNN is already the path; fix how it is called (layout, caching, post-ops, no host block)",
-    ),
-    (
-        r"attention|sdpa|fmha|flash|paged",
-        "attention",
-        "/onboard-model-intel Phase 5",
-        "sgl-kernel-xpu is the only Intel attention source; wire it as a baseline first",
-    ),
+    (r"gemm|matmul|linear|xetla|dnnl", "gemm", "/optimize-onednn"),
+    (r"attention|sdpa|fmha|flash|paged", "attention", "/onboard-model-intel Phase 5"),
     (
         # A norm shows up as its reduction kernel (ReduceKernel<...ReduceOp<float>>),
         # never by the word "norm" -- match the reduction or it lands in "other".
         r"norm|rms|reduce",
         "norm",
         "/optimize-intel-kernels",
-        "memory-bound: vectorize loads, multi-row work-groups; in-tree SYCL beats vLLM here",
     ),
     (
         r"silu|gelu|activation|elementwise|vectorized|unrolled",
         "elementwise",
         "/optimize-intel-kernels",
-        "fuse into the producing GEMM's epilogue (oneDNN post-ops) before writing a kernel",
     ),
-    (
-        r"rope|rotary",
-        "rope",
-        "/optimize-intel-kernels",
-        "vllm-xpu-kernels ships rotary_embedding; benchmark against it before writing one",
-    ),
-    (
-        r"softmax|sampling|topk|top_p",
-        "sampling",
-        "/onboard-model-intel Phase 5",
-        "sgl-kernel-xpu has the sampling family; verify it is built before registering",
-    ),
-    (
-        r"copy|cat|reshape|permute|contiguous|transpose",
-        "data movement",
-        "(no kernel to write)",
-        "look for an avoidable materialisation -- a layout or fusion change removes it",
-    ),
+    (r"rope|rotary", "rope", "/optimize-intel-kernels"),
+    (r"softmax|sampling|topk|top_p", "sampling", "/onboard-model-intel Phase 5"),
+    (r"copy|cat|reshape|permute|contiguous|transpose", "data movement", "(no kernel to write)"),
 ]
 
 
@@ -194,12 +161,13 @@ def high_rank_contractions(prof, total_us: float, min_ndim: int = 5):
     return sorted(out, key=lambda r: -r[1])
 
 
-def classify(name: str) -> tuple[str, str, str]:
+def classify(name: str) -> tuple[str, str]:
+    """(family, owning skill) for a kernel name; ("other", "(investigate)") when no route matches."""
     low = name.lower()
-    for pattern, family, skill, advice in ROUTES:
+    for pattern, family, skill in ROUTES:
         if re.search(pattern, low):
-            return family, skill, advice
-    return "other", "(investigate)", "not matched by any route; inspect the kernel name"
+            return family, skill
+    return "other", "(investigate)"
 
 
 def main() -> None:
@@ -213,7 +181,7 @@ def main() -> None:
         "--trust-remote-code",
         action="store_true",
         help="Execute modeling code from the model repository. Needed for any architecture "
-             "transformers does not ship; off by default because it runs third-party Python.",
+        "transformers does not ship; off by default because it runs third-party Python.",
     )
     ap.add_argument(
         "--local",
@@ -230,10 +198,14 @@ def main() -> None:
     if a.trust_remote_code:
         # Same shims the extractor applies: published modeling code often targets
         # an older transformers, and the failures look like our bug.
-        import importlib.util as _ilu, pathlib as _pl
+        import importlib.util as _ilu
+        import pathlib as _pl
+
         _spec = _ilu.spec_from_file_location(
-            "_fib_extract", _pl.Path(__file__).with_name("extract_model_kernels_xpu.py"))
-        _ex = _ilu.module_from_spec(_spec); _spec.loader.exec_module(_ex)
+            "_fib_extract", _pl.Path(__file__).with_name("extract_model_kernels_xpu.py")
+        )
+        _ex = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_ex)
         _ex._compat_remote_code()
     tok = AutoTokenizer.from_pretrained(a.model, **hf)
     model = AutoModelForCausalLM.from_pretrained(a.model, dtype=torch.bfloat16, **hf).to(a.device)
@@ -261,8 +233,8 @@ def main() -> None:
         if (getattr(e, "self_cpu_time_total", 0) or 0) > 0:
             continue  # an aten op, not the kernel it launched
         total += us
-        family, skill, advice = classify(e.key)
-        per_family[family].append((e.key, us, e.count, skill, advice))
+        family, skill = classify(e.key)
+        per_family[family].append((e.key, us, e.count, skill))
 
     from flashinfer_bench.device import get_accelerator
 
@@ -302,9 +274,10 @@ def main() -> None:
     contractions = high_rank_contractions(prof, total)
     if contractions:
         share = 100.0 * sum(c[1] for c in contractions) / total
-        print(f"\n  !! Materialised high-rank contractions: {share:.1f}% of device time")
-        print("     A state-space / SSD scan written as broadcast-multiply + sum. The intermediate")
-        print("     is created only because the scan is not fused -- see /optimize-ssm-scan.")
+        print(
+            f"\n  Materialised high-rank contractions (aten ops over rank>=5 operands): "
+            f"{share:.1f}% of device time -> /optimize-ssm-scan"
+        )
         for k, us, n, rank, elems, shapes in contractions[:4]:
             gb = elems * 4 / 2**30
             print(
@@ -319,8 +292,7 @@ def main() -> None:
             continue
         head = f"recoverable {rec:.1f}%" if rec is not None else "recoverable unknown -- measure it"
         print(f"\n  [{share:.1f}% of device time | {head}] {family} -> {rows[0][3]}")
-        print(f"      {rows[0][4]}")
-        for name, us, count, _, _ in sorted(rows, key=lambda r: -r[1])[:3]:
+        for name, us, count, _ in sorted(rows, key=lambda r: -r[1])[:3]:
             print(f"      - {name[:62]:62} {us / 1000.0:7.2f} ms  x{count}")
 
     print("\n  Register spill is not visible here. For a kernel you wrote, check it with:")
