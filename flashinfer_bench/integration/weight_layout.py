@@ -13,7 +13,7 @@ and an interleave is the same kind of operation in the same place.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional, Tuple
+from typing import TYPE_CHECKING, List, NamedTuple, Optional, Tuple
 
 if TYPE_CHECKING:
     import torch
@@ -148,3 +148,344 @@ def qwen_style_mlp_weights(
     gamma = getattr(norm, "weight").detach()
     eps = float(getattr(norm, "variance_epsilon", None) or getattr(norm, "eps", 1e-6))
     return interleave_gate_up(gate, up, gamma, dtype=dtype), eps
+
+
+# ----------------------------------------------------------------------------- row padding
+#
+# A second kind of load-time transform: not a different *arrangement* of the values for a
+# different kernel, but a different *address pattern* for the same kernel.
+#
+# Device memory is spread over several channels by address. When a weight's row pitch in
+# bytes is a multiple of the distance at which the channel pattern repeats, every row starts
+# on the same channel, and a GEMM that walks many rows at the same column offset -- which is
+# what a skinny decode GEMM does -- queues all of its reads on that one channel while the
+# others idle. Padding the pitch by a few elements breaks the coincidence; the values, the
+# kernel and the numerics are unchanged (oneDNN takes the strided descriptor as-is).
+#
+# The transform is keyed on the pitch arithmetic and nothing else: not on a model, a layer
+# name or a shape. Any weight of any model whose pitch lands on the period gets it; any weight
+# that does not is left alone.
+
+INTERLEAVE_BYTES = 1024
+"""Address granule at which consecutive addresses move to the next memory channel.
+
+Not reported by any driver interface, so it is a measurement. On the first part (six
+channels) the deficit appears at row pitches that are multiples of 6144 bytes -- 6144 and
+12288 -- and at no other pitch tried between 2048 and 9216 (2048, 3072, 4096, 6160 ... 8192
+are all clear; 9216, one and a half periods, shows a residual few percent). Six channels
+into 6144 bytes is a 1024-byte granule. An earlier guess of 256 bytes predicted that 7680
+would camp; it does not. The sweep is reproducible with ``scripts/kernel_trials.py ab`` over
+``tools/kernel-harness/trials/linear_row_pad.py``.
+"""
+
+DEFAULT_MEMORY_CHANNELS = 6
+"""Channel count used when the driver does not report one.
+
+Level Zero sysman's ``zesMemoryGetProperties`` has a ``numChannels`` field; the discrete
+Arc driver in use here (1.17.x) fills it with -1, and the bus width PyTorch reports for the
+same part is one channel's, not the device's, so neither can derive the count. Six is the
+first part this was measured on: a 192-bit GDDR6 bus is six 32-bit channels, and the
+period the sweep found is six granules. Set ``FIB_MEMORY_CHANNELS`` on a part whose driver
+reports nothing and whose bus is not six channels wide.
+"""
+
+CHANNELS_ENV = "FIB_MEMORY_CHANNELS"
+"""Explicit channel count. Overrides discovery; for parts whose driver reports none."""
+
+ROW_PAD_BYTES = 64
+"""How far the pitch is moved off the period.
+
+One cache line: every pad from 16 bytes to two kilobytes measured the same gain on the
+first part, so the smallest that keeps every row cache-line aligned -- which the block
+loads oneDNN's GEMM kernels issue rely on -- is the right one. The added storage is
+``64 / pitch``: a fraction of a percent on any projection wide enough to hit the period.
+"""
+
+PROBE_M = 8
+"""Decode-sized row count the load-time probe times the GEMM at."""
+
+PROBE_ROUNDS = 7
+PROBE_CALLS = 40
+PROBE_WARMUP_S = 0.25
+"""Enough sustained load to bring a clock-gated part up before either arm is timed."""
+
+_NOISE_SIGMAS = 2.0
+_MAD_TO_SIGMA = 1.4826
+
+
+class PadProbe(NamedTuple):
+    """What the load-time A/B measured: median per-round speedup and its robust scatter."""
+
+    win: bool
+    speedup: float
+    spread: float
+
+
+def memory_channel_count(device: object = None) -> int:
+    """How many memory channels the device interleaves addresses over.
+
+    Resolution order: ``FIB_MEMORY_CHANNELS`` if set; Level Zero sysman if it reports a
+    positive count for the device; otherwise :data:`DEFAULT_MEMORY_CHANNELS`. The answer is
+    what the pitch rule is derived from, so a part with a different channel count gets a
+    different period from the same code.
+    """
+    import os
+
+    override = os.environ.get(CHANNELS_ENV)
+    if override:
+        count = int(override)
+        if count <= 0:
+            raise ValueError(f"{CHANNELS_ENV} must be a positive channel count, got {override!r}")
+        return count
+    reported = _sysman_memory_channels(device)
+    if reported is not None and reported > 0:
+        return reported
+    return DEFAULT_MEMORY_CHANNELS
+
+
+def _sysman_memory_channels(device: object = None) -> Optional[int]:
+    """``numChannels`` from Level Zero sysman for the device's local memory, or None.
+
+    Sysman is queried through its standalone ``zesInit`` path, which works whether or not
+    the runtime already initialised Level Zero for compute. The sysman device is matched to
+    the torch device by local-memory size, since the two APIs do not share an enumeration
+    order. Anything that fails -- no loader, no sysman, a driver that answers -1 -- is None:
+    unknown is not a count.
+    """
+    try:
+        import ctypes
+
+        import torch
+    except Exception:
+        return None
+    if not (hasattr(torch, "xpu") and torch.xpu.is_available()):
+        return None
+    try:
+        index = torch.device(device).index if device is not None else None
+        props = torch.xpu.get_device_properties(index or 0)
+        want_bytes = int(props.total_memory)
+    except Exception:
+        return None
+
+    class _MemProps(ctypes.Structure):
+        # zes_mem_properties_t
+        _fields_ = [
+            ("stype", ctypes.c_int),
+            ("pNext", ctypes.c_void_p),
+            ("type", ctypes.c_int),
+            ("onSubdevice", ctypes.c_uint8),
+            ("subdeviceId", ctypes.c_uint32),
+            ("location", ctypes.c_int),
+            ("physicalSize", ctypes.c_uint64),
+            ("busWidth", ctypes.c_int32),
+            ("numChannels", ctypes.c_int32),
+        ]
+
+    _ZES_STRUCTURE_TYPE_MEM_PROPERTIES = 0x0001000C
+    _ZES_MEM_LOC_DEVICE = 1
+    try:
+        ze = ctypes.CDLL("libze_loader.so.1")
+        if ze.zesInit(0) != 0:
+            return None
+        n = ctypes.c_uint32(0)
+        if ze.zesDriverGet(ctypes.byref(n), None) != 0 or n.value == 0:
+            return None
+        drivers = (ctypes.c_void_p * n.value)()
+        ze.zesDriverGet(ctypes.byref(n), drivers)
+        best: Optional[Tuple[int, int]] = None
+        for drv in drivers:
+            nd = ctypes.c_uint32(0)
+            ze.zesDeviceGet(ctypes.c_void_p(drv), ctypes.byref(nd), None)
+            devs = (ctypes.c_void_p * nd.value)()
+            ze.zesDeviceGet(ctypes.c_void_p(drv), ctypes.byref(nd), devs)
+            for dev in devs:
+                nm = ctypes.c_uint32(0)
+                ze.zesDeviceEnumMemoryModules(ctypes.c_void_p(dev), ctypes.byref(nm), None)
+                mods = (ctypes.c_void_p * nm.value)()
+                ze.zesDeviceEnumMemoryModules(ctypes.c_void_p(dev), ctypes.byref(nm), mods)
+                for mod in mods:
+                    p = _MemProps()
+                    p.stype = _ZES_STRUCTURE_TYPE_MEM_PROPERTIES
+                    if ze.zesMemoryGetProperties(ctypes.c_void_p(mod), ctypes.byref(p)) != 0:
+                        continue
+                    if p.location != _ZES_MEM_LOC_DEVICE:
+                        continue
+                    distance = abs(int(p.physicalSize) - want_bytes)
+                    if best is None or distance < best[0]:
+                        best = (distance, int(p.numChannels))
+        return None if best is None else best[1]
+    except Exception:
+        return None
+
+
+def channel_period_bytes(device: object = None) -> int:
+    """Distance in bytes at which the memory-channel pattern repeats: channels x granule.
+
+    Established on the first part by measurement, not by reading a datasheet: a weight of
+    pitch ``P`` bytes was timed under a streaming decode GEMM against copies of itself at
+    pitch ``P + d`` for a range of ``d``, with the values, the kernel and the implementation
+    oneDNN selected held identical (``scripts/kernel_trials.py ab`` over
+    ``tools/kernel-harness/trials/linear_row_pad.py``). The deficit is present at every pitch
+    that is a multiple of the returned period and absent otherwise.
+    """
+    return memory_channel_count(device) * INTERLEAVE_BYTES
+
+
+def row_pitch_bytes(weight: "torch.Tensor") -> int:
+    """Bytes from the start of one row to the start of the next."""
+    return int(weight.stride(0)) * weight.element_size()
+
+
+def camps_on_one_channel(weight: "torch.Tensor", period_bytes: Optional[int] = None) -> bool:
+    """Whether every row of a row-major 2-D weight starts on the same memory channel.
+
+    True exactly when the row pitch in bytes is a multiple of the channel period. Only a
+    row-major 2-D tensor can qualify; anything else is False. Pure arithmetic: whether the
+    tensor lives in a memory that has channels is the caller's decision.
+    """
+    if weight.ndim != 2 or weight.stride(1) != 1:
+        return False
+    if period_bytes is None:
+        period_bytes = channel_period_bytes(weight.device)
+    return row_pitch_bytes(weight) % period_bytes == 0
+
+
+def padded_row_pitch(pitch_bytes: int, period_bytes: int, pad_bytes: int = ROW_PAD_BYTES) -> int:
+    """The pitch a camping weight is moved to: ``pitch + pad``, checked to be off the period."""
+    new_pitch = pitch_bytes + pad_bytes
+    if new_pitch % period_bytes == 0:
+        # Only reachable when pad is itself a multiple of the period, which would put the
+        # rows straight back where they were.
+        raise ValueError(
+            f"a pad of {pad_bytes} bytes leaves pitch {new_pitch} on the {period_bytes}-byte "
+            "channel period"
+        )
+    return new_pitch
+
+
+def pad_rows_off_channel_period(
+    weight: "torch.Tensor",
+    period_bytes: Optional[int] = None,
+    pad_bytes: int = ROW_PAD_BYTES,
+) -> Optional["torch.Tensor"]:
+    """A copy of ``weight`` whose rows are spread across memory channels, or None.
+
+    Returns None when the weight does not camp -- the caller keeps what it has and nothing
+    was allocated. Otherwise the result is a ``[n, k]`` view into ``[n, k + pad]`` storage:
+    same values, same dtype, same device, same shape; only ``stride(0)`` differs. Passing
+    it where the original went is bit-identical (the GEMM reads the same numbers in the
+    same order), and it costs ``pad / pitch`` extra memory on that one tensor.
+    """
+    if not camps_on_one_channel(weight, period_bytes):
+        return None
+    if period_bytes is None:
+        period_bytes = channel_period_bytes(weight.device)
+    esize = weight.element_size()
+    if pad_bytes % esize:
+        raise ValueError(f"pad of {pad_bytes} bytes is not whole {weight.dtype} elements")
+    new_pitch = padded_row_pitch(row_pitch_bytes(weight), period_bytes, pad_bytes)
+    return _copy_with_pitch(weight, new_pitch)
+
+
+def _copy_with_pitch(weight: "torch.Tensor", pitch_bytes: int) -> "torch.Tensor":
+    """A copy of a 2-D ``weight`` whose rows are ``pitch_bytes`` apart: a view of wider storage."""
+    import torch
+
+    n, k = weight.shape
+    storage = torch.empty(
+        (n, pitch_bytes // weight.element_size()), dtype=weight.dtype, device=weight.device
+    )
+    view = storage[:, :k]
+    view.copy_(weight)
+    return view
+
+
+def streaming_pad_wins(
+    weight: "torch.Tensor",
+    padded: "torch.Tensor",
+    *,
+    m: int = PROBE_M,
+    rounds: int = PROBE_ROUNDS,
+    calls: int = PROBE_CALLS,
+    pool_bytes: Optional[int] = None,
+) -> Optional[PadProbe]:
+    """Time the GEMM through ``weight`` against ``padded`` as they would stream at decode.
+
+    The pitch rule says where camping *can* happen; whether the pad pays depends on more
+    than the pitch. On the first part a 1024-row weight at the camping pitch gained a third
+    from the pad while a 4096-row weight at the same pitch lost three percent, and padding
+    a weight that does not camp costs up to eight percent -- the pad is never free, and the
+    kernel's tiling over the rows decides whether the channel spread is worth it. Nothing
+    available at load time predicts that, so it is measured, once per shape.
+
+    Both arms rotate over enough copies to exceed the last-level cache -- the effect does
+    not exist while the weight is cache-resident, and at decode it never is -- and are timed
+    in interleaved rounds with the order flipped, judged on the median per-round ratio
+    against its own scatter, as ``scripts/kernel_trials.py`` judges. Returns None when it
+    cannot measure (host memory, no room for the pools): unknown is not a win.
+    """
+    import math
+    import statistics
+    import time
+
+    import torch
+
+    if weight.device.type == "cpu":
+        return None
+    try:
+        from flashinfer_bench.device import get_accelerator
+
+        accel = get_accelerator(str(weight.device))
+        if pool_bytes is None:
+            pool_bytes = 2 * int(accel.capabilities(str(weight.device)).l2_bytes)
+        sync = accel.synchronize
+    except Exception:
+        return None
+
+    n, k = weight.shape
+    copies = max(2, math.ceil(pool_bytes / (padded.untyped_storage().nbytes() or 1)))
+    pools: List[List["torch.Tensor"]] = [[weight], [padded]]
+    try:
+        for _ in range(copies - 1):
+            pools[0].append(_copy_with_pitch(weight, row_pitch_bytes(weight)))
+            pools[1].append(_copy_with_pitch(weight, row_pitch_bytes(padded)))
+        x = torch.randn((m, k), dtype=weight.dtype, device=weight.device)
+    except RuntimeError:  # no room for the pools; leave the weight as it is
+        return None
+
+    counters = [0, 0]
+
+    def _call(arm: int) -> None:
+        pool = pools[arm]
+        torch.nn.functional.linear(x, pool[counters[arm] % len(pool)])
+        counters[arm] += 1
+
+    def _time(arm: int) -> float:
+        sync(str(weight.device))
+        start = time.perf_counter()
+        for _ in range(calls):
+            _call(arm)
+        sync(str(weight.device))
+        return time.perf_counter() - start
+
+    with torch.no_grad():
+        deadline = time.perf_counter() + PROBE_WARMUP_S
+        while time.perf_counter() < deadline:
+            _call(0)
+            _call(1)
+        samples: List[Tuple[float, float]] = []
+        for r in range(rounds):
+            # Flip the order each round so neither arm systematically inherits the other's
+            # clock state; the pools are released when this function returns.
+            if r % 2 == 0:
+                a, b = _time(0), _time(1)
+            else:
+                b, a = _time(1), _time(0)
+            samples.append((a, b))
+    if any(a <= 0 or b <= 0 for a, b in samples):
+        return None
+    ratios = [math.log(a / b) for a, b in samples]
+    center = statistics.median(ratios)
+    sigma = _MAD_TO_SIGMA * statistics.median(abs(v - center) for v in ratios)
+    win = center > 0 and center > _NOISE_SIGMAS * sigma
+    return PadProbe(win=win, speedup=math.exp(center), spread=math.exp(sigma) - 1)

@@ -35,6 +35,10 @@ implementation detail, needing one entry per model class and breaking silently o
 refactor. Treat it as a measurement vehicle. The durable form of that optimization is a
 fused-MLP path vLLM selects deliberately, the way it selects an attention backend.
 
+**Not everything here is a kernel substitution.** :mod:`.weight_layout` changes how a
+weight is laid out at load time and nothing on the forward path; it has its own switch
+(``FIB_VLLM_PAD_WEIGHT_ROWS``) precisely so it can be measured with ``apply()`` absent.
+
 **Install it in the process that owns the weights.** vLLM's V1 engine runs the model in an
 ``EngineCore`` subprocess, so calling :func:`install_vllm_integrations` from the launching
 script patches a copy of the class that never executes a forward pass -- the server runs
@@ -91,7 +95,7 @@ def install_vllm_integrations(force: bool = False) -> List[str]:
         logger.info("flashinfer-bench patched vLLM: %s", ", ".join(patched))
     else:
         logger.info(
-            "flashinfer-bench found no vLLM targets to patch; the server keeps its own " "kernels."
+            "flashinfer-bench found no vLLM targets to patch; the server keeps its own kernels."
         )
     return patched
 
