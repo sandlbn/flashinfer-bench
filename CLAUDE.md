@@ -358,8 +358,8 @@ Read it before the individual skills.
   for CUDA Triton solutions ported to XPU, and for an op the routing found nothing implements
   well (`authored_callsite` / `authored_apply` rows). Language is chosen from the candidate's
   measured regime. Carries `architectures.md` (per-part traps), `xe-matrix.md` (DPAS-backed
-  kernels), `xe-fuse.md` and `references/triton-xpu.md` (what the Intel Triton checkout says
-  about writing kernels) and `references/xe-forge-knowledge.md` (an index into the vendor's
+  kernels), `xe-fuse.md` and `.claude/skills/optimize-intel-kernels/references/triton-xpu.md` (what the Intel Triton checkout says
+  about writing kernels) and `.claude/skills/optimize-intel-kernels/references/xe-forge-knowledge.md` (an index into the vendor's
   pattern corpus under `tmp/Xe-Forge/`: what to take, what to leave, and where it disagrees
   with what this part measured). Per-part *values* are queried from `Capabilities` and the
   calibration, not tabulated
