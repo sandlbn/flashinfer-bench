@@ -32,6 +32,17 @@ venv's `site-packages/`:
 # <vllm-venv>/lib/python3.X/site-packages/sitecustomize.py
 import os
 
+
+def _min_gain():
+    override = os.environ.get("FIB_APPLY_MIN_GAIN_US")
+    if override is not None:
+        return float(override)
+    from flashinfer_bench.device import calibration
+
+    cal = calibration.get()  # measures once, caches; None when it cannot
+    return cal.dispatch_us if cal and cal.dispatch_us else 0.0
+
+
 if os.environ.get("FIB_VLLM_INTEGRATION", "").lower() in ("1", "true", "yes", "on"):
     from flashinfer_bench.integration.vllm import install_vllm_integrations
 
@@ -45,8 +56,9 @@ if os.environ.get("FIB_VLLM_INTEGRATION", "").lower() in ("1", "true", "yes", "o
                 max_atol=float(os.environ.get("FIB_APPLY_MAX_ATOL", "0.02")),
                 max_rtol=float(os.environ.get("FIB_APPLY_MAX_RTOL", "0.02")),
                 on_miss_policy="use_def_best",
-                # Dispatch cost for this part: `python scripts/calibrate_part.py` prints it.
-                min_gain_us=float(os.environ.get("FIB_APPLY_MIN_GAIN_US", "0")),
+                # What a substitution costs is a property of the part, so measure it
+                # rather than pasting a figure from another machine.
+                min_gain_us=_min_gain(),
             ),
         )
 ```

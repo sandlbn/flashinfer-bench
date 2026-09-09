@@ -28,37 +28,40 @@ from typing import Any, Dict, Tuple
 RECORDS: Dict[Tuple[str, tuple], Dict[str, Any]] = {}
 
 # Ops that are plumbing rather than arithmetic: harnessing them measures the allocator or
-# the copy engine, not a kernel anyone would optimize.
-_SKIP_PREFIXES = (
-    "aten::empty",
-    "aten::zeros",
-    "aten::ones",
-    "aten::arange",
-    "aten::detach",
-    "aten::view",
-    "aten::_unsafe_view",
-    "aten::expand",
-    "aten::as_strided",
-    "aten::slice",
-    "aten::select",
-    "aten::t",
-    "aten::transpose",
-    "aten::permute",
-    "aten::reshape",
-    "aten::squeeze",
-    "aten::unsqueeze",
-    "aten::to",
-    "aten::_to_copy",
-    "aten::copy_",
-    "aten::clone",
-    "aten::contiguous",
-    "aten::item",
-    "aten::equal",
-    "aten::fill_",
-    "aten::resize_",
-    "aten::set_",
-    "aten::narrow",
-    "aten::split",
+# the copy engine, not a kernel anyone would optimize. Matched as `namespace.op` against
+# `str(func)`, which a TorchDispatchMode reports as `aten.view.default`.
+_SKIP_OPS = frozenset(
+    {
+        "aten.empty",
+        "aten.zeros",
+        "aten.ones",
+        "aten.arange",
+        "aten.detach",
+        "aten.view",
+        "aten._unsafe_view",
+        "aten.expand",
+        "aten.as_strided",
+        "aten.slice",
+        "aten.select",
+        "aten.t",
+        "aten.transpose",
+        "aten.permute",
+        "aten.reshape",
+        "aten.squeeze",
+        "aten.unsqueeze",
+        "aten.to",
+        "aten._to_copy",
+        "aten.copy_",
+        "aten.clone",
+        "aten.contiguous",
+        "aten.item",
+        "aten.equal",
+        "aten.fill_",
+        "aten.resize_",
+        "aten.set_",
+        "aten.narrow",
+        "aten.split",
+    }
 )
 
 
@@ -82,7 +85,7 @@ def record_mode():
         def __torch_dispatch__(self, func, types, args=(), kwargs=None):
             out = func(*args, **(kwargs or {}))
             name = str(func)
-            if not name.startswith(_SKIP_PREFIXES):
+            if ".".join(name.split(".")[:2]) not in _SKIP_OPS:
                 sig = tuple(_describe(a) for a in args)
                 key = (name, sig)
                 rec = RECORDS.setdefault(
@@ -148,8 +151,17 @@ def _emit(record: Dict[str, Any], model: str, out_dir: pathlib.Path) -> pathlib.
         else:
             call_args.append(repr(a))
 
-    aten = op.replace("aten::", "").split(".")[0]
-    call = f"torch.ops.aten.{aten}({', '.join(call_args)})"
+    ns, opname = op.split(".")[0], op.split(".")[1]
+    invoke = f"torch.ops.{ns}.{opname}({', '.join(call_args)})"
+    if record["out"] is None:
+        # Destination-passing: the op returns nothing and writes into an argument. Return
+        # that argument so the harness has a result to compare, and record which one so
+        # verification checks it rather than the return value.
+        dps = f"t{tensors[0][0]}"
+        call = f"{invoke} or {dps}"
+        record["result_is"] = tensors[0][1]
+    else:
+        call = invoke
     body = _TEMPLATE.format(
         op=op,
         model=model,
@@ -182,6 +194,8 @@ def verify(path: pathlib.Path, expected_out: Any) -> Tuple[bool, str]:
         return False, f"returned {type(out).__name__}, not a tensor"
     if not torch.isfinite(out).all():
         return False, "produced non-finite values"
+    if expected_out is None:
+        return True, "ok (destination-passing; returns the mutated argument)"
     if isinstance(expected_out, tuple) and expected_out and expected_out[0] == "T":
         _, shape, dtype = expected_out
         if tuple(out.shape) != shape:
