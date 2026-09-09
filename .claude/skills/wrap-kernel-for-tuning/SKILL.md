@@ -46,6 +46,37 @@ def forward(self, q, k_cache, v_cache, cu_seqlens_q, seqused_k, block_table):
 That file is then the baseline a trial has to beat. A trial replaces the body with its own
 implementation and is measured against the real kernel, not a copy of it.
 
+## SYCL and oneDNN go through the same loop
+
+Nothing in the loop is Triton-specific: it imports a file exposing the three names and times
+it. `tools/kernel-harness/sycl_harness.py` closes the gap from source text to a callable.
+
+```python
+from sycl_harness import build, inputs_for
+
+SOURCE = r"""...sycl..."""
+
+class Model(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.run = build("rmsnorm_h2560", SOURCE, entry_point="k.cpp::run")
+    def forward(self, x, w):
+        out = torch.empty_like(x)
+        self.run(x, w, out)          # destination-passing, as every in-tree kernel expects
+        return out
+
+get_inputs = inputs_for("rmsnorm_h2560", batch_size=4096)
+```
+
+Two things this buys. `build` compiles through **the same builder the benchmark uses**, so a
+trial that wins is already a Solution -- no reimplementation between tuning and deployment,
+and no chance of the two disagreeing about the calling convention. And `inputs_for` takes
+shapes and dtypes from the definition, so a trial cannot quietly optimize a problem the
+dataset does not contain; only the variable axes are supplied.
+
+**oneDNN needs no separate path.** It is SYCL with `dependencies=["onednn"]`, passed to
+`build`. Same loop, same benchmark, same correctness gate.
+
 ## Where the shapes come from
 
 From a definition in the dataset, not from imagination: its constant axes are the model's

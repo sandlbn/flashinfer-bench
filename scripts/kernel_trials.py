@@ -27,8 +27,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
 import statistics
+import sys
 import time
 from typing import Any, Dict, Optional
 
@@ -68,6 +70,20 @@ def _save_store(name: str, data: Dict[str, Any]) -> None:
 
 
 # --------------------------------------------------------------------------- measure
+
+
+def _ensure_toolchain_on_path() -> None:
+    """Put this interpreter's bin/ on PATH before any build runs.
+
+    Invoking a venv's python by absolute path leaves its bin/ off PATH, so the SYCL builder
+    cannot find `ninja` and every SYCL candidate fails to compile -- which reads as "the
+    kernel is broken" rather than "the toolchain was not visible". Cheap to prevent, and it
+    has cost real debugging time here more than once.
+    """
+    bindir = str(pathlib.Path(sys.executable).parent)
+    parts = os.environ.get("PATH", "").split(os.pathsep)
+    if bindir not in parts:
+        os.environ["PATH"] = os.pathsep.join([bindir, *parts])
 
 
 def _load_model(path: str):
@@ -320,6 +336,7 @@ def main() -> None:
     p.set_defaults(func=cmd_finalize)
 
     args = ap.parse_args()
+    _ensure_toolchain_on_path()
     args.func(args)
 
 
