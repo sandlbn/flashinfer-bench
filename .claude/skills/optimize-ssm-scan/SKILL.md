@@ -5,7 +5,8 @@ description: Optimize state-space / SSD scan kernels on Intel GPUs — Mamba2, G
 
 # Optimize a state-space scan
 
-On a hybrid model the scan, not the GEMM, is usually where the time goes.
+On a hybrid model, `/profile-intel` says whether the scan or the GEMM carries the device
+time; read it before assuming either.
 
 ## Recognising it
 

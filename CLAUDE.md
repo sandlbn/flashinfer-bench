@@ -66,14 +66,15 @@ interchangeable:
 
 The serving venv is configured nowhere in the code: the pipeline scripts run under whichever
 interpreter is active (`sys.executable`) and their child processes inherit it. Find it rather
-than assume it. It is a sibling directory of this checkout named for the stack it holds —
-`ls -d "$(git rev-parse --show-toplevel)"/../*venv*` — and the right one is the one whose
-`python -c "import vllm"` succeeds; the dev venv fails that import. `vllm_xpu_kernels` is
-present in both, so it does not tell them apart.
+than assume it, and never write its path into a document. Places to look — not a location:
+a venv already active in the shell (`$VIRTUAL_ENV`), then the venv directories beside this
+checkout (`ls -d "$(git rev-parse --show-toplevel)"/../*venv*`). The right one is the one
+whose `python -c "import vllm"` succeeds; the dev venv fails that import. `vllm_xpu_kernels`
+is present in both, so it does not tell them apart.
 
 Activate one, then call `python`, `pytest` and `flashinfer-bench` by bare name. Activating
 puts the venv's `bin/` on `PATH`, which naming its `python` by absolute path does not. With
-nothing activated, bare `python` is `/usr/bin/python`, which has no torch.
+nothing activated, bare `python` is the system interpreter, which has no torch.
 
 **Never `uv run`, `uv sync` or `uv pip` in either environment.** `pyproject.toml` pins plain
 `torch` with no index override, so uv's resolver replaces the `+xpu` torch wheel with a CUDA
@@ -369,7 +370,10 @@ skill stores a measurement and a way to reason from it, never a conclusion reach
 one part. `scripts/lint_skills.py` enforces its conventions mechanically — no stored
 measurements, no performance expectations, no part, model or definition names outside
 illustrations, no remedy orderings or closed remedy lists, no `uv run`, no broken
-references. `.claude/skills/lint-baseline.json` records the pre-rewrite violations;
+references, and no path that belongs to one machine (a home directory, a clone or venv
+location, or a vendor default with nothing beside it naming how it is found — the rule is
+`MACHINE`, and fenced code does not exempt it). `.claude/skills/lint-baseline.json` records
+the pre-rewrite violations;
 `--check-baseline .claude/skills/lint-baseline.json` fails only on new ones, and the baseline
 is re-recorded when a skill is finished. `CLAUDE.md` is outside the linter's default path
 set; run `python scripts/lint_skills.py CLAUDE.md` after editing it.

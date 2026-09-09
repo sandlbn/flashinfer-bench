@@ -164,8 +164,9 @@ grep -A2 "Kernel Properties" prof.txt      # look for: Spill Memory Per Thread
 Nonzero spill: apply **either** `FIB_SYCL_LARGE_GRF=1` **or** a smaller tile, measure both,
 never both at once — large GRF halves the threads resident per EU.
 
-**Triton — confirm the autotuner ran.** Clear `~/.triton/cache` when in doubt, and check
-that the chosen config differs between a small and a large workload.
+**Triton — confirm the autotuner ran.** Clear Triton's cache
+(`${TRITON_CACHE_DIR:-$HOME/.triton/cache}`) when in doubt, and check that the chosen
+config differs between a small and a large workload.
 
 ## Step 5b: Search, do not settle for the first draft
 

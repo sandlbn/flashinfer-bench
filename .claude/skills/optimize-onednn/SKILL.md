@@ -112,16 +112,16 @@ Ship the fix as a Solution gated on `x.shape[0]`, with the weight transposed onc
 cached — never as a blanket load-time transpose. Load-time weight transforms belong in
 `flashinfer_bench/integration/weight_layout.py`.
 
-**Row pitch, not only layout tag.** The same `ba` weight, same implementation, streams at
-two thirds of the bandwidth of its neighbours when its row pitch in bytes is a multiple of
+**Row pitch, not only layout tag.** The same `ba` weight, same implementation, streams
+slower than its neighbours when its row pitch in bytes is a multiple of
 the device's memory-channel period (`channel_period_bytes()`, calibrated per part by
 `flashinfer_bench.device.calibration` from a sweep of pitches under a streaming read, and
 `None` where the sweep resolved none — the transform then stands down). It shows only when the weight streams from device
 memory — a single cache-resident weight in a tight loop hides it entirely, so measure with
 a rotation pool larger than `caps.l2_bytes`. `pad_rows_off_channel_period()` moves the
 pitch by one cache line, bit-identically, and oneDNN takes the strided descriptor (a
-`ba` weight tag that carries the pitch in `ONEDNN_VERBOSE`) with no reorder. The pad is not free — a weight that did not
-camp, and a taller one that did, both measured slower with it — so the vLLM hook
+`ba` weight tag that carries the pitch in `ONEDNN_VERBOSE`) with no reorder. The pad is not free — it can lose on a weight
+that does not camp, and on one that does at another height — so the vLLM hook
 (`flashinfer_bench/integration/vllm/weight_layout.py`, `FIB_VLLM_PAD_WEIGHT_ROWS=1`)
 keeps a pad only where a load-time streaming A/B of that shape measures a win. The period
 itself comes from calibration (`scripts/calibrate_part.py` prints it); to cross-check one
@@ -192,7 +192,7 @@ build a specific release into its own prefix:
 ```bash
 python scripts/build_onednn.py --list
 python scripts/build_onednn.py --version <tag>
-export FIB_ONEDNN_DIR=$HOME/.cache/flashinfer_bench/onednn/<tag>
+export FIB_ONEDNN_DIR=<prefix>    # the script prints this line with the prefix it built into
 ```
 
 ## Decide: workaround, patch, or upstream

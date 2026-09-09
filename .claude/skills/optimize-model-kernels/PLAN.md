@@ -17,13 +17,13 @@ command that produces it on this box, for this model, under this stack.
 | Item | Rule |
 | --- | --- |
 | Dev interpreter | `source .venv/bin/activate` — `flashinfer_bench`, `scripts/*.py` that do not import vLLM |
-| Serving interpreter | `source /home/sand/Projects/vllm-xpu-venv/bin/activate` — anything importing `vllm` or `vllm_xpu_kernels`: discovery, resolution, serving A/B, provider builds |
+| Serving interpreter | the venv whose `python -c "import vllm"` succeeds — found as `CLAUDE.md` "Python Environments" says, never a recorded path; activate it for anything importing `vllm` or `vllm_xpu_kernels`: discovery, resolution, serving A/B, provider builds |
 | Never | `uv run`, `uv pip`, or `pip` resolving dependencies in either venv: both replace torch-xpu with CUDA torch. Every install below is `--no-deps --no-index` and requires the owner's approval first |
 | GPU | One benchmark at a time. Before any timed stage: `fuser -v /dev/dri/renderD* 2>&1` must list only your process; `powerprofilesctl get` must read `performance` |
 | Installation shape | Never assumed. §2.1 detects, per component, whether it is an editable install backed by a checkout or a wheel with no source, and whether it carries compiled extensions; the patch mechanism (§7.1) follows from that detection |
 | Provenance | Every stage and every A/B arm records the revision of the stack and of the provider (§2.2). Arms whose stack provenance differs are refused as non-comparable (§10) |
-| unitrace | `/home/sand/Projects/pti-gpu/tools/unitrace/build/unitrace` — not on `PATH`; export it in every shell that profiles |
-| VTune | Not installed. §6.4 is optional and gated on an install the owner must authorise |
+| unitrace | resolved by `find_unitrace()` (`flashinfer_bench/agents/unitrace.py`): `FIB_UNITRACE`, then `unitrace` on `PATH`, then a pti-gpu build under `tmp/`. A shell that profiles by hand puts the directory it resolves on `PATH` (§4.2) |
+| VTune | resolved by `find_vtune()` (`flashinfer_bench/agents/vtune.py`): `FIB_VTUNE`, then `PATH`, then the oneAPI default prefix; `python -m flashinfer_bench.agents.vtune --check` says whether it collects. §6.4 is optional; an install is the owner's |
 | Artefacts | `tools/kernel-harness/auto/` (discovery), `tools/kernel-harness/pulled/<op>/` (bundles), `tmp/kernel-trials/<series>.json` (trial trees), `tmp/unitrace/`, `tmp/provider-builds/<id>/` (overlays), `tmp/serving-win/`, `tmp/provenance/<run>.json` |
 
 ## 1. The stages
@@ -51,7 +51,7 @@ Run in the serving interpreter unless marked.
 | Stack | `python -c "import vllm, vllm_xpu_kernels._C as m; print(vllm.__file__, m.__file__)"` | both import; paths feed §2.1 | wrong interpreter |
 | Compiler (dev) | `python -c "from flashinfer_bench.compile.builders import SyclBuilder; print(SyclBuilder.is_available())"` | `True` | `source /opt/intel/oneapi/setvars.sh` or set `FIB_SYCL_COMPILER` |
 | Calibration (dev) | `python scripts/calibrate_part.py` | dispatch cost, timing floor, bandwidth printed | `None` for dispatch: dataset or provider missing; the §4 bound for `apply()` is then unavailable, not zero |
-| unitrace | `export PATH=/home/sand/Projects/pti-gpu/tools/unitrace/build:$PATH; unitrace --version` | a version | path wrong; rebuild per `flashinfer_bench/agents/unitrace.py` docstring (owner approval) |
+| unitrace | `python -c "from flashinfer_bench.agents.unitrace import find_unitrace; print(find_unitrace())"` | a path | `None`: set `FIB_UNITRACE`, or build per the `flashinfer_bench/agents/unitrace.py` docstring (owner approval) |
 | Metrics (optional) | `unitrace --metric-list` | metric groups listed | needs `sysctl dev.xe.observation_paranoid=0` — a sudo action the owner performs, or skip `-q` |
 | GPU idle | `fuser -v /dev/dri/renderD*` | nothing foreign | another agent is on the GPU; do not time anything |
 | Power | `powerprofilesctl get` | `performance` | set it; numbers taken otherwise are discarded |
@@ -73,14 +73,13 @@ Mechanism selection, read from the answers:
 
 | Shape detected | Patch mechanism | Rebuild | Revert |
 | --- | --- | --- | --- |
-| editable checkout, pure Python | edit in place, or `git switch <branch>` in `<root>` | none; next process picks it up (clear `~/.triton/cache` for Triton) | `git -C <root> checkout -- <file>` / `git switch <original>` |
+| editable checkout, pure Python | edit in place, or `git switch <branch>` in `<root>` | none; next process picks it up (clear Triton's cache, `${TRITON_CACHE_DIR:-$HOME/.triton/cache}`) | `git -C <root> checkout -- <file>` / `git switch <original>` |
 | editable checkout, compiled | edit in place | `python setup.py build_ext --inplace` in `<root>` (same subshell rules as §7.2) | `git checkout` + rebuild |
 | wheel, source clone present | edit the clone | §7.2 overlay build, `PYTHONPATH` per process | drop the `PYTHONPATH`; §9 for an installed one |
 | wheel, no source | none until cloned | — | — |
 
-Record the shape table in the provenance record (§2.2). On this box today the detection
-returns "editable checkout, pure Python" for the stack and "wheel, source clone present"
-for the provider; a future box may return the reverse, and the plan is unchanged.
+Record the shape table in the provenance record (§2.2). The plan is the same text whichever
+shape each component reports.
 
 ### 2.2 Record provenance — every stage, every arm
 
@@ -178,7 +177,7 @@ Per op, on its verified harness. The script under unitrace must end with a sync 
 hooks, or the report contains only a summary:
 
 ```bash
-export PATH=/home/sand/Projects/pti-gpu/tools/unitrace/build:$PATH
+export PATH="$(dirname "$(python -c 'from flashinfer_bench.agents.unitrace import find_unitrace; print(find_unitrace())')"):$PATH"
 unitrace -d -v -o tmp/unitrace/<op>.txt python - <<'PY'
 import importlib.util, torch
 spec = importlib.util.spec_from_file_location("h", "tools/kernel-harness/pulled/<op>/harness.py")
@@ -205,8 +204,9 @@ Whole-model run (optional, for cross-checking `device_time_by_kernel`): the same
 around a short `LLM.generate` with `VLLM_ENABLE_V1_MULTIPROCESSING=0` and the hooked sync
 at the end. Kernel names from this run map each `device_time_by_kernel` row to a 4.1 class.
 
-Hardware metrics (`-q`, `--stall-sampling`) need the sysctl from §2 and, on this part, may
-list no usable metric group. If `--metric-list` is empty, that is the hole §6.4 describes.
+Hardware metrics (`-q`, `--stall-sampling`) need the sysctl from §2; `unitrace --metric-list`
+says whether the part exposes a usable metric group. If it lists none, that is the hole
+§6.4 describes.
 
 Gate: every op carrying share has a class, and the unitrace kernel name for each harness
 matches the class. Disagreement means the harness is not calling what the model called.
@@ -233,10 +233,10 @@ worth         = ceiling_us * calls / device_time_total_us
 Rules:
 
 - `ceiling_us <= 0` ⇒ unroutable **for that mechanism**. Record it with the arithmetic and
-  either change mechanism or drop the row. Elementwise work is routinely unroutable through
-  `apply()` and routable as a source patch or a fusion.
+  either change mechanism or drop the row; a row unroutable through `apply()` may be
+  routable as a source patch or a fusion, which pay no `mechanism_us`.
 - `cal is None` or `cal.dispatch_us is None` ⇒ the `apply()` mechanism is unavailable, not free.
-- Rank by `worth`, not by share. The largest share is often the least movable.
+- Rank by `worth`, not by share: share says nothing about the ceiling.
 - Fusion rows come from `python scripts/fusion_candidates.py --report tools/kernel-harness/auto/discovered.json`;
   their `worth` is the consumer's share (a launch and a round trip removed), not a ratio.
 - A GEMM row's ceiling is the call-level slack (`/optimize-onednn` Steps 1–3 on its shape),
@@ -287,7 +287,7 @@ tile or set the large-GRF option, measure each alone, never both at once.
 | Class | Trial file contains | Compiled by |
 | --- | --- | --- |
 | provider kernel | the bundled SYCL source, edited, wrapped with a TVM-FFI entry | `tools/kernel-harness/sycl_harness.py::build` |
-| Triton | the kernel function copied from its `file:line`, edited | Triton JIT; clear `~/.triton/cache` when a change appears not to take |
+| Triton | the kernel function copied from its `file:line`, edited | Triton JIT; clear `${TRITON_CACHE_DIR:-$HOME/.triton/cache}` when a change appears not to take |
 | oneDNN | the same GEMM with a different layout / post-op / fpmath, as a SYCL+oneDNN trial or a Python call change | `build(..., dependencies=["onednn"])` or plain Python |
 | fusion | the Xe-Fuse or post-op kernel for the edge | `xe-fuse.md` |
 
@@ -309,18 +309,19 @@ row is closed as "call path only" and no patch is made.
 
 ### 6.4 VTune — optional, install gated on the owner
 
-Not installed on this box. Everything above runs without it. It shortens the *Reason* step
+Optional: `python -m flashinfer_bench.agents.vtune --check` says whether it is present and
+collects. Everything above runs without it. It shortens the *Reason* step
 when unitrace's Kernel Properties say a kernel is slow but not where:
 
 | Question | unitrace | VTune (`-collect gpu-hotspots`) |
 | --- | --- | --- |
 | Is it spilling, and how much | yes (`Spill Memory Per Thread`) | yes, and **which instructions** spill and fill (`-knob profiling-mode=source-analysis`) |
-| Where do memory stalls come from | no on this part unless `--stall-sampling` is supported | per-instruction stall attribution: global vs SLM vs L3 miss, basic-block latency |
+| Where do memory stalls come from | only where `--metric-list` shows `--stall-sampling` support | per-instruction stall attribution: global vs SLM vs L3 miss, basic-block latency |
 | Occupancy achieved vs theoretical | no | yes (`-knob characterization-mode=overview`: EU active/stalled/idle, occupancy) |
 | Dynamic instruction mix (did the vector loads get emitted) | no | yes (`-knob characterization-mode=instruction-count`) |
 
-Prerequisites the owner must authorise: the oneAPI VTune component, its sampling driver or
-the perf/observation sysctls. Invocation once present:
+What `--check` reports missing — the oneAPI VTune component, its sampling driver, the
+perf/observation sysctls — is the owner's to install or set. Invocation:
 
 ```bash
 vtune -collect gpu-hotspots -knob characterization-mode=overview -r tmp/vtune/<op> -- python <runner>
@@ -351,7 +352,7 @@ component says how a change reaches a running process.
 | Class | Component | Edit | Then, per detected shape (§2.1) |
 | --- | --- | --- | --- |
 | provider kernel (SYCL) | provider | its `csrc/...` in the checkout or the clone | compiled: editable checkout → `build_ext --inplace`; wheel → §7.2 overlay |
-| Triton | stack | the `file:line` discovery recorded | pure Python → nothing to build; `rm -rf ~/.triton/cache`; next process JITs the edit |
+| Triton | stack | the `file:line` discovery recorded | pure Python → nothing to build; `rm -rf "${TRITON_CACHE_DIR:-$HOME/.triton/cache}"`; next process JITs the edit |
 | Python-registered op / provider call site | stack | the Python source | as above |
 | oneDNN call | stack | the call site, or a load-time weight transform (`flashinfer_bench/integration/weight_layout.py` pattern) | as above |
 | oneDNN catalog (Fix 5) | oneDNN | `tmp/oneDNN/.../kernel.db` via `scripts/build_onednn.py` | own prefix under `FIB_ONEDNN_DIR` — **note §12.2** |
@@ -394,7 +395,7 @@ Serving interpreter. The compiler comes from oneAPI; keep it in a subshell so `s
 does not leak into the venv's shell.
 
 ```bash
-( source /opt/intel/oneapi/setvars.sh >/dev/null
+( source "${ONEAPI_ROOT:-/opt/intel/oneapi}/setvars.sh" >/dev/null
   export MAX_JOBS=<n>                                   # see below
   export VLLM_XPU_AOT_DEVICES=<caps.sycl_target> VLLM_XPU_XE2_AOT_DEVICES=<caps.sycl_target>
   cd tmp/vllm-xpu-kernels && python setup.py bdist_wheel )
@@ -406,9 +407,10 @@ python -m zipfile -e tmp/vllm-xpu-kernels/dist/<wheel>.whl tmp/provider-builds/<
   build directory under the clone is reused, so later builds recompile only changed TUs.
 - AOT list: restrict to this part's target from the capability record; the stock wheel
   compiles for several parts and that time buys nothing here.
-- `setuptools`, `wheel`, `cmake`, `ninja` are already in the venv; `build` and `pip` are
-  not. `bdist_wheel` needs neither. The venv's `setuptools` is newer than the project's
-  build pin (§12.9); a failure that names it is that mismatch.
+- `bdist_wheel` needs `setuptools`, `wheel`, `cmake` and `ninja` in the venv and neither
+  `build` nor `pip`; `python -c "import setuptools, wheel, cmake, ninja"` confirms. A
+  failure that names `setuptools` is a version outside the project's build pin (§12.9):
+  compare `python -c "import setuptools; print(setuptools.__version__)"` against the pin.
 - No install happens. The unpacked wheel is an **overlay** selected per process with
   `PYTHONPATH=tmp/provider-builds/<id>`, which shadows site-packages.
 
@@ -419,7 +421,7 @@ Run each in the arm being measured (same env, same `PYTHONPATH`):
 | Proof | Command | Stock wheel says | Rebuilt overlay says |
 | --- | --- | --- | --- |
 | loaded `.so` | `python -c "import vllm_xpu_kernels._C as m; print(m.__file__)"` | `.../site-packages/vllm_xpu_kernels/_C.abi3.so` | `tmp/provider-builds/<id>/vllm_xpu_kernels/_C.abi3.so` |
-| registration | `python -c "import torch, vllm_xpu_kernels._C; print(torch._C._dispatch_dump('_C::<op>'))"` | `registered at /workspace/vllm_xpu_kernel/csrc/torch_bindings.cpp` (the CI path) | `registered at <this clone>/csrc/torch_bindings.cpp` |
+| registration | `python -c "import torch, vllm_xpu_kernels._C; print(torch._C._dispatch_dump('_C::<op>'))"` | `registered at <the wheel's build root>/csrc/torch_bindings.cpp` — a directory that does not exist on this box | `registered at <this clone>/csrc/torch_bindings.cpp` |
 | kernel identity | unitrace `-d` kernel name | stock functor name | rename the functor in the patch (suffix) and the name in the Device Timing table is the proof |
 | inside the vLLM worker | `VLLM_ENABLE_V1_MULTIPROCESSING=0` for the proof run, or `grep _C.abi3.so /proc/<worker pid>/maps` | site-packages path | overlay path |
 | pure-Python edit (stack checkout) | `python -c "import vllm, subprocess; print(vllm.__file__); print(subprocess.run(['git','-C','<root>','rev-parse','HEAD'],capture_output=True,text=True).stdout)"` plus the dirty flag | original commit, clean | same commit, dirty, and the `git diff` equals `patch.diff` |
@@ -448,11 +450,12 @@ Gate: patched beats unpatched outside the run-to-run spread, and the patched-vs-
 gain is consistent with the §6.3 kernel contribution. A gain that appears only against the
 stock wheel and not against the unpatched rebuild is drift, and is reported as such.
 
-Failure modes: a build that succeeds but the registration still says `/workspace/…` means
-`PYTHONPATH` did not reach the process (vLLM worker spawned without it, or the overlay
-directory is the wheel file rather than its unpacked contents). `ImportError` on `_C` with a
-message about `libsycl` means the oneAPI runtime is not on the loader path for that process;
-the venv carries `intel_sycl_rt` — check the interpreter, not the build.
+Failure modes: a build that succeeds but the registration still names the wheel's build
+root means `PYTHONPATH` did not reach the process (vLLM worker spawned without it, or the
+overlay directory is the wheel file rather than its unpacked contents). `ImportError` on
+`_C` with a message about `libsycl` means the oneAPI runtime is not on the loader path for
+that process; confirm `intel_sycl_rt` imports in that interpreter before suspecting the
+build.
 
 ## 8. Stage 6 — Serving A/B
 
@@ -487,9 +490,9 @@ Promotion is an install; the owner approves it explicitly, per build.
 
 ```bash
 # snapshot first, once
-SP=/home/sand/Projects/vllm-xpu-venv/lib/python3.12/site-packages
+SP=$(python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")   # the active serving venv
 tar -C $SP -czf tmp/provider-builds/stock-wheel.tgz vllm_xpu_kernels vllm_xpu_kernels-*.dist-info
-# pip is absent from this venv; bootstrapping it is itself an install the owner approves
+# if `python -m pip` reports no module named pip, bootstrapping it is itself an install the owner approves
 python -m ensurepip
 python -m pip install --no-deps --no-index --force-reinstall tmp/vllm-xpu-kernels/dist/<wheel>.whl
 ```
@@ -543,21 +546,21 @@ next `/clone-repos`.
 ## 12. Gaps and conflicts with the owner's stated order — for the owner to decide
 
 1. **"Patch in place" depends on the installation shape, which differs per component and
-   per box.** Detected here: the stack is an editable, pure-Python checkout (edit or branch
-   switch, no build); the provider is a wheel with a source clone at another revision
-   (overlay build, §7.2, or an owner-approved install, §9). The plan detects the shape
-   (§2.1) rather than assuming either layout, so a box with the provider editable and the
-   stack pinned follows the same text.
-2. **The dominant GEMM is unreachable by the provider patch.** `F.linear` runs the oneDNN
-   bundled inside torch, not the provider and not `FIB_ONEDNN_DIR`. Call-level fixes go
-   into vLLM's Python or a load-time weight transform. A rebuilt oneDNN (Fix 5) affects only
-   SYCL solutions unless torch's copy is shadowed on the loader path — an experiment the
-   owner should sanction separately, not a step here.
+   per box.** An editable, pure-Python checkout is patched by an edit or a branch switch
+   with no build; a wheel with a source clone needs an overlay build (§7.2) or an
+   owner-approved install (§9). The plan detects the shape (§2.1) rather than assuming
+   either layout, so a box with the provider editable and the stack pinned follows the
+   same text.
+2. **A GEMM the stack runs through `F.linear` is unreachable by the provider patch.** It
+   runs the oneDNN bundled inside torch, not the provider and not `FIB_ONEDNN_DIR`.
+   Call-level fixes go into vLLM's Python or a load-time weight transform. A rebuilt
+   oneDNN (Fix 5) affects only SYCL solutions unless torch's copy is shadowed on the
+   loader path — an experiment the owner should sanction separately, not a step here.
 3. **unitrace's place.** The owner puts it at "find where they are". Existing machinery
-   takes share from torch.profiler because unitrace on this driver returned only a summary;
-   the cause is the sync call. The plan uses unitrace for identity and Kernel Properties and
-   keeps share in `discovered.json`; both are run, and a summary-only report is a procedure
-   error, not evidence.
+   takes share from torch.profiler, which needs no hooked sync; unitrace reports only a
+   summary unless the script ends in one (§4.2). The plan uses unitrace for identity and
+   Kernel Properties and keeps share in `discovered.json`; both are run, and a
+   summary-only report is a procedure error, not evidence.
 4. **`kernel_trials.py` cannot A/B two builds of one `torch.ops` op in a process.** Hence the
    control port in-loop and unitrace per-process for the rebuild. Proposed: an `ab`
    subcommand that launches the two arms as subprocesses with per-arm env, interleaved, and
@@ -569,17 +572,19 @@ next `/clone-repos`.
    difference between arms, and a per-arm greedy token digest printed beside `FIB_RESULT`.
 7. **Doc mismatch.** `PROVENANCE.md` and `discover-model-kernels` Step 4 print
    `kernel_trials.py init --harness <path>`; the CLI is `init <name> <baseline.py>`.
-8. **VTune is absent** and requires an install plus sysctls the owner performs. §6.4 stays
-   optional; no stage depends on it.
-9. **Provider build pin.** The project pins `setuptools<80`; the venv has a newer one and no
-   `pip`/`build`. `setup.py bdist_wheel` is the no-install path; if it fails on the pin, the
+8. **VTune may be absent**; `python -m flashinfer_bench.agents.vtune --check` says so, and
+   the install and sysctls it names are the owner's. §6.4 stays optional; no stage depends
+   on it.
+9. **Provider build pin.** The project pins `setuptools<80`; the venv's version may fall
+   outside it, and a uv venv may carry neither `pip` nor `build`. `setup.py bdist_wheel` is
+   the no-install path; if it fails on the pin, the
    fix is a `--no-deps --no-index` install of a pinned setuptools — owner approval again.
-10. **Fusion is not per-kernel.** The owner's step 3 is per kernel; the highest-ceiling rows
-    on a dense transformer are edges (GEMM → elementwise), which replace *two* launches and
-    pay no substitution. Stage 3 admits them as rows; the loop form is `xe-fuse.md`.
-11. **The clone has no tags.** `setuptools_scm` will stamp a dev version on the rebuilt
-    wheel; do not use the version string as identity — use the `.so` path and the
-    registration path (§7.3).
+10. **Fusion is not per-kernel.** The owner's step 3 is per kernel; an edge (GEMM →
+    elementwise) is also a candidate — it replaces *two* launches and pays no substitution —
+    and Stage 3 admits it as a row priced by the same arithmetic. The loop form is `xe-fuse.md`.
+11. **A version string is not identity.** `setuptools_scm` stamps whatever the clone's tags
+    allow (a dev version on an untagged clone); use the `.so` path and the registration
+    path (§7.3).
 
 ## Sources
 

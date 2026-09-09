@@ -75,14 +75,14 @@ Two questions get asked, and neither consults a table:
 | **ATen kernel inside PyTorch** | a device key registered in PyTorch's own tree | no local source to edit; measure, or report upstream |
 | **decomposition** | only a composite key, and oneDNN logged nothing | optimize what it decomposes to |
 
-The rows that surprise people are the first and the last. The largest consumer of device
-time is routinely an op with no kernel of its own: `aten::linear` is a decomposition, and
-what actually runs is a oneDNN matmul. Hand-writing a replacement for it is wasted work,
+The first and last rows are the ones to read twice. An op with no kernel of its own can
+carry most of the device time: `aten::linear` is a decomposition, and what actually runs is
+a oneDNN matmul. A replacement written for the composite would not be what the model calls,
 which is why the resolver runs the op instead of stopping at "composite".
 
 A Python-registered op — attention, in most serving stacks — leaves the dispatcher dump
 empty. That reads like "does not run here" unless the resolver falls back to the namespace,
-so a stack's single hottest kernel is exactly the one a naive resolution drops.
+which it does: an empty dump is not evidence that the op is absent.
 
 If no checkout of the providing project is on the box, the tool says so rather than
 guessing. Clone it to `tmp/` to read the kernel, or optimize against the harness alone.
@@ -113,12 +113,12 @@ provider's source into this repo is not intended.
 
 ## Step 2b: Ask what could be fused, not just what could be replaced
 
-Routing each op on its own reaches the same dead end every time on this hardware: the GEMM
-is already a tuned library, and each elementwise kernel is too small to repay what
-substituting it costs. Folding the elementwise work into the GEMM's *epilogue* escapes
-both — the operand is still in registers, so the saving is a launch and a round trip
-through memory, and the fused GEMM replaces the call the stack already makes, so no
-substitution is paid at all.
+Per-op routing prices each op alone against the substitution cost from
+`calibration.get()`; a GEMM that is already a library call and an elementwise kernel
+smaller than that cost both fail that bound. Folding the elementwise work into the GEMM's
+*epilogue* escapes both — the operand is still in registers, so the saving is a launch and
+a round trip through memory, and the fused GEMM replaces the call the stack already makes,
+so no substitution is paid at all.
 
 ```bash
 python scripts/fusion_candidates.py --report tools/kernel-harness/auto/discovered.json
@@ -166,10 +166,10 @@ nothing. See `../route-kernel-work/PLAN.md`.
 python scripts/kernel_trials.py init <series> tools/kernel-harness/pulled/<op>/harness.py
 ```
 
-The bundle's `source/` is the starting point, not a reference to admire. The fastest first
-move is usually a constant in the existing kernel that was chosen for a different part —
+The bundle's `source/` is what the model runs, not a reference to admire. Its constants —
 a required sub-group size, a block size sized to another vendor's warp, a vectorization
-width — rather than a rewrite. Such a constant being *legal* on this device is not evidence
+width — are the knobs that exist, and any of them may have been chosen for a different
+part. Such a constant being *legal* on this device is not evidence
 it is *right*: a part can support several sub-group sizes with one of them native. Query
 the device (`torch.xpu.get_device_properties(0).sub_group_sizes`), then settle it by
 measuring both in the trial loop — reading the source tells you which knobs exist, never

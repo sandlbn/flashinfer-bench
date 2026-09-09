@@ -15,7 +15,8 @@ Try oneDNN post-ops first (`/optimize-onednn`). Reach for Xe-Fuse only when **bo
    packed qkv — is out of reach.
 2. You have an AOT `sycl_target` and are willing to search tile shapes.
 
-Its GEMM runs at a deficit against oneDNN; the fusion has to save more than that deficit.
+Measure its plain GEMM against oneDNN's at your shape first; the fusion has to save more
+than any difference.
 
 ## Setup
 

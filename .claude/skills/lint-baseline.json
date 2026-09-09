@@ -42,16 +42,6 @@
    "text": "is not the goal; the wins are in how it is called (`/optimize-onednn`)."
   },
   {
-   "path": ".claude/skills/clone-repos/SKILL.md",
-   "rule": "UVRUN",
-   "text": "`uv pip install` \u2014 `python -m pip` is not present, and `pip show` will report installed"
-  },
-  {
-   "path": ".claude/skills/clone-repos/SKILL.md",
-   "rule": "UVRUN",
-   "text": "| `python -m pip: No module named pip` | uv-managed venv | Use `uv pip install` |"
-  },
-  {
    "path": ".claude/skills/collect-workloads/SKILL.md",
    "rule": "EXPECT",
    "text": "| `--num-batches` | 2 | Inference rounds; the budget is usually hit in round 1 |"
@@ -69,32 +59,7 @@
   {
    "path": ".claude/skills/discover-model-kernels/SKILL.md",
    "rule": "EXPECT",
-   "text": "Routing each op on its own reaches the same dead end every time on this hardware: the GEMM"
-  },
-  {
-   "path": ".claude/skills/discover-model-kernels/SKILL.md",
-   "rule": "EXPECT",
-   "text": "The bundle's `source/` is the starting point, not a reference to admire. The fastest first"
-  },
-  {
-   "path": ".claude/skills/discover-model-kernels/SKILL.md",
-   "rule": "EXPECT",
-   "text": "is already a tuned library, and each elementwise kernel is too small to repay what"
-  },
-  {
-   "path": ".claude/skills/discover-model-kernels/SKILL.md",
-   "rule": "EXPECT",
-   "text": "move is usually a constant in the existing kernel that was chosen for a different part \u2014"
-  },
-  {
-   "path": ".claude/skills/discover-model-kernels/SKILL.md",
-   "rule": "EXPECT",
    "text": "| **oneDNN** | the op ran and oneDNN logged a primitive | `/optimize-onednn` \u2014 the win is in the call, not a replacement kernel |"
-  },
-  {
-   "path": ".claude/skills/discover-model-kernels/SKILL.md",
-   "rule": "ORDER",
-   "text": "The bundle's `source/` is the starting point, not a reference to admire. The fastest first"
   },
   {
    "path": ".claude/skills/discover-models/SKILL.md",
@@ -128,11 +93,6 @@
   },
   {
    "path": ".claude/skills/find-kernel-gaps/SKILL.md",
-   "rule": "EXPECT",
-   "text": "building. Most large gaps in eager model code are contractions written as"
-  },
-  {
-   "path": ".claude/skills/find-kernel-gaps/SKILL.md",
    "rule": "NAME",
    "text": "Worked example in the dataset: `mamba_ssu/ssd_bc_contraction_c256_h64_s128`, with"
   },
@@ -150,11 +110,6 @@
    "path": ".claude/skills/measure-serving-win/SKILL.md",
    "rule": "EXPECT",
    "text": "costs a fixed amount of Python per call; a miss is nearly free. Read both from"
-  },
-  {
-   "path": ".claude/skills/measure-serving-win/SKILL.md",
-   "rule": "EXPECT",
-   "text": "headroom for everything else is small by construction."
   },
   {
    "path": ".claude/skills/onboard-model-intel/SKILL.md",
@@ -339,7 +294,7 @@
   {
    "path": ".claude/skills/optimize-model-kernels/PLAN.md",
    "rule": "ENUM",
-   "text": "into vLLM's Python or a load-time weight transform. A rebuilt oneDNN (Fix 5) affects only"
+   "text": "oneDNN (Fix 5) affects only SYCL solutions unless torch's copy is shadowed on the"
   },
   {
    "path": ".claude/skills/optimize-model-kernels/PLAN.md",
@@ -452,16 +407,6 @@
    "text": "(`optimize-intel-kernels` Step 4a). Does layout matter for these shapes? Time"
   },
   {
-   "path": ".claude/skills/optimize-onednn/references/quantized-matmul.md",
-   "rule": "NAME",
-   "text": "# Quantized matmul: what oneDNN supports on Battlemage"
-  },
-  {
-   "path": ".claude/skills/optimize-onednn/references/quantized-matmul.md",
-   "rule": "NAME",
-   "text": "Established by probing the installed library (3.11.x and 3.13.x behave identically). Read"
-  },
-  {
    "path": ".claude/skills/optimize-onednn/references/strategy-catalog.md",
    "rule": "ENUM",
    "text": "# Fix 5: The tile/strategy the selector chose is wrong for your shape"
@@ -470,11 +415,6 @@
    "path": ".claude/skills/optimize-onednn/references/strategy-catalog.md",
    "rule": "ENUM",
    "text": "Fixes 1-4 change how you *call* oneDNN. This changes what kernel it *generates* \u2014 for your"
-  },
-  {
-   "path": ".claude/skills/optimize-ssm-scan/SKILL.md",
-   "rule": "EXPECT",
-   "text": "On a hybrid model the scan, not the GEMM, is usually where the time goes."
   },
   {
    "path": ".claude/skills/optimize-ssm-scan/SKILL.md",
@@ -550,26 +490,6 @@
    "path": ".claude/skills/setup-intel-env/SKILL.md",
    "rule": "NAME",
    "text": "host. On an integrated Xe3.0 part use `vllm-xpu` plus in-tree kernels"
-  },
-  {
-   "path": ".claude/skills/setup-intel-env/SKILL.md",
-   "rule": "UVRUN",
-   "text": "uv pip install --force-reinstall --index-url https://download.pytorch.org/whl/xpu \\"
-  },
-  {
-   "path": ".claude/skills/setup-intel-env/SKILL.md",
-   "rule": "UVRUN",
-   "text": "uv pip install --index-url https://download.pytorch.org/whl/xpu \"torch==<ver>+xpu\""
-  },
-  {
-   "path": ".claude/skills/setup-intel-env/SKILL.md",
-   "rule": "UVRUN",
-   "text": "uv pip install torch --index-url https://download.pytorch.org/whl/xpu"
-  },
-  {
-   "path": ".claude/skills/setup-intel-env/SKILL.md",
-   "rule": "UVRUN",
-   "text": "uv pip uninstall triton # removes the shared triton/_C/ ..."
   },
   {
    "path": ".claude/skills/submit-onboarding-prs/SKILL.md",

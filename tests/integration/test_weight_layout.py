@@ -271,3 +271,27 @@ class TestPadRowsOffChannelPeriod:
             p = wl.pad_rows_off_channel_period(w, period)
             assert p is not None
             assert torch.equal(F.linear(x, w), F.linear(x, p))
+
+
+class TestPitchRule:
+    """The arithmetic the tensor test and the shape-only routing gate both call."""
+
+    def test_multiples_of_the_period_camp_and_nothing_else_does(self):
+        assert wl.pitch_camps_on_one_channel(PERIOD, PERIOD)
+        assert wl.pitch_camps_on_one_channel(3 * PERIOD, PERIOD)
+        assert not wl.pitch_camps_on_one_channel(PERIOD + 64, PERIOD)
+        assert not wl.pitch_camps_on_one_channel(PERIOD // 2, PERIOD)
+
+    def test_the_tensor_test_is_the_pitch_rule_on_the_row_pitch(self):
+        for k in (PERIOD // 2, PERIOD // 2 + 32, PERIOD):
+            w = torch.zeros(8, k, dtype=torch.bfloat16)
+            assert wl.camps_on_one_channel(w, PERIOD) is wl.pitch_camps_on_one_channel(
+                wl.row_pitch_bytes(w), PERIOD
+            )
+
+    def test_a_period_that_is_not_positive_is_refused(self):
+        with pytest.raises(ValueError):
+            wl.pitch_camps_on_one_channel(4096, 0)
+
+    def test_host_memory_has_no_streaming_pool(self):
+        assert wl.streaming_pool_bytes("cpu") is None

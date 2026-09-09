@@ -19,20 +19,21 @@ Usage:
     python sanitize_dumps.py \\
         --dump-dir ./workload_dumps_20260326_123456 \\
         --definitions gqa_paged_prefill_causal_h20_kv4_d128_ps64 \\
-        --flashinfer-trace-dir ~/flashinfer-trace \\
+        --flashinfer-trace-dir tmp/flashinfer-trace \\
         --replace
 
     # Skip const-axis check when collecting TP=1 dumps for a TP=2 definition:
     python sanitize_dumps.py \\
         --dump-dir ./workload_dumps_tp1 \\
         --definitions gqa_paged_prefill_causal_h20_kv4_d128_ps64 \\
-        --flashinfer-trace-dir ~/flashinfer-trace \\
+        --flashinfer-trace-dir tmp/flashinfer-trace \\
         --replace \\
         --skip-const-axis-check
 """
 
 import argparse
 import json
+import os
 import re
 import sys
 import uuid
@@ -831,8 +832,8 @@ def main():
     parser.add_argument("--op-type", help="Process all definitions of this op_type")
     parser.add_argument(
         "--flashinfer-trace-dir",
-        default="~/flashinfer-trace",
-        help="Path to flashinfer-trace repo (default: ~/flashinfer-trace)",
+        default=os.environ.get("FIB_DATASET_PATH", "tmp/flashinfer-trace"),
+        help="flashinfer-trace clone (default: $FIB_DATASET_PATH, else tmp/flashinfer-trace)",
     )
     parser.add_argument(
         "--replace",
@@ -913,7 +914,7 @@ def main():
     )
 
     total = sum(len(v) for v in results.values())
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"Summary: {total} workloads across {len(results)} definitions")
     for def_name, entries in results.items():
         print(f"  {def_name}: {len(entries)} workloads")

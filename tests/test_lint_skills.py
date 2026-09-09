@@ -514,6 +514,115 @@ class TestIllustrationHeader:
 
 
 # ---------------------------------------------------------------------------------------
+# MACHINE
+# ---------------------------------------------------------------------------------------
+
+
+class TestMachine:
+    """A path that belongs to one machine, in the forms the owner found in the tree."""
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            # the three instances the owner cited
+            "| Serving interpreter | `source /home/sand/Projects/vllm-xpu-venv/bin/activate` — anything importing `vllm` |",
+            "| unitrace | `/home/sand/Projects/pti-gpu/tools/unitrace/build/unitrace` — not on `PATH`; export it |",
+            "| Environment | `source .venv/bin/activate` (dev) or `source /home/sand/Projects/vllm-xpu-venv/bin/activate` (serving) |",
+            # other homes, a clone location, a venv, a vendor path presented as the location
+            "SP=/Users/pat/venvs/serving/lib/python3.12/site-packages",
+            "the checkout at /root/pti-gpu/tools/unitrace",
+            "`registered at /workspace/vllm_xpu_kernel/csrc/torch_bindings.cpp` (the CI path)",
+            "point it at /opt/venvs/vllm-xpu/bin/python",
+            "VTune `gpu-hotspots` (installed at `/usr/bin/vtune`; preflight must confirm it collects)",
+            "| `onednn` | GEMM and post-ops | **system**, ships with oneAPI | `/opt/intel/oneapi/dnnl/latest` |",
+            "Clear `~/.triton/cache` when in doubt.",
+            "--flashinfer-trace-dir ~/flashinfer-trace",
+        ],
+    )
+    def test_catches_home_checkout_and_bare_vendor_paths(self, text):
+        assert "MACHINE" in rules_of(text + "\n")
+
+    def test_catches_inside_fenced_code_even_with_path_named(self):
+        text = (
+            "```bash\nexport PATH=/home/sand/Projects/pti-gpu/tools/unitrace/build:$PATH\n"
+            "unitrace -d -v -o tmp/unitrace/<op>.txt python - <<'PY'\n```\n"
+        )
+        assert lines_of(text, "MACHINE") == [2]
+
+    def test_home_path_is_not_excused_by_a_mechanism_or_an_illustration(self):
+        text = "Set `FIB_UNITRACE=/home/sand/Projects/pti-gpu/tools/unitrace/build/unitrace`.\n"
+        assert "MACHINE" in rules_of(text)
+        text = (
+            "Illustration (one instance): Arc B580 / oneDNN 3.13 / M=1 GEMM"
+            " — re-establish with: `python /home/sand/repro.py`\n"
+        )
+        assert "MACHINE" in rules_of(text)
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            # repository-relative paths and the repo's own clone directory
+            "`source .venv/bin/activate`; a pti-gpu build under `tmp/pti-gpu/tools/unitrace/build/unitrace`",
+            "python scripts/lint_skills.py --check-baseline .claude/skills/lint-baseline.json",
+            # device nodes and placeholders
+            "`fuser -v /dev/dri/renderD*` must list only your process",
+            "# <vllm-venv>/lib/python3.X/site-packages/sitecustomize.py",
+            'export PATH="<your pti-gpu checkout>/tools/unitrace/build:$PATH"',
+            # a vendor default beside the mechanism that discovers it
+            "| `cannot find -ldnnl` | `export FIB_ONEDNN_DIR=/opt/intel/oneapi/dnnl/latest` |",
+            'source "${ONEAPI_ROOT:-/opt/intel/oneapi}/setvars.sh"',
+            '`rm -rf "${TRITON_CACHE_DIR:-$HOME/.triton/cache}"`',
+            "then `vtune` on PATH, then the oneAPI default `/opt/intel/oneapi/vtune/latest/bin64/vtune`",
+            "the builder searches `FIB_SYCL_COMPILER`, then `/opt/intel/oneapi` and `/usr/local/oneapi`",
+            "#!/usr/bin/env python3",
+            # a discovered value, not a recorded one
+            "SP=$(python -c \"import sysconfig; print(sysconfig.get_paths()['purelib'])\")",
+        ],
+    )
+    def test_keeps_relative_paths_placeholders_and_defaults_with_a_mechanism(self, text):
+        assert "MACHINE" not in rules_of(text + "\n")
+
+    def test_vendor_default_in_a_fence_reads_the_whole_fence_for_the_mechanism(self):
+        text = (
+            "```bash\nsource /opt/intel/oneapi/setvars.sh\n"
+            "# or point the builder straight at it:\n"
+            "export FIB_SYCL_COMPILER=/opt/intel/oneapi/compiler/latest/bin/icpx\n```\n"
+        )
+        assert "MACHINE" not in rules_of(text)
+        assert "MACHINE" in rules_of("```bash\nsource /opt/intel/oneapi/setvars.sh\n```\n")
+
+    def test_pragma_with_a_reason_exempts_a_line(self):
+        text = (
+            "<!-- lint-skills: allow MACHINE the string a stock wheel prints -->\n"
+            "`registered at /workspace/vllm_xpu_kernel/csrc/torch_bindings.cpp`\n"
+        )
+        assert "MACHINE" not in rules_of(text)
+
+    def test_message_names_the_path_and_the_mechanism(self):
+        found = lint.lint_text(
+            "the serving venv is /home/sand/Projects/vllm-xpu-venv\n", Path("x"), "x"
+        )
+        assert len(found) == 1 and found[0].rule == "MACHINE"
+        assert "/home/sand/Projects/vllm-xpu-venv" in found[0].message
+        assert "PATH" in found[0].message
+
+    def test_runs_on_files_the_default_exclusion_skips(self, tmp_path):
+        skills = tmp_path / ".claude" / "skills"
+        skills.mkdir(parents=True)
+        plan = skills / "SKILLS-REWRITE-PLAN.md"
+        plan.write_text("Fix 1 is layout.\n\nthe venv is /home/sand/Projects/vllm-xpu-venv\n")
+        found = lint.lint_paths([skills], repo_root=tmp_path, skills_root=skills)
+        assert [(v.rule, v.line) for v in found] == [("MACHINE", 3)]
+
+    def test_the_real_tree_and_claude_md_carry_no_machine_paths(self):
+        if not lint.SKILLS_ROOT.is_dir():
+            pytest.skip("no skills tree")
+        paths = [lint.SKILLS_ROOT, lint.REPO_ROOT / "CLAUDE.md"]
+        found = lint.lint_paths(paths, rules=["MACHINE"])
+        assert found == [], "\n".join(v.format() for v in found)
+
+
+# ---------------------------------------------------------------------------------------
 # Baseline, CLI and self-consistency
 # ---------------------------------------------------------------------------------------
 

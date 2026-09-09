@@ -1,6 +1,7 @@
 # Plan: rewrite the agent skills as measurement-driven procedures
 
-Status: plan only. No `SKILL.md` has been changed. The owner accepts or amends this first.
+Status: accepted by the owner. The rewrites proceed in the order of §8; `scripts/lint_skills.py`
+enforces §3.
 
 Every claim below cites `file:line` in the current tree. No measured value appears in this
 file; where a number is needed, the command that measures it is named.
@@ -65,7 +66,7 @@ Inputs, all from the same run, all named by the command that produces them:
 | `spill` | register spill per thread | unitrace Kernel Properties `Spill Memory Per Thread` |
 | `geom` | global/local sizes actually launched | unitrace `-v` |
 | `native` | whether the dtype runs natively | `caps.is_native_dtype()` |
-| `occupancy`, `stall mix`, `inst mix` | EU active/stalled/idle; where stalls come from; whether vector loads and DPAS were emitted | VTune `gpu-hotspots` (installed at `/usr/bin/vtune`; preflight must confirm it collects, §6 Stage 0) |
+| `occupancy`, `stall mix`, `inst mix` | EU active/stalled/idle; where stalls come from; whether vector loads and DPAS were emitted | VTune `gpu-hotspots` (resolved by `find_vtune()`: `FIB_VTUNE`, `PATH`, the oneAPI default; preflight must confirm it collects, §6 Stage 0) |
 
 Derived: `t_mem = bytes_min / bw`, `t_mem_pattern = bytes_min / bw_pattern`,
 `t_cmp = flops / peak`, `bound = max(t_mem, t_cmp, floor)`.
@@ -115,12 +116,12 @@ and the measurement; a change nobody wrote down is expected.
 | Illustration header | `Illustration (one instance): <part> / <library version> / <shape family> — re-establish with: <command>` |
 | Every number has a command | Any quantity the procedure needs is named by the command that measures it on this box today |
 | No performance expectations | No sentence tells the agent what it will find. A claim about performance appears only as a §2.1 comparison the agent performs, or inside an `Illustration` block. What may be stated without measurement is a **fact about how the system is built** (which code the stack already runs, what an API exposes, what a tool reports) — never what that code will cost |
-| Environment | `source .venv/bin/activate` (dev) or `source /home/sand/Projects/vllm-xpu-venv/bin/activate` (serving). Never `uv run`, `uv pip`, or `pip` with dependency resolution. No installs without the owner. Before any timed step: GPU idle (`fuser -v /dev/dri/renderD*`), `powerprofilesctl get` reads `performance` |
+| Environment | `source .venv/bin/activate` (dev); for serving, the venv whose `python -c "import vllm"` succeeds, found as `CLAUDE.md` "Python Environments" says — never a recorded path. Never `uv run`, `uv pip`, or `pip` with dependency resolution. No installs without the owner. Before any timed step: GPU idle (`fuser -v /dev/dri/renderD*`), `powerprofilesctl get` reads `performance` |
 | One benchmark | `scripts/kernel_trials.py benchmark` for kernels; `flashinfer-bench run` for solutions against a definition; `scripts/measure_serving_win.py` for serving. No ad-hoc timing scripts |
 | Cross-references | by skill name and section heading, never by step number (`f88dad6` already moved this way) |
 | Tools are queried | device facts from `get_accelerator(dev).capabilities(dev)`; provider coverage from `find_baselines`/`REGISTRY`; Xe-Fuse presets from `--list-presets`; oneDNN versions from `onednn_link_version()/onednn_runtime_version()` |
 | Length | `SKILL.md` carries the loop and the reading rules; manuals, hardware facts, and illustrations live in `references/` |
-| Lint | `scripts/lint_skills.py` (§7) rejects: `Fix \d`, `Step \d` cross-references, digits followed by `us|ms|%|GB/s|x` outside fenced code and outside `Illustration` blocks, and a blocklist of part/model names outside `Illustration` blocks |
+| Lint | `scripts/lint_skills.py` (§7) rejects: `Fix \d`, `Step \d` cross-references, digits followed by `us|ms|%|GB/s|x` outside fenced code and outside `Illustration` blocks, a blocklist of part/model names outside `Illustration` blocks, and any absolute path that belongs to one machine — a home directory, a clone or venv location, or a vendor default with nothing beside it naming how it is found (`MACHINE`; fenced code and illustrations do not exempt it) |
 
 ## 4. Every skill, one by one
 
@@ -138,9 +139,9 @@ in place; **P3** light edits or leave.
 | `discover-model-kernels` | 5 steps around three scripts | `:69-76` class→route table (mechanism table, acceptable; "Route" column names skills); `:116-121` "same dead end every time on this hardware"; `:166` wrong CLI (`init --harness`); `:170-176` "usually a constant" as first move; good: dispatcher-asking, edges, bound step | §5.6: stays; becomes Stages 1-3 of the pipeline skill by reference; the two verdicts deleted and re-expressed as facts about the mechanism and the bundle; CLI fixed | **P2** |
 | `wrap-kernel-for-tuning` | contract + three checks + loop rules | `:104-110` loop policy is sound but "plateau: change the algorithm" has no measured trigger; `:113-118` good (calibration); no reading rules | §5.7: keeps the harness contract and the three checks; loop text moves to the pipeline skill; plateau gets a measured definition | **P2** |
 | `measure-serving-win` | 6 steps; sitecustomize; counters; failure table | `:117-118` family verdicts ("GEMM, attention … not decode-sized norms") as a rule; `:131-133` "headroom is small by construction"; `:56-57` tolerance literals in the snippet; otherwise measurement-driven and the gate logic (`:86-103`, `:136-154`) is right | §5.8: sharpen; verdicts become the arithmetic they summarise plus an illustration; tolerance derived from dtype spacing; adopt the plain-arm and digest gaps (§7) | **P2** |
-| `setup-intel-env` | stepwise checks with expected output | `:27`, `:45-48` `uv pip install` — violates the environment rule; `:19-20` IP→part literals (fact table; move to `architectures.md`); no VTune step though `/usr/bin/vtune` exists; unitrace path not discoverable | §5.9: environment rule fixed; VTune and unitrace preflight rows with expected output; installation rows become "ask the owner" | **P2** |
+| `setup-intel-env` | stepwise checks with expected output | `:27`, `:45-48` `uv pip install` — violates the environment rule; `:19-20` IP→part literals (fact table; move to `architectures.md`); no VTune step though `find_vtune()` may resolve one; unitrace path not discoverable | §5.9: environment rule fixed; VTune and unitrace preflight rows with expected output; installation rows become "ask the owner" | **P2** |
 | `clone-repos` | loop + optional Intel repos | `:110-112` `uv pip install`; `:96-97` "tuning oneDNN's own GEMM is not the goal" contradicts `strategy-catalog.md` | env rule fixed; contradiction removed; otherwise keep | **P3** |
-| `optimize-model-kernels/PLAN.md` (draft, not accepted) | 7 stages, provenance, patch, promote | `:19-20,25,490` box-specific paths; `:26,312` claims VTune absent (false: `vtune --version` prints 2026.0); `:269-283` the loop is one 5-row table with "first hypotheses come from constants" — no reading rules, no mechanism generators; `:222-231` bound uses bytes/bandwidth only, no compute arm; good: `:294-309` control port, `:509-525` mechanical gates, `:527-541` who-decides, `:543-583` gaps 4-7 | Replaced by §6. Stages 5 and 7 (patch, prove identity, promote) become `references/deploy-provider-patch.md` | **P0** (superseded) |
+| `optimize-model-kernels/PLAN.md` (draft, not accepted) | 7 stages, provenance, patch, promote | `:19-20,25,490` box-specific paths; `:26,312` asserts VTune absent — presence is a `find_vtune()` / `--check` result, not a plan fact; `:269-283` the loop is one 5-row table with "first hypotheses come from constants" — no reading rules, no mechanism generators; `:222-231` bound uses bytes/bandwidth only, no compute arm; good: `:294-309` control port, `:509-525` mechanical gates, `:527-541` who-decides, `:543-583` gaps 4-7 | Replaced by §6. Stages 5 and 7 (patch, prove identity, promote) become `references/deploy-provider-patch.md` | **P0** (superseded) |
 | `route-kernel-work/PLAN.md`, `RUN.md` (drafts) | bound arithmetic; forbidden-list; 7-stage run | `RUN.md:26-33` fixed attempt per class; `PLAN.md:29-40` forbidden table is exactly right and is adopted into §3 | Merged into §6 Stage 3; directory deleted | **P0** (merged) |
 | `onboard-model` (CUDA orchestrator) | thin orchestrator over per-phase skills | procedural; `:95` `pip install -e` acceptable on a CUDA box; no optimization content | unchanged except cross-reference spelling and the lint | **P3** |
 | `discover-models` | config read; naming; who-supplies tables | `:87-100` op_type→FlashInfer path lookup (drifts; replace with the grep already at `:106`); `:112-119` asks the registry (good) | light edit | **P3** |
@@ -563,7 +564,7 @@ Rules the log makes checkable:
 | derive sweep space from the device | `scripts/optimize_model_kernels_xpu.py:44-49` | `WORK_GROUP_SIZES`, `SUB_GROUP_SIZES` are literals; read `max_work_group_size` and `sub_group_sizes` |
 | fix `init --harness` | `scripts/pull_kernel_source.py:327`, `discover-model-kernels/SKILL.md:166` | wrong CLI |
 | `scripts/lint_skills.py` | new | enforces §3 mechanically after every rewrite |
-| `FIB_UNITRACE` env var or path discovery | `flashinfer_bench/agents/unitrace.py:61` | the binary is not on `PATH` on this box |
+| `FIB_UNITRACE` env var or path discovery | `flashinfer_bench/agents/unitrace.py:61` | a build need not be on `PATH`; the variable names it |
 
 ## 8. Order of work, and what is verifiable after each step
 
@@ -627,8 +628,8 @@ review them before step 4.
    deployment half is right.** Installation-shape detection, overlay builds, identity
    proofs and the three-arm rebuild control (draft `:59-104`, `:391-455`) are what make a
    provider patch a result instead of a guess. They move to a reference file rather than
-   being cut. Its false claim that VTune is absent should not survive: VTune is installed
-   and changes what the Reason step can see.
+   being cut. Its claim that VTune is absent should not survive: presence is a `--check`
+   result taken per box, and VTune changes what the Reason step can see.
 
 8. **Some current text is already the target shape** and should be kept verbatim as the
    model for the rest: `optimize-intel-kernels/SKILL.md:229-235`, `architectures.md:8-20`

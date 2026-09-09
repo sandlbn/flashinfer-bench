@@ -42,8 +42,8 @@ def _min_gain():
     cal = calibration.get()  # measures once, caches; None when it cannot
     gain = cal.dispatch_us if cal is not None else None
     if gain is None:
-        # Unknown is not zero. With no threshold the gate admits everything, and a run
-        # with the gate open lost 41% of throughput -- so refuse to enable apply() at
+        # Unknown is not zero. With no threshold the gate admits everything, including
+        # substitutions that cost more than they save -- so refuse to enable apply() at
         # all, and say why. FIB_APPLY_MIN_GAIN_US=0 turns the gate off deliberately.
         raise RuntimeError(
             "substitution cost could not be measured here (calibration.dispatch_us is "
@@ -151,8 +151,7 @@ that before reading the timing.
 - **Compare the kernel's runtime against what dispatch costs.** A successful substitution
   costs a fixed amount of Python per call; a miss is nearly free. Read both from
   `flashinfer_bench.device.calibration.get()`. A family is worth substituting only where
-  its kernel time is large against that cost — GEMM, attention, prefill-sized elementwise
-  work — not decode-sized norms and activations, whatever their per-kernel ratio.
+  its kernel time is large against that cost, whatever its per-kernel ratio.
 - **Mind the timing floor.** Device-event timing has a fixed cost (`timing_floor_us` in the
   calibration); below it per-kernel ratios are noise. Sanity-check a small-batch ratio
   against bytes moved divided by the calibration's bandwidth.
@@ -166,9 +165,10 @@ that before reading the timing.
 
 ## Step 5: Decide what the number means
 
-Report "worth +X% on this model" and follow the share to the next family. On Intel, dense
-GEMM is oneDNN whether or not we are involved, so when GEMM dominates the reachable
-headroom for everything else is small by construction.
+Report "worth +X% on this model" and follow the share to the next family. A family whose
+kernel is already the library the stack calls (a `primitive,exec` line under
+`ONEDNN_VERBOSE=1`) contributes share but no substitution headroom; the reachable headroom
+for the rest is what the profile leaves after subtracting it, computed per run.
 
 - **Gate deployment on the margin, not the ratio.** `ApplyConfig(min_gain_us=...)`
   (`FIB_APPLY_MIN_GAIN_US` in the `sitecustomize.py` above) indexes a shape only where the

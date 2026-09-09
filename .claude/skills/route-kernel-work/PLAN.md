@@ -1,16 +1,12 @@
 # Plan: the router
 
-Not a skill yet. This is the design for one, written after a full pipeline run whose
-outcome was decided before any kernel was written.
+Not a skill yet. This is the design for one.
 
 ## The problem this exists to fix
 
-We picked a fused-norm definition by hand, wrote a SYCL kernel that was genuinely about
-twice as fast as vLLM's own, passed every correctness gate, and measured a serving
-throughput **regression** on the model it came from.
-
-Nothing in that sequence was a mistake in execution. The kernel was good. The target was
-wrong, and it was knowable that it was wrong before the first line of SYCL:
+A kernel can be correct, pass every gate, beat the provider's kernel by a wide margin in
+its harness, and still **regress** serving throughput on the model it came from. Whether it
+can win at all through `apply()` is knowable before the first line of SYCL:
 
 ```
 saves   provider_us - ours_us            per call   <- both from the provider harness
@@ -19,9 +15,9 @@ net     saves - costs, times the share of calls that substitute, against the
         interception tax the overhead arm measures
 ```
 
-On that run `saves` was smaller than `costs`, so no kernel however fast could have won
-through `apply()`. The figures themselves live in the trial log and the serving report,
-not here: they are one part's, and were stale within a day.
+When `saves` is smaller than `costs`, no kernel however fast wins through `apply()`. The
+figures are one part's and one stack's; they live in the trial log and the serving report
+of the run that produced them, never here.
 
 A router is the component that computes those four lines *first*, from measurement, given
 only the constraints. Here the constraints are **a model and a serving stack** (vLLM).
@@ -32,7 +28,7 @@ The router may not contain:
 
 | Forbidden | Because | Comes from instead |
 | --- | --- | --- |
-| definition names, hidden sizes, head dims | ties the router to models we happened to try | Stage A observation |
+| definition names, hidden sizes, head dims | ties the router to a fixed model list | Stage A observation |
 | an op-family priority list ("norms first") | encodes yesterday's profile as tomorrow's policy | Stage B ranking |
 | dispatch cost, timing floor, bandwidth as literals | wrong on the next part, silently | `calibration.get()` |
 | a provider preference table | encodes a guess about coverage | Stage C capability probe |
@@ -69,23 +65,20 @@ net_share     = net_gain_us * calls / total_device_time
 ```
 
 `net_share <= 0` means **unroutable**: no kernel, however good, wins it. Drop it and say
-why. This is the check that would have cost ten minutes and saved the day above.
+why. This check costs minutes and precedes any kernel work.
 
 Two things it must get right:
 
 - **Bound per delivery mechanism, not once.** `cost_of` is `calibration.dispatch_us` for an
   `apply()` substitution and **zero** for a source rewrite, a provider swap, or tuning the
   kernel the stack already launches. A candidate can be unroutable through `apply()` and
-  routable through a rewrite. Collapsing these is how the pipeline concluded "elementwise is
-  hopeless on Intel" when what is hopeless is *substituting* elementwise.
+  routable through a rewrite; collapsing the two turns "substituting this op does not pay"
+  into "this op cannot be improved", which does not follow.
 - **`max(achievable, floor)`.** Below the timing floor a per-kernel ratio is noise, and a
   ratio measured there will motivate work that returns nothing.
 
-The general shape of the Intel answer falls out of this arithmetic rather than being
-asserted: where the profile shows GEMM dominant and already in oneDNN, `current ~
-achievable` and the ceiling is thin; where elementwise has ratio headroom, each call may
-still be smaller than a substitution costs. The router recomputes that per part and per
-model instead of us re-learning it per kernel.
+Which families are routable falls out of this arithmetic rather than being asserted; the
+router recomputes it per part and per model.
 
 ## Stage C — route to a producer by capability probe
 
@@ -107,8 +100,8 @@ oneDNN before hand-writing a GEMM".
 
 `scripts/kernel_trials.py`. Correctness gates timing; both arms warmed then interleaved;
 branch back to best on regression. The baseline is the **provider harness** for that
-signature, never the definition's PyTorch reference — a large ratio against the reference
-and a much smaller one against the provider were the same kernel.
+signature, never the definition's PyTorch reference — the ratio against the reference says
+nothing about the ratio against what the stack runs.
 
 ## Stage E — admit per shape
 

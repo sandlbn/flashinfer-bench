@@ -198,6 +198,35 @@ PROBE_WARMUP_S = 0.25
 _NOISE_SIGMAS = 2.0
 _MAD_TO_SIGMA = 1.4826
 
+STREAMING_POOL_LLC_MULTIPLE = 2
+"""How many last-level caches a rotating working set spans before repeated calls read from
+memory rather than from the cache. A margin over the cache size, not a measured quantity:
+one cache's worth of distinct lines already defeats an LRU, and twice that leaves room for
+whatever else the part keeps resident."""
+
+
+def streaming_pool_bytes(device: object) -> Optional[int]:
+    """Bytes a rotating pool of inputs must span so that each call streams them from memory.
+
+    The size of the part's last-level cache, from its capability record, times
+    :data:`STREAMING_POOL_LLC_MULTIPLE`. This is the working set a measurement needs when
+    its subject is a tensor that is not cache-resident when the model runs -- a weight at
+    decode, read once per step among every other weight -- and the bound it is compared to
+    is a memory bound. ``None`` when the capability record cannot be read for the device,
+    or the device is host memory: the caller then has no streaming measurement, not a
+    resident one relabelled.
+    """
+    try:
+        from flashinfer_bench.device import get_accelerator
+        from flashinfer_bench.device.accelerator import parse_device
+
+        if parse_device(str(device))[0] == "cpu":
+            return None
+        l2 = int(get_accelerator(str(device)).capabilities(str(device)).l2_bytes)
+    except Exception:
+        return None
+    return STREAMING_POOL_LLC_MULTIPLE * l2 if l2 > 0 else None
+
 
 class PadProbe(NamedTuple):
     """What the load-time A/B measured: median per-round speedup and its robust scatter."""
@@ -277,18 +306,35 @@ def row_pitch_bytes(weight: "torch.Tensor") -> int:
     return int(weight.stride(0)) * weight.element_size()
 
 
+def pitch_camps_on_one_channel(pitch_bytes: int, period_bytes: int) -> bool:
+    """The pitch rule itself: a row pitch puts every row on one channel exactly when it is
+    a multiple of the channel period.
+
+    The one place the arithmetic lives. :func:`camps_on_one_channel` applies it to a tensor;
+    a stage that only has a recorded shape (the routing in ``scripts/bound_candidates.py``)
+    applies it to the pitch a contiguous tensor of that shape would have. A period must be
+    given: there is no answer without one, and this function does not look one up.
+    """
+    if period_bytes <= 0:
+        raise ValueError(f"channel period must be positive bytes, got {period_bytes}")
+    return pitch_bytes % period_bytes == 0
+
+
 def camps_on_one_channel(weight: "torch.Tensor", period_bytes: Optional[int] = None) -> bool:
     """Whether every row of a row-major 2-D weight starts on the same memory channel.
 
-    True exactly when the row pitch in bytes is a multiple of the channel period. Only a
-    row-major 2-D tensor can qualify; anything else is False. Pure arithmetic: whether the
-    tensor lives in a memory that has channels is the caller's decision. With no period
-    given, the device's calibrated one is used, and :class:`ChannelPeriodUnknown` is raised
-    when there is none -- the rule has no answer then, and False would be one.
+    True exactly when the row pitch in bytes is a multiple of the channel period
+    (:func:`pitch_camps_on_one_channel`). Only a row-major 2-D tensor can qualify; anything
+    else is False. Pure arithmetic: whether the tensor lives in a memory that has channels
+    is the caller's decision. With no period given, the device's calibrated one is used,
+    and :class:`ChannelPeriodUnknown` is raised when there is none -- the rule has no answer
+    then, and False would be one.
     """
     if weight.ndim != 2 or weight.stride(1) != 1:
         return False
-    return row_pitch_bytes(weight) % _resolve_period(weight.device, period_bytes) == 0
+    return pitch_camps_on_one_channel(
+        row_pitch_bytes(weight), _resolve_period(weight.device, period_bytes)
+    )
 
 
 def padded_row_pitch(pitch_bytes: int, period_bytes: int, pad_bytes: int = ROW_PAD_BYTES) -> int:
@@ -380,9 +426,11 @@ def streaming_pad_wins(
 
         accel = get_accelerator(str(weight.device))
         if pool_bytes is None:
-            pool_bytes = 2 * int(accel.capabilities(str(weight.device)).l2_bytes)
+            pool_bytes = streaming_pool_bytes(weight.device)
         sync = accel.synchronize
     except Exception:
+        return None
+    if pool_bytes is None:
         return None
 
     n, k = weight.shape

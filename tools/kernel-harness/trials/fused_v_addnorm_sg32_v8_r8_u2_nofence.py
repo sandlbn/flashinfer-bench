@@ -1,0 +1,8 @@
+"""Fused decode GEMV, `addnorm` epilogue, ablation `nofence`; see fused_gemv.py."""
+
+import sys
+
+sys.path.insert(0, "tools/kernel-harness/trials")
+from fused_gemv import make  # noqa: E402
+
+Model, get_inputs, get_init_inputs = make("addnorm", dict(sg=32, vec=8, rows=8, unroll=2, fence=0, slmred=1))

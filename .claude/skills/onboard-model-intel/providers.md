@@ -115,16 +115,13 @@ numerically against the definition's reference before registering it.
 ### What is built on XPU
 
 The Python surface is shared with the CUDA build, so the only proof is a call:
-`flashinfer-bench providers verify --local tmp/flashinfer-trace --device xpu:0`. Known
-constraints of the XPU build:
+`flashinfer-bench providers verify --local tmp/flashinfer-trace --device xpu:0`; which ops
+a given build carries is that command's output, not a table here. One call-level
+constraint of the XPU build:
 
 | Op | On XPU |
 | --- | --- |
-| `flash_attn_varlen_func` (FMHA prefill) | works |
-| `flash_attn_with_kvcache` (paged decode) | works, **page_size 64 or 128 only** — `ps1` definitions cannot bind |
-| `silu_and_mul`, `topk_softmax`, `awq_dequantize`, `causal_conv1d_fn_xpu` | work |
-| `fp8_blockwise_scaled_mm` | not built |
-| `top_k_top_p_sampling_from_probs` | not built (`top_p_sampling_from_probs` missing) |
+| `flash_attn_with_kvcache` (paged decode) | **page_size 64 or 128 only** — `ps1` definitions cannot bind |
 
 ### Paged GQA decode wrapper contract
 

@@ -16,11 +16,17 @@ Inputs, each named by the command that produces it:
                                                         launched kernels, bundle
     measurements.json  this script's --measure step, keyed by candidate_id:
                        scripts/kernel_trials.py benchmark of each harness against itself
-                       (t_host_us, spread_us) and a torch.profiler pass over the same harness
-                       (t_dev_us, device-side, per shape); spill / geom from unitrace may be
-                       added by hand under the same keys
+                       (t_host_us, spread_us) and two torch.profiler passes over the same
+                       harness: one as the harness runs (t_dev_resident_us) and one with its
+                       inputs rotated through a pool wider than the part's last-level cache
+                       (t_dev_us, source profiler:harness-streaming). The second is the
+                       device time of the op when its bytes come from memory, which is the
+                       quantity bytes_min / bandwidth bounds; the first is below that bound
+                       for any working set the cache holds, and classifies nothing. spill /
+                       geom from unitrace may be added by hand under the same keys
     calibration        flashinfer_bench.device.calibration.get(): bandwidth_gbs,
-                       timing_floor_us, launch_floor_us, matmul_peak_tflops, dispatch_us
+                       timing_floor_us, launch_floor_us, matmul_peak_tflops, dispatch_us,
+                       channel_period_bytes
 
     python scripts/bound_candidates.py --report <dir>/discovered.json \\
         --resolution <dir>/resolution.json --out-dir <dir>/bound \\
@@ -73,7 +79,10 @@ built, never a performance claim), with the delivery cost each pays:
     provider_patch      class = provider kernel; source bundled            0
     triton_in_place     class = Triton with file:line inside the stack     0
     library_call        class = oneDNN (a primitive,exec line)             0
-    layout_transform    regime = memory-bound, layout-limited              0
+    layout_transform    regime = memory-bound, layout-limited; or a 2-D    0
+                        argument whose contiguous row pitch is a multiple
+                        of the part's calibrated memory channel period
+                        (the rule of integration.weight_layout)
     fusion_callsite     a GEMM-class producer feeds this op                0
     fusion_apply        as above, and a definition exists                  calibration.dispatch_us
     apply_substitution  a kernel runs on the device for this op            calibration.dispatch_us
@@ -153,6 +162,13 @@ R_MEM_LAYOUT = "memory-bound-layout-limited"
 R_MEM_INEFF = "memory-bound-inefficient"
 R_CMP_INEFF = "compute-bound-inefficient"
 R_UNCLASSIFIED = "unclassified"
+R_BELOW_BOUND = "below-the-bound"
+"""t_dev is under the bound by more than spread. Not a section 2.1 row: every row there
+presupposes the kernel took at least as long as moving bytes_min at the part's bandwidth, so
+a t_dev below that was measured on something else -- a working set the last-level cache held
+from one call to the next, or a bytes_min that counts bytes the kernel never touches. The
+remedy is a measurement of the right quantity (the streaming pass of --measure, or a
+--bytes-min override), never a regime picked from the rows below it."""
 
 # What a definition's op_type is called in the op vocabulary of the stacks discovery records.
 # A translation between two projects' words for one operation, in the manner of
@@ -190,6 +206,8 @@ class Candidate:
     launched: List[str] = field(default_factory=list)
     t_dev: Optional[float] = None
     t_dev_source: str = "none"
+    t_dev_resident: Optional[float] = None
+    working_set_bytes: Optional[int] = None
     t_host: Optional[float] = None
     spread_us: Optional[float] = None
     spill: Optional[int] = None
@@ -230,6 +248,8 @@ class Candidate:
             "harness": self.harness,
             "t_dev_us": self.t_dev,
             "t_dev_source": self.t_dev_source,
+            "t_dev_resident_us": self.t_dev_resident,
+            "working_set_bytes": self.working_set_bytes,
             "t_host_us": self.t_host,
             "spread_us": self.spread_us,
             "spill": self.spill,
@@ -274,6 +294,10 @@ class Context:
     cutoff: float
     run_id: str
     edge_threshold: int = 1
+    # The part's calibrated memory channel period; None when the sweep resolved none. The
+    # layout_transform gate reads it and renders None as "unavailable", never as "no
+    # argument camps".
+    channel_period_bytes: Optional[int] = None
 
 
 @dataclass
@@ -565,6 +589,10 @@ def _apply_measurement(c: Candidate, m: Optional[Dict[str, Any]]) -> None:
         # The source names the instrument: "unitrace"/"profiler" are device-side durations;
         # "event" carries the timer's region overhead and is held to timing_floor_us.
         c.t_dev, c.t_dev_source = float(m["t_dev_us"]), str(m.get("t_dev_source") or "measurements")
+    if m.get("t_dev_resident_us") is not None:
+        c.t_dev_resident = float(m["t_dev_resident_us"])
+    if m.get("working_set_bytes") is not None:
+        c.working_set_bytes = int(m["working_set_bytes"])
     if m.get("t_host_us") is not None:
         c.t_host = float(m["t_host_us"])
     if m.get("spread_us") is not None:
@@ -623,6 +651,13 @@ def classify(c: Candidate, ctx: Context) -> None:
     later comparison is about the kernel) and ``spill-limited`` (spill traffic is not in
     bytes_min, so t_mem is wrong until it is gone). Rows whose inputs this run did not
     measure -- host/sync-bound, occupancy-limited -- are recorded as skipped, not guessed.
+
+    One precondition the plan leaves implicit is checked before any bound row: that t_dev is
+    not *under* the bound. The rows from ``at-the-bound`` down compare t_dev with the time
+    the op's bytes take at the part's bandwidth, and every one of them reads a t_dev below
+    that as "no row matched". A t_dev below the bound is a measurement of the wrong quantity
+    (see :data:`R_BELOW_BOUND`) and is named as such, with what would have to be measured
+    instead.
     """
     floor, launch, spread = c.floor_us, c.launch_us, c.spread_us
     c.regime_rows_skipped = ["host-bound:no profiler CPU time in this run"]
@@ -666,6 +701,11 @@ def classify(c: Candidate, ctx: Context) -> None:
     if spread is None:
         c.regime, c.regime_test = R_UNMEASURED, "spread_us=None"
         return
+    if c.bound is not None and (c.bound - c.t_dev) > spread:
+        c.regime = R_BELOW_BOUND
+        c.regime_test = f"bound_us-t_dev_us={_fmt(c.bound - c.t_dev)} > spread_us={_fmt(spread)}"
+        c.notes.append(_below_bound_note(c))
+        return
     if c.bound is not None and abs(c.t_dev - c.bound) <= spread:
         c.regime = R_AT_BOUND
         c.regime_test = (
@@ -694,6 +734,39 @@ def classify(c: Candidate, ctx: Context) -> None:
     c.regime, c.regime_test = R_UNCLASSIFIED, "no row matched"
 
 
+def _below_bound_note(c: Candidate) -> str:
+    """Why t_dev can sit under the bound, from what this candidate records, and what would
+    settle it. A statement about the measurement, not about the kernel."""
+    formed = {
+        c.t_mem: "t_mem_us",
+        c.t_cmp: "t_cmp_us",
+        c.floor_us: "floor_us",
+        c.launch_us: "launch_floor_us",
+    }
+    by = formed.get(c.bound, "bound_us")
+    parts = [
+        f"t_dev_us={_fmt(c.t_dev)} ({c.t_dev_source}) is under {by}={_fmt(c.bound)}: the op did not"
+        f" move bytes_min={_fmt(c.bytes_min)} from memory in that time"
+    ]
+    if c.t_dev_source == "profiler:harness":
+        parts.append(
+            "the harness re-read a working set"
+            + (f" of {_fmt(c.working_set_bytes)} bytes" if c.working_set_bytes else "")
+            + " that the last-level cache held between calls; --measure with a device"
+            " capability record adds the streaming pass that this bound is about"
+        )
+    elif c.t_dev_source.startswith("profiler:harness-streaming"):
+        parts.append(
+            "measured streaming; bytes_min counts bytes the kernel does not touch (a table"
+            " read sparsely; a mutated argument not written back) -- --bytes-min overrides it"
+        )
+    elif c.t_dev_source.startswith("profiler:op_average"):
+        parts.append(
+            "t_dev is the op's average over every shape it ran at; no harness measured this shape"
+        )
+    return "; ".join(parts)
+
+
 # --------------------------------------------------------------------------- gates (section 6.8)
 
 
@@ -704,6 +777,56 @@ def _gemm_producers(c: Candidate, ctx: Context) -> List[Dict[str, Any]]:
         if e.get("consumer") == c.op
         and _gemm_like(ctx.resolution.get(_op_key(str(e.get("producer")))))
     ]
+
+
+def _camping_tensors(c: Candidate, period_bytes: int) -> List[str]:
+    """The candidate's 2-D arguments whose row pitch is a multiple of the channel period.
+
+    The rule of :func:`flashinfer_bench.integration.weight_layout.camps_on_one_channel`,
+    applied to the pitch a contiguous row-major tensor of the recorded shape has -- the
+    routing holds the discovery record, not the tensor, and discovery records shapes, not
+    strides. A weight the serving stack has already re-pitched would be missed here and
+    found by the load-time hook, which reads the tensor.
+    """
+    from flashinfer_bench.integration.weight_layout import pitch_camps_on_one_channel
+
+    out: List[str] = []
+    for shape, dt in c.tensors:
+        size = _ITEMSIZE.get(dt)
+        if len(shape) != 2 or size is None:
+            continue
+        pitch = shape[1] * size
+        if pitch_camps_on_one_channel(pitch, period_bytes):
+            out.append(f"{shape[0]}x{shape[1]}:pitch_bytes={pitch}")
+    return out
+
+
+def _layout_nominations(c: Candidate, ctx: Context) -> Tuple[Optional[int], Dict[str, Any]]:
+    """How many facts nominate a layout transform for this candidate, and which.
+
+    Two do. The regime row: the access pattern the kernel is obliged to use explains t_dev
+    and a contiguous read of the same bytes would not. The pitch rule: a 2-D argument whose
+    rows all start on the same memory channel by the part's calibrated period, so a GEMM
+    walking its rows queues every read on one channel. Either is a fact about how the data
+    is laid out, not a claim that changing it wins; the gates after this one price it.
+
+    With no period measured the pitch rule has no answer, and the count is None --
+    unavailable -- unless the regime already nominates. It is never zero for want of a
+    period: zero would say "nothing camps" about a rule nobody could apply.
+    """
+    period = ctx.channel_period_bytes
+    by_regime = c.regime == R_MEM_LAYOUT
+    detail: Dict[str, Any] = {
+        "regime": c.regime,
+        "channel_period_bytes": period,
+        "pitch_of": "contiguous row-major tensor of the recorded shape",
+    }
+    if period is None:
+        detail["camping"] = "unmeasured period"
+        return (1 if by_regime else None), detail
+    camping = _camping_tensors(c, period)
+    detail["camping"] = camping
+    return int(by_regime) + len(camping), detail
 
 
 def gate_class_admits(c: Candidate, mech: str, ctx: Context) -> Gate:
@@ -719,9 +842,8 @@ def gate_class_admits(c: Candidate, mech: str, ctx: Context) -> Gate:
     if mech == "upstream_report":
         return Gate(c.cls == "aten", "class", c.cls, "==", "admits", "aten", where)
     if mech == "layout_transform":
-        return Gate(
-            c.regime == R_MEM_LAYOUT, "regime", c.regime, "==", "admits", R_MEM_LAYOUT, where
-        )
+        n, detail = _layout_nominations(c, ctx)
+        return Gate(bool(n), "layout_nominations", n, ">", "required", 0, where, detail)
     if mech in FUSION:
         n = len(_gemm_producers(c, ctx))
         return Gate(n > 0, "gemm_producers", n, ">", "required", 0, where)
@@ -1662,17 +1784,36 @@ duration profiled before that is the idle clock's, not the kernel's."""
 # harness calls, through the same profiler instrument Stage 1 charged shares with, so the
 # per-shape t_dev and the op-level share are the same kind of number.
 _PROFILE_SNIPPET = r"""
-import importlib.util, json, sys, time
+import importlib.util, json, math, sys, time
 import torch
 from torch.autograd import DeviceType
 from torch.profiler import ProfilerActivity, profile
 
 path, calls, warm_s = sys.argv[1], int(sys.argv[2]), float(sys.argv[3])
+pool_bytes = int(sys.argv[4]) if len(sys.argv) > 4 else 0
 spec = importlib.util.spec_from_file_location("harness_under_profile", path)
 m = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = m
 spec.loader.exec_module(m)
 model, inputs = m.Model(*m.get_init_inputs()), m.get_inputs()
+working_set = sum(t.numel() * t.element_size() for t in inputs if isinstance(t, torch.Tensor))
+# With a pool, every call sees a different copy of the inputs and the copies together span
+# the pool, so no call finds its bytes in the last-level cache: the device time is the
+# streaming one, comparable with bytes_min at the memory bandwidth. Without one the harness
+# runs as it is, which for a working set the cache holds is a cache number.
+pools = [inputs]
+if pool_bytes > 0:
+    copies = max(2, math.ceil(pool_bytes / max(working_set, 1)))
+    for _ in range(copies - 1):
+        pools.append([t.clone() if isinstance(t, torch.Tensor) else t for t in inputs])
+turn = [0]
+
+
+def call():
+    model(*pools[turn[0] % len(pools)])
+    turn[0] += 1
+
+
 dev = next((t.device for t in inputs if isinstance(t, torch.Tensor)), None)
 backend = None
 if dev is not None and dev.type == "xpu":
@@ -1692,33 +1833,61 @@ def sync():
 
 
 with torch.no_grad():
-    model(*inputs)
+    call()
     sync()
     deadline = time.perf_counter() + warm_s
     while time.perf_counter() < deadline:
         for _ in range(20):
-            model(*inputs)
+            call()
         sync()
     with profile(activities=act) as prof:
         for _ in range(calls):
-            model(*inputs)
+            call()
         sync()
 kernels = {}
 for e in prof.key_averages():
     us = float(getattr(e, "self_device_time_total", 0.0) or 0.0)
     if us > 0 and e.device_type != DeviceType.CPU:
         kernels[e.key] = kernels.get(e.key, 0.0) + us
-print("FIB_PROFILE " + json.dumps({"calls": calls, "kernels": kernels}))
+print(
+    "FIB_PROFILE "
+    + json.dumps(
+        {
+            "calls": calls,
+            "kernels": kernels,
+            "working_set_bytes": working_set,
+            "pool_bytes": pool_bytes,
+            "copies": len(pools),
+        }
+    )
+)
 """
 
 
 def profile_harness(
-    harness: pathlib.Path, interp: str, calls: int, warm_s: float = PROFILE_WARMUP_S
+    harness: pathlib.Path,
+    interp: str,
+    calls: int,
+    warm_s: float = PROFILE_WARMUP_S,
+    pool_bytes: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Device time per call of the harness's op, and the kernels it launched, or an error."""
+    """Device time per call of the harness's op, and the kernels it launched, or an error.
+
+    With ``pool_bytes`` the harness's inputs are rotated through copies spanning that many
+    bytes, so each call streams them from memory (``t_dev_source`` says
+    ``profiler:harness-streaming``); without it the harness runs as written.
+    """
     try:
         r = subprocess.run(
-            [interp, "-c", _PROFILE_SNIPPET, str(harness.resolve()), str(calls), str(warm_s)],
+            [
+                interp,
+                "-c",
+                _PROFILE_SNIPPET,
+                str(harness.resolve()),
+                str(calls),
+                str(warm_s),
+                str(int(pool_bytes or 0)),
+            ],
             capture_output=True,
             text=True,
             timeout=600,
@@ -1734,10 +1903,40 @@ def profile_harness(
         return {"profile_error": "no device kernels recorded", "kernels": data["kernels"]}
     return {
         "t_dev_us": total / data["calls"],
-        "t_dev_source": "profiler:harness",
+        "t_dev_source": "profiler:harness-streaming" if pool_bytes else "profiler:harness",
         "kernels": data["kernels"],
         "profiled_calls": data["calls"],
+        "working_set_bytes": data.get("working_set_bytes"),
+        "pool_bytes": data.get("pool_bytes"),
+        "copies": data.get("copies"),
     }
+
+
+def merge_streaming_profile(record: Dict[str, Any], stream: Dict[str, Any]) -> Dict[str, Any]:
+    """Fold a streaming profile into a measurement record whose profile so far is resident.
+
+    The resident device time moves to ``t_dev_resident_us``; ``t_dev_us`` becomes the
+    streaming one when it was measured and stays resident (with the error kept) when it
+    was not -- a failed streaming pass leaves a cache number labelled as such, never a
+    streaming label on a resident number. The ``stream`` key records that the pass was
+    attempted, so a later --measure does not repeat it.
+    """
+    out = dict(record)
+    if out.get("t_dev_source") == "profiler:harness" and "t_dev_resident_us" not in out:
+        out["t_dev_resident_us"] = out.get("t_dev_us")
+    if stream.get("t_dev_us") is not None:
+        out["t_dev_us"] = stream["t_dev_us"]
+        out["t_dev_source"] = stream["t_dev_source"]
+        out["kernels_streaming"] = stream.get("kernels")
+        out["working_set_bytes"] = stream.get("working_set_bytes")
+        out["stream"] = {
+            "pool_bytes": stream.get("pool_bytes"),
+            "copies": stream.get("copies"),
+            "profiled_calls": stream.get("profiled_calls"),
+        }
+    else:
+        out["stream"] = {"error": stream.get("profile_error")}
+    return out
 
 
 def parse_benchmark_keys(stdout: str) -> Dict[str, str]:
@@ -1752,17 +1951,20 @@ def measure_harnesses(
     rounds: int,
     calls: int,
     remeasure: bool = False,
+    pool_bytes: Optional[int] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """Each candidate's harness against itself through ``kernel_trials.py benchmark`` -- the
-    one sanctioned benchmark -- for the harness's own wall time and paired spread. Results
-    are kept in `out` so a re-run does not touch the device again."""
+    one sanctioned benchmark -- for the harness's own wall time and paired spread, then the
+    profiler for its device time: as the harness runs, and, when ``pool_bytes`` is known,
+    streaming through a pool of that many bytes (:func:`profile_harness`). Results are kept
+    in `out` so a re-run does not touch the device again; a record made before the
+    streaming pass existed gets that one pass added, its host arm untouched."""
     kt = pathlib.Path(__file__).with_name("kernel_trials.py")
     existing: Dict[str, Dict[str, Any]] = json.loads(out.read_text()) if out.is_file() else {}
     work = out.parent / "measure-work"
     work.mkdir(parents=True, exist_ok=True)
+    profiled_calls = calls * rounds
     for c in cands:
-        if c.candidate_id in existing and not remeasure:
-            continue
         h = harness_for(c, harness_dir)
         if h is None:
             continue
@@ -1770,6 +1972,13 @@ def measure_harnesses(
         if interp is None:
             m = re.search(r'^RECORDED_WITH = "(.+)"$', h.read_text(errors="ignore"), re.M)
             interp = m.group(1) if m and pathlib.Path(m.group(1)).is_file() else sys.executable
+        if c.candidate_id in existing and not remeasure:
+            prior = existing[c.candidate_id]
+            if pool_bytes is not None and "stream" not in prior:
+                stream = profile_harness(h, interp, profiled_calls, pool_bytes=pool_bytes)
+                existing[c.candidate_id] = merge_streaming_profile(prior, stream)
+                out.write_text(json.dumps(existing, indent=2) + "\n")
+            continue
         series = f"bound-{c.candidate_id}"
         record: Dict[str, Any] = {
             "harness": str(h),
@@ -1813,7 +2022,10 @@ def measure_harnesses(
                 record["error"] = (r.stdout + r.stderr)[-2000:]
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
             record["error"] = str(exc)[-2000:]
-        record.update(profile_harness(h, interp, calls * rounds))
+        record.update(profile_harness(h, interp, profiled_calls))
+        if pool_bytes is not None:
+            stream = profile_harness(h, interp, profiled_calls, pool_bytes=pool_bytes)
+            record = merge_streaming_profile(record, stream)
         existing[c.candidate_id] = record
         out.write_text(json.dumps(existing, indent=2) + "\n")
     return existing
@@ -1837,8 +2049,17 @@ def run(
     bw_pattern: Optional[Callable[[int, int], Optional[float]]] = None,
     bytes_overrides: Optional[Dict[str, int]] = None,
     native: Optional[Callable[[str], Optional[bool]]] = None,
+    channel_period_bytes: Optional[int] = None,
 ) -> Tuple[List[Candidate], List[Dict[str, Any]]]:
+    """Every candidate through derive, classify and evaluate.
+
+    ``channel_period_bytes`` is the part's calibrated memory channel period for the
+    layout_transform gate; when not given it is read from the calibration record, and a
+    record without one leaves the pitch rule unavailable (None), not silent.
+    """
     edges = list(report.get("edges") or [])
+    if channel_period_bytes is None:
+        channel_period_bytes = getattr(cal, "channel_period_bytes", None)
     ctx = Context(
         cal=cal,
         total_us=float(report.get("device_time_total_us") or 0.0),
@@ -1852,6 +2073,7 @@ def run(
         cutoff=default_cutoff(report) if cutoff is None else cutoff,
         run_id=run_id,
         edge_threshold=min((int(e.get("count") or 0) for e in edges), default=1) or 1,
+        channel_period_bytes=channel_period_bytes,
     )
     cands = candidates_from_report(report, resolution, measurements, bytes_overrides)
     rows: List[Dict[str, Any]] = []
@@ -1897,6 +2119,7 @@ def write_outputs(
             "bandwidth_gbs",
             "launch_floor_us",
             "matmul_peak_tflops",
+            "channel_period_bytes",
         )
     }
     (out_dir / "bound.json").write_text(
@@ -1940,6 +2163,12 @@ def print_summary(
     print(
         f"\n{len(wl)} worklist row(s); {len(unroutable)} candidate(s) unroutable through every mechanism."
     )
+    below = [c for c in cands if c.regime == R_BELOW_BOUND]
+    if below:
+        print(
+            f"{len(below)} candidate(s) {R_BELOW_BOUND}: t_dev under the memory bound, so the"
+            " measurement is not of the op streaming its bytes; see their notes in bound.json."
+        )
 
 
 def _parse_kv_option(items: Sequence[str], parse: Callable[[str], Any]) -> Dict[str, Any]:
@@ -2049,6 +2278,29 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     bytes_overrides = _parse_kv_option(args.bytes_min, int)
     patterns = _parse_kv_option(args.pattern, lambda v: tuple(int(x) for x in v.split(":")))
 
+    # The streaming pool and the channel period both come from this part's records: the
+    # pool from its capabilities (a working set wider than the last-level cache), the
+    # period from its calibration, through the same function the load-time hook uses, so
+    # an operator's FIB_CHANNEL_PERIOD_BYTES applies here too. Neither has a default.
+    pool_bytes: Optional[int] = None
+    period: Optional[int] = getattr(cal, "channel_period_bytes", None)
+    if device is not None:
+        from flashinfer_bench.integration.weight_layout import (
+            channel_period_bytes,
+            streaming_pool_bytes,
+        )
+
+        pool_bytes = streaming_pool_bytes(device)
+        if not args.calibration_json:
+            period = channel_period_bytes(device)
+    if args.measure and pool_bytes is None:
+        print(
+            "WARNING: no capability record for the device, so no streaming pass: each t_dev"
+            " is the harness as written, and one under its memory bound is reported as"
+            f" {R_BELOW_BOUND}.",
+            file=sys.stderr,
+        )
+
     prelim = candidates_from_report(report, resolution, {}, bytes_overrides)
     measurements: Dict[str, Dict[str, Any]] = (
         json.loads(meas_path.read_text()) if meas_path.is_file() else {}
@@ -2064,6 +2316,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             args.rounds,
             args.calls,
             args.remeasure,
+            pool_bytes=pool_bytes,
         )
 
     def bw_pattern(run_bytes: int, stride_bytes: int) -> Optional[float]:
@@ -2115,6 +2368,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         bw_pattern=bw_pattern,
         bytes_overrides=bytes_overrides,
         native=native,
+        channel_period_bytes=period,
     )
     cutoff = default_cutoff(report) if args.cutoff is None else args.cutoff
     write_outputs(

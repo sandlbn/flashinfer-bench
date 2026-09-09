@@ -7,8 +7,10 @@ from .weight_layout import (
     deinterleave_output,
     interleave_gate_up,
     pad_rows_off_channel_period,
+    pitch_camps_on_one_channel,
     qwen_style_mlp_weights,
     rms_row_scale,
+    streaming_pool_bytes,
 )
 from .xpu_kernels import (
     SGL_KERNEL_XPU,
@@ -29,8 +31,10 @@ __all__ = [
     "deinterleave_output",
     "interleave_gate_up",
     "pad_rows_off_channel_period",
+    "pitch_camps_on_one_channel",
     "qwen_style_mlp_weights",
     "rms_row_scale",
+    "streaming_pool_bytes",
     "SGL_KERNEL_XPU",
     "VLLM_XPU",
     "available_providers",

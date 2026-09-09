@@ -34,8 +34,7 @@ returns different targets, and the correct behaviour is to re-measure, not to re
 
 ## Every candidate gets attempted, in share order
 
-Not just the largest. The largest is often the least movable — a GEMM already in oneDNN has
-little headroom, while a smaller op with a bad constant has a lot. Ranking by
+Not just the largest. Share and headroom are independent quantities. Ranking by
 `share x reachable headroom` is the whole point of stage 4, and it cannot be shortcut by
 looking at the share column alone.
 

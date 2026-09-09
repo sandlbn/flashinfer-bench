@@ -7,8 +7,8 @@ description: Find hot operations a model spends device time in that no definitio
 
 `/profile-intel` ranks families that already have definitions. This answers the prior
 question: **what is burning device time that nothing covers**, and of that, what is worth
-building. Most large gaps in eager model code are contractions written as
-broadcast-multiply-then-sum, and need no kernel.
+building. A gap that is a contraction written as broadcast-multiply-then-sum needs no
+kernel; the checks below say whether yours is one.
 
 ## Step 1: List the hot ops with their shapes
 

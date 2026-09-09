@@ -33,6 +33,7 @@ import pathlib
 import re
 import subprocess
 import sys
+import sysconfig
 from typing import Dict, Iterable, List, Optional, Tuple
 
 # A registration under one of these keys is not a kernel -- it is a rule for rewriting the
@@ -103,6 +104,9 @@ except Exception as exc:
 """
 
 
+_STDLIB_PREFIX = sysconfig.get_paths()["stdlib"]
+
+
 def _op_registering_modules() -> List[str]:
     """Top-level modules loaded here that a probe may need in order to see the op.
 
@@ -116,7 +120,12 @@ def _op_registering_modules() -> List[str]:
     keep = []
     for name, mod in list(_sys.modules.items()):
         f = getattr(mod, "__file__", None) or ""
-        if not ("site-packages" in f or "/Projects/" in f):
+        # Anything that is not part of the interpreter's own installation may register
+        # ops. Testing for a directory name -- a checkout called "Projects", say -- is the
+        # same defect as writing one machine's layout into a document: on a box that
+        # arranges its checkouts differently, editable installs would be silently dropped
+        # and the probe would report an op as unavailable.
+        if f.startswith(_STDLIB_PREFIX):
             continue
         if name.startswith("torch") or name.startswith("_"):
             continue

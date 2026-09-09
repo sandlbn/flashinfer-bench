@@ -1,7 +1,9 @@
-# Quantized matmul: what oneDNN supports on Battlemage
+# Quantized matmul: what oneDNN supports, probed
 
-Established by probing the installed library (3.11.x and 3.13.x behave identically). Read
-this before writing any oneDNN solution that takes scales.
+**Illustration (one instance): Battlemage / oneDNN 3.11.x and 3.13.x / fp8 matmul with scales and post-ops — re-establish with: `tools/onednn/repro_grouped_scales.cpp`**
+
+Read this before writing any oneDNN solution that takes scales, and re-probe on a library
+version outside the range above.
 
 | attribute | status |
 | --- | --- |

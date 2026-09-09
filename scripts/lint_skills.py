@@ -30,6 +30,7 @@ Rules, and the plan row each enforces
 | UVRUN     | Environment                    | the package-manager command that breaks this box  |
 | BROKENREF | Cross-references               | a linked file, path or skill that does not exist  |
 | ILLUS     | Illustration header            | an illustration header not in the required form   |
+| MACHINE   | Environment                    | a path that exists on one machine only            |
 
 The exact phrases and name lists each rule matches are the pattern tables in this file
 (`ENUM_PATTERNS`, `ORDER_PATTERNS`, ... `PART_NAMES`, `MODEL_FAMILIES`); the tests quote
@@ -66,6 +67,21 @@ Every exemption is a marker you can grep for, not a guess about intent.
 6. **Comparisons the agent performs.** A comparative inside a conditional or a measurement
    instruction (`if ... is slower`, `confirm by measurement that ... is faster`) is the
    agent's own test, not a stored verdict, and is not matched by EXPECT.
+7. **A vendor default beside its discovery mechanism.** MACHINE distinguishes three kinds
+   of absolute path. A named user's home directory (`/home/<user>/…`, `/Users/<user>/…`,
+   root's home) and a clone or virtualenv location (an absolute path with a `workspace`,
+   `Projects`, `repos`, `src` or `*venv*` segment) are one machine's and are always a
+   violation, in prose and in fenced code alike. A vendor's documented install prefix
+   (`/opt/…`, `/usr/…`) or a tool's default under the home directory (a tilde or `$HOME`
+   prefix) is an example, not a location, when the same paragraph, table row or fenced
+   block names what discovers it:
+   an environment variable (`FIB_*`, `*_DIR`, `*_ROOT`, `*_PATH`, `*_HOME`, `*_PREFIX`,
+   `*_COMPILER`, a `${VAR:-default}` expansion), `PATH`, or a `find_*()` / `which` lookup.
+   Without that it is a violation. Repository-relative paths (`tmp/…`, `.venv/…`) and
+   device nodes (`/dev/…`, `/proc/…`, `/sys/…`) are never matched. Fenced code and
+   illustration blocks do not exempt MACHINE: a path belongs to a machine wherever it is
+   written. A file skipped by `--exclude` is still checked for MACHINE, because no document
+   quotes a machine path legitimately.
 
 Baselines
 ---------
@@ -105,6 +121,7 @@ class Rule:
     exempt_in_code: bool = True
     exempt_in_illustration: bool = True
     exempt_in_source_table: bool = False
+    always: bool = False  # runs even in files skipped by --exclude
 
 
 RULES: dict[str, Rule] = {
@@ -161,8 +178,17 @@ RULES: dict[str, Rule] = {
             "illustration header not in the required form",
             exempt_in_illustration=False,
         ),
+        Rule(
+            "MACHINE",
+            "Environment",
+            "absolute path that exists on one machine only",
+            exempt_in_code=False,
+            exempt_in_illustration=False,
+            always=True,
+        ),
     )
 }
+ALWAYS_RULES = frozenset(r.id for r in RULES.values() if r.always)
 
 # ---------------------------------------------------------------------------------------
 # Patterns. Each table is the complete, greppable definition of what a rule matches.
@@ -425,6 +451,45 @@ TABLE_ROW = re.compile(r"^\s*\|")
 TABLE_SEPARATOR = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)*\|?\s*$")
 LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
 
+# A path that exists on one machine. `home` and `checkout` are always violations; `vendor`
+# is a violation only when nothing in the same unit or fence names how the path is found.
+_PATH_TAIL = r"[^\s`'\")|>\]]*"
+_CHECKOUT_SEGMENT = (
+    r"(?:Projects|projects|workspace|workspaces|repos|checkouts|src|git|virtualenvs"
+    r"|[A-Za-z0-9_.-]*venv[A-Za-z0-9_.-]*)"
+)
+MACHINE_PATTERNS: tuple[Pattern, ...] = (
+    (
+        re.compile(
+            rf"(?<![\w.-])(?:/home/[A-Za-z0-9_.-]+|/Users/[A-Za-z0-9_.-]+|/root)/{_PATH_TAIL}"
+        ),
+        "home",
+    ),
+    (
+        re.compile(rf"(?<![\w.-])/(?:[A-Za-z0-9_.-]+/)*{_CHECKOUT_SEGMENT}/{_PATH_TAIL}"),
+        "checkout",
+    ),
+    (
+        re.compile(rf"(?<![\w.-])(?:/opt|/usr|~|\$HOME|\$\{{HOME\}})/{_PATH_TAIL}"),
+        "vendor",
+    ),
+)
+MACHINE_NEVER = re.compile(r"^/usr/bin/env\b")
+# What counts as naming the discovery mechanism next to a vendor default.
+DISCOVERY_MECHANISM = re.compile(
+    r"\$\{?(?!HOME\b)[A-Z][A-Z0-9_]*(?::-|\}|\b)"
+    r"|\b(?:[A-Z][A-Z0-9]*_)+(?:DIR|ROOT|PATH|HOME|PREFIX|COMPILER)\b"
+    r"|\bFIB_[A-Z0-9_]+\b|\bPATH\b|\bfind_\w+\(|\bshutil\.which\b|\bwhich\s+[`\w]"
+)
+MACHINE_HINTS = {
+    "home": "a home directory is one machine's; name the variable, PATH lookup or search that "
+    "finds it, and the placeholder it resolves to",
+    "checkout": "a clone or virtualenv location is one machine's; use the repo-relative `tmp/` "
+    "clone, an environment variable, or the command that finds it",
+    "vendor": "a vendor default is an example only beside the variable or search that discovers "
+    "it (`FIB_*`, `*_DIR`, `*_ROOT`, `${VAR:-default}`, PATH)",
+}
+
 # ---------------------------------------------------------------------------------------
 # Document model
 # ---------------------------------------------------------------------------------------
@@ -435,6 +500,7 @@ class Line:
     number: int
     text: str
     in_code: bool = False
+    block: int = -1  # index of the fenced block a code line belongs to
     in_frontmatter: bool = False
     in_illustration: bool = False
     in_source_table: bool = False
@@ -465,6 +531,7 @@ def parse_document(text: str) -> list[Line]:
 
     in_code = False
     fence = ""
+    block = -1
     in_frontmatter = lines[0].text.strip() == "---" if lines else False
     illus_end_level: int | None = None  # heading level that closes a heading illustration
     illus_paragraph = False  # a non-heading illustration, closed by any heading or rule
@@ -483,10 +550,11 @@ def parse_document(text: str) -> list[Line]:
         fence_match = re.match(r"^(`{3,}|~{3,})", stripped)
         if fence_match and not in_code:
             in_code, fence = True, fence_match.group(1)[0] * 3
-            line.in_code = True
+            block += 1
+            line.in_code, line.block = True, block
             continue
         if in_code:
-            line.in_code = True
+            line.in_code, line.block = True, block
             if stripped.startswith(fence):
                 in_code = False
             continue
@@ -686,6 +754,32 @@ def _quote(items: Sequence[str]) -> str:
     )
 
 
+def machine_hits(text: str, context: str) -> list[Hit]:
+    """Machine-specific paths on one line; `context` is the unit or fence the line sits in."""
+    hits: list[Hit] = []
+    covered: list[tuple[int, int]] = []
+    mechanism_named = bool(DISCOVERY_MECHANISM.search(context))
+    for pattern, label in MACHINE_PATTERNS:
+        for m in pattern.finditer(text):
+            if any(a <= m.start() < b for a, b in covered):
+                continue  # a home path is also a checkout path; report it once
+            if MACHINE_NEVER.match(m.group(0)):
+                continue
+            if label == "vendor" and mechanism_named:
+                continue
+            covered.append((m.start(), m.end()))
+            hits.append(Hit("MACHINE", label, m.group(0).rstrip(".,;:"), m.start()))
+    return hits
+
+
+def machine_findings(line: Line, context: str) -> Iterator[tuple[str, str]]:
+    hits = machine_hits(line.text, context)
+    if hits:
+        parts = ", ".join(f"{h.label} path {h.match!r}" for h in hits[:4])
+        hint = MACHINE_HINTS[hits[0].label]
+        yield "MACHINE", f"machine-specific path: {parts}; {hint}"
+
+
 class ReferenceChecker:
     """Resolve links, backticked paths and `/skill` mentions against the tree."""
 
@@ -783,10 +877,19 @@ def lint_text(
     findings: dict[tuple[int, str], list[Hit]] = {}
     out: list[Violation] = []
 
+    fences: dict[int, list[str]] = {}
+    for ln in lines:
+        if ln.in_code:
+            fences.setdefault(ln.block, []).append(ln.text)
+    context: dict[int, str] = {}
+
     for unit in iter_units(lines):
         if unit[0].in_code:
+            context[unit[0].number - 1] = "\n".join(fences[unit[0].block])
             continue
         pieces = [ln.text.strip() for ln in unit]
+        for ln in unit:
+            context[ln.number - 1] = " ".join(pieces)
         starts: list[int] = []
         pos = 0
         for piece in pieces:
@@ -803,6 +906,7 @@ def lint_text(
         messages.setdefault((line_idx, rule_id), []).append(_message(rule_id, hits))
     for idx, line in enumerate(lines):
         structural = list(line_findings(line))
+        structural.extend(machine_findings(line, context.get(idx, line.text)))
         if refs is not None:
             structural.extend(refs.check(path, line, lines[idx - 1].text if idx else ""))
         for rule_id, message in structural:
@@ -817,13 +921,12 @@ def lint_text(
     return out
 
 
-def iter_files(paths: Sequence[Path], exclude: Sequence[str]) -> Iterator[Path]:
+def iter_files(paths: Sequence[Path], exclude: Sequence[str]) -> Iterator[tuple[Path, bool]]:
+    """Yield (file, excluded). An excluded file is still checked by the rules marked `always`."""
     for p in paths:
         files: Iterable[Path] = sorted(p.rglob("*.md")) if p.is_dir() else [p]
         for f in files:
-            if any(f.match(pattern) or f.name == pattern for pattern in exclude):
-                continue
-            yield f
+            yield f, any(f.match(pattern) or f.name == pattern for pattern in exclude)
 
 
 def lint_paths(
@@ -834,13 +937,17 @@ def lint_paths(
     skills_root: Path = SKILLS_ROOT,
 ) -> list[Violation]:
     refs = ReferenceChecker(repo_root, skills_root)
+    selected = set(rules) if rules else set(RULES)
     out: list[Violation] = []
-    for f in iter_files(paths, exclude):
+    for f, excluded in iter_files(paths, exclude):
+        active = selected & ALWAYS_RULES if excluded else selected
+        if not active:
+            continue
         try:
             display = str(f.resolve().relative_to(repo_root))
         except ValueError:
             display = str(f)
-        out.extend(lint_text(f.read_text(encoding="utf-8"), f.resolve(), display, refs, rules))
+        out.extend(lint_text(f.read_text(encoding="utf-8"), f.resolve(), display, refs, active))
     out.sort(key=lambda v: (v.path, v.line, v.rule))
     return out
 
@@ -900,7 +1007,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--exclude",
         action="append",
         default=list(DEFAULT_EXCLUDE),
-        help="file name or glob to skip (repeatable)",
+        help="file name or glob to skip; rules marked always (MACHINE) still run on it (repeatable)",
     )
     ap.add_argument("--list-rules", action="store_true", help="print the rule table and exit")
     ap.add_argument("--summary", action="store_true", help="also print per-file counts")

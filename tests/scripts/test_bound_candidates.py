@@ -934,3 +934,304 @@ class TestMainRefusesMissingInputs:
             bc.main(
                 self._argv(tmp_path, report, res, cal, "--measurements", str(tmp_path / "m.json"))
             )
+
+
+# --------------------------------------------------------------------------- below the bound
+
+
+def _lin_measured(t_dev, source, spread=1.0, **extra):
+    """A GEMM measurement: 8.4 MB at 1000 GB/s bounds it at ~8.4 us (launch floor 2, t_cmp 0.67).
+    The wall time sits just over the device time, as it does for a GEMM whose call is not
+    dominated by its launch."""
+    ids = _ids()
+    return {
+        ids["lin"]: {
+            "t_host_us": t_dev + 1.0,
+            "spread_us": spread,
+            "t_dev_us": t_dev,
+            "t_dev_source": source,
+            **extra,
+        }
+    }
+
+
+class TestBelowTheBound:
+    """A t_dev under the memory bound is a measurement of the wrong quantity, and is named."""
+
+    def test_a_resident_t_dev_under_the_bound_is_below_the_bound_not_unclassified(self, bundle_dir):
+        cands, rows = bc.run(
+            _report(),
+            _resolution(bundle_dir),
+            _lin_measured(5.0, "profiler:harness", working_set_bytes=8396800),
+            _cal(),
+            "r",
+        )
+        c = _by_id(cands)[_ids()["lin"]]
+        assert c.bound == pytest.approx(8.3968)
+        assert c.regime == bc.R_BELOW_BOUND
+        assert c.regime_test.startswith("bound_us-t_dev_us=3.3968 > spread_us=1")
+        note = c.notes[-1]
+        assert "t_mem_us=8.3968" in note and "bytes_min=8396800" in note
+        assert "last-level cache" in note and "--measure" in note
+        assert "8396800 bytes" in note
+        # The row carries the regime, and every bound-based gate still names its numbers.
+        r = _final(rows, c.candidate_id, "library_call")
+        assert r["regime"] == bc.R_BELOW_BOUND
+        assert (r["gate"], r["status"]) == ("headroom", "REJECT")
+        assert r["lhs_value"] == pytest.approx(5.0 - 8.3968)
+
+    def test_a_streaming_t_dev_at_the_bound_classifies(self, bundle_dir):
+        cands, _ = bc.run(
+            _report(),
+            _resolution(bundle_dir),
+            _lin_measured(9.0, "profiler:harness-streaming", t_dev_resident_us=5.0),
+            _cal(),
+            "r",
+        )
+        c = _by_id(cands)[_ids()["lin"]]
+        assert c.regime == bc.R_AT_BOUND
+        assert c.t_dev == 9.0 and c.t_dev_resident == 5.0
+        assert c.metrics()["t_dev_resident_us"] == 5.0
+
+    def test_a_streaming_t_dev_over_the_bound_is_memory_bound_inefficient(self, bundle_dir):
+        cands, rows = bc.run(
+            _report(),
+            _resolution(bundle_dir),
+            _lin_measured(12.0, "profiler:harness-streaming", t_dev_resident_us=5.0),
+            _cal(),
+            "r",
+        )
+        c = _by_id(cands)[_ids()["lin"]]
+        assert c.regime == bc.R_MEM_INEFF
+        assert _final(rows, c.candidate_id, "library_call")["status"] == "ACCEPT"
+
+    def test_within_spread_of_the_bound_is_not_below_it(self, bundle_dir):
+        cands, _ = bc.run(
+            _report(), _resolution(bundle_dir), _lin_measured(7.5, "profiler:harness"), _cal(), "r"
+        )
+        assert _by_id(cands)[_ids()["lin"]].regime == bc.R_AT_BOUND
+
+    def test_a_streaming_number_under_the_bound_points_at_bytes_min(self, bundle_dir):
+        cands, _ = bc.run(
+            _report(),
+            _resolution(bundle_dir),
+            _lin_measured(5.0, "profiler:harness-streaming"),
+            _cal(),
+            "r",
+        )
+        c = _by_id(cands)[_ids()["lin"]]
+        assert c.regime == bc.R_BELOW_BOUND
+        assert "--bytes-min" in c.notes[-1] and "last-level cache" not in c.notes[-1]
+
+    def test_the_regime_token_is_log_safe(self, bundle_dir):
+        _, rows = bc.run(
+            _report(), _resolution(bundle_dir), _lin_measured(5.0, "profiler:harness"), _cal(), "r"
+        )
+        text = "\n".join(bc.format_line(r) for r in rows)
+        assert f",{bc.R_BELOW_BOUND}," in text
+        assert bc.worklist_from_log(text) == bc.worklist(rows)
+
+
+class TestStreamingMeasurement:
+    def test_merge_keeps_the_resident_number_and_takes_the_streaming_one(self):
+        record = {"t_dev_us": 5.0, "t_dev_source": "profiler:harness", "kernels": {"k": 1.0}}
+        stream = {
+            "t_dev_us": 9.0,
+            "t_dev_source": "profiler:harness-streaming",
+            "kernels": {"k": 1.8},
+            "working_set_bytes": 8396800,
+            "pool_bytes": 2 * 18874368,
+            "copies": 5,
+            "profiled_calls": 210,
+        }
+        out = bc.merge_streaming_profile(record, stream)
+        assert out["t_dev_us"] == 9.0 and out["t_dev_source"] == "profiler:harness-streaming"
+        assert out["t_dev_resident_us"] == 5.0 and out["kernels"] == {"k": 1.0}
+        assert out["working_set_bytes"] == 8396800
+        assert out["stream"] == {"pool_bytes": 2 * 18874368, "copies": 5, "profiled_calls": 210}
+        # Merging again does not overwrite the resident number with the streaming one.
+        again = bc.merge_streaming_profile(out, stream)
+        assert again["t_dev_resident_us"] == 5.0
+
+    def test_a_failed_streaming_pass_leaves_a_resident_number_labelled_resident(self):
+        record = {"t_dev_us": 5.0, "t_dev_source": "profiler:harness"}
+        out = bc.merge_streaming_profile(record, {"profile_error": "no room"})
+        assert out["t_dev_us"] == 5.0 and out["t_dev_source"] == "profiler:harness"
+        assert out["t_dev_resident_us"] == 5.0
+        assert out["stream"] == {"error": "no room"}
+
+    def test_measure_adds_the_streaming_pass_to_an_existing_record_without_re_timing(
+        self, tmp_path, monkeypatch
+    ):
+        ids = _ids()
+        harness = _harness(tmp_path)
+        out = tmp_path / "measurements.json"
+        prior = {
+            "harness": str(harness),
+            "t_host_us": 8.0,
+            "spread_us": 0.2,
+            "t_dev_us": 5.0,
+            "t_dev_source": "profiler:harness",
+        }
+        out.write_text(json.dumps({ids["rms"]: prior}))
+        calls = []
+
+        def fake_profile(h, interp, n, warm_s=None, pool_bytes=None):
+            calls.append((pathlib.Path(h).name, n, pool_bytes))
+            return {
+                "t_dev_us": 6.0,
+                "t_dev_source": "profiler:harness-streaming",
+                "kernels": {},
+                "profiled_calls": n,
+                "working_set_bytes": 26624,
+                "pool_bytes": pool_bytes,
+                "copies": 3,
+            }
+
+        monkeypatch.setattr(bc, "profile_harness", fake_profile)
+        monkeypatch.setattr(
+            bc.subprocess, "run", lambda *a, **k: pytest.fail("the host arm was re-timed")
+        )
+        cands = bc.candidates_from_report(_report(), _resolution(tmp_path), {})
+        rms = [c for c in cands if c.candidate_id == ids["rms"]]
+        got = bc.measure_harnesses(rms, tmp_path, out, "python", rounds=2, calls=3, pool_bytes=1000)
+        assert calls == [("h.py", 6, 1000)]
+        rec = got[ids["rms"]]
+        assert rec["t_host_us"] == 8.0 and rec["t_dev_resident_us"] == 5.0
+        assert rec["t_dev_us"] == 6.0 and rec["t_dev_source"] == "profiler:harness-streaming"
+        # A second --measure finds the pass recorded and does nothing.
+        bc.measure_harnesses(rms, tmp_path, out, "python", rounds=2, calls=3, pool_bytes=1000)
+        assert len(calls) == 1
+
+    def test_without_a_pool_an_existing_record_is_left_alone(self, tmp_path, monkeypatch):
+        ids = _ids()
+        harness = _harness(tmp_path)
+        out = tmp_path / "measurements.json"
+        out.write_text(json.dumps({ids["rms"]: {"harness": str(harness), "t_dev_us": 5.0}}))
+        monkeypatch.setattr(bc, "profile_harness", lambda *a, **k: pytest.fail("profiled"))
+        cands = bc.candidates_from_report(_report(), _resolution(tmp_path), {})
+        got = bc.measure_harnesses(cands, tmp_path, out, "python", rounds=1, calls=1)
+        assert got[ids["rms"]] == {"harness": str(harness), "t_dev_us": 5.0}
+
+
+# --------------------------------------------------------------------------- layout_transform
+
+
+class TestLayoutTransformNomination:
+    """The pitch rule nominates a layout transform on its own; the later gates price it."""
+
+    # The GEMM's weight is 4096x1024 bf16: a contiguous row pitch of 2048 bytes.
+
+    def test_a_pitch_on_the_period_admits_and_the_detail_names_the_tensors(self, bundle_dir):
+        _, rows = bc.run(
+            _report(),
+            _resolution(bundle_dir),
+            _measurements(),
+            _cal(channel_period_bytes=2048),
+            "r",
+        )
+        first = _rows(rows, _ids()["lin"], "layout_transform")[0]
+        assert (first["gate"], first["status"]) == ("class_admits", "PASS")
+        assert first["arithmetic"] == "layout_nominations=2 > required=0"
+        assert first["detail"]["channel_period_bytes"] == 2048
+        assert first["detail"]["camping"] == [
+            "4x1024:pitch_bytes=2048",
+            "4096x1024:pitch_bytes=2048",
+        ]
+
+    def test_a_pitch_off_the_period_is_rejected_with_zero(self, bundle_dir):
+        _, rows = bc.run(
+            _report(),
+            _resolution(bundle_dir),
+            _measurements(),
+            _cal(channel_period_bytes=1536),
+            "r",
+        )
+        r = _final(rows, _ids()["lin"], "layout_transform")
+        assert (r["gate"], r["status"]) == ("class_admits", "REJECT")
+        assert r["arithmetic"] == "layout_nominations=0 > required=0"
+        assert r["detail"]["camping"] == []
+
+    def test_an_unmeasured_period_is_none_never_no_camp(self, outcome):
+        r = _final(outcome[1], _ids()["lin"], "layout_transform")
+        assert (r["gate"], r["status"]) == ("class_admits", "REJECT")
+        assert r["arithmetic"] == "layout_nominations=None > required=0"
+        assert r["lhs_value"] is None and r["detail"]["channel_period_bytes"] is None
+        assert r["detail"]["camping"] == "unmeasured period"
+
+    def test_the_regime_still_admits_without_a_period(self, bundle_dir):
+        ids = _ids()
+        cands, rows = bc.run(
+            _report(),
+            _resolution(bundle_dir),
+            {ids["rms"]: {"t_host_us": 8.0, "spread_us": 0.4}},
+            _cal(timing_floor_us=0.1),
+            "r",
+            patterns={RMS: (64, 4096)},
+            bw_pattern=lambda run, stride: 5.0,
+        )
+        assert _by_id(cands)[ids["rms"]].regime == bc.R_MEM_LAYOUT
+        first = _rows(rows, ids["rms"], "layout_transform")[0]
+        assert (
+            first["status"] == "PASS" and first["arithmetic"] == "layout_nominations=1 > required=0"
+        )
+
+    def test_the_period_comes_from_the_argument_before_the_record(self, bundle_dir):
+        _, rows = bc.run(
+            _report(),
+            _resolution(bundle_dir),
+            _measurements(),
+            _cal(channel_period_bytes=1536),
+            "r",
+            channel_period_bytes=2048,
+        )
+        assert _rows(rows, _ids()["lin"], "layout_transform")[0]["status"] == "PASS"
+
+    def test_admitted_and_priced_headroom_to_the_contiguous_bound(self, bundle_dir):
+        # t_dev 17.5 (op average) over a bound of 8.4: the transform is worth up to 9.1 us.
+        _, rows = bc.run(
+            _report(),
+            _resolution(bundle_dir),
+            _measurements(),
+            _cal(channel_period_bytes=2048),
+            "r",
+        )
+        r = _final(rows, _ids()["lin"], "layout_transform")
+        assert r["status"] == "ACCEPT"
+        assert r["ceiling_us"] == pytest.approx(17.5 - 8.3968) and r["mechanism_us"] == 0.0
+
+    def test_admitted_then_rejected_on_measured_grounds_at_the_bound(self, bundle_dir):
+        # Streaming t_dev within spread of the bound: admitted, measurable, headroom 0.6 us,
+        # and net_positive says that is inside the spread. The gate and both sides are named.
+        _, rows = bc.run(
+            _report(),
+            _resolution(bundle_dir),
+            _lin_measured(9.0, "profiler:harness-streaming"),
+            _cal(channel_period_bytes=2048),
+            "r",
+        )
+        chain = _rows(rows, _ids()["lin"], "layout_transform")
+        assert [(g["gate"], g["status"]) for g in chain] == [
+            ("class_admits", "PASS"),
+            ("measurable", "PASS"),
+            ("headroom", "PASS"),
+            ("net_positive", "REJECT"),
+        ]
+        assert chain[-1]["arithmetic"] == "ceiling_us=0.6032 > spread_us=1"
+
+    def test_admitted_then_rejected_at_headroom_when_t_dev_is_below_the_bound(self, bundle_dir):
+        _, rows = bc.run(
+            _report(),
+            _resolution(bundle_dir),
+            _lin_measured(5.0, "profiler:harness"),
+            _cal(channel_period_bytes=2048),
+            "r",
+        )
+        r = _final(rows, _ids()["lin"], "layout_transform")
+        assert (r["gate"], r["status"]) == ("headroom", "REJECT")
+        assert r["regime"] == bc.R_BELOW_BOUND
+        assert r["arithmetic"].startswith("headroom_us=-3.3968 > 0")
+
+    def test_bound_json_records_the_period_it_priced_with(self, tmp_path, bundle_dir):
+        out, _ = _routing(tmp_path, bundle_dir)
+        assert "channel_period_bytes" in json.loads((out / "bound.json").read_text())["calibration"]

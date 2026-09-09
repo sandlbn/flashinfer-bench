@@ -90,7 +90,7 @@ is cache-resident, so a one-weight loop cannot see it — stream a pool larger t
 the spacing of the pitches at which it is slow (`scripts/calibrate_part.py` prints it), and
 where the sweep resolves none the transform stands down rather than borrow a period. The
 fix (`pad_rows_off_channel_period`) is keyed on the pitch arithmetic and verified per shape
-at load, because a taller weight at the same pitch measured a small loss from the pad. The
+at load, because the pad can lose at another height of the same pitch. The
 harness A/B that cross-checks one pitch: `tools/kernel-harness/trials/linear_row_pad.py`.
 
 ## Traps when deploying a kernel through `apply()`

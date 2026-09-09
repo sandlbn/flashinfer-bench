@@ -25,8 +25,8 @@ If `torch.xpu.is_available()` is False, stop — `docs/start/hardware-support.md
 
 ## Step 2: PyTorch with XPU support
 
-torch-xpu is installed by the owner into the dev venv (`.venv`). This step verifies it and
-installs nothing:
+Installing torch-xpu into the dev venv (`.venv`) is the owner's action. This step verifies it
+and installs nothing:
 
 ```bash
 source .venv/bin/activate
@@ -37,8 +37,9 @@ python -c "import torch, triton; print(torch.__version__, torch.xpu.is_available
 Any other output — no `+xpu` suffix, `False`, or `intel` missing from the backends — means
 the venv never had the XPU wheels or has been re-synced (below). Stop and ask the owner to
 install `torch==<ver>+xpu` and `triton-xpu==<ver>` from
-`https://download.pytorch.org/whl/xpu` into `.venv`. Neither venv has `pip`, so verify with
-`python -c "import <module>"`, never `pip show`.
+`https://download.pytorch.org/whl/xpu` into `.venv`. Verify with `python -c "import <module>"`,
+never `pip show`: a uv-managed venv may have no `pip`, and `pip show` says nothing about what
+imports.
 
 ### Never `uv run` or `uv pip` in these venvs
 
@@ -61,7 +62,7 @@ check afterwards.
 ## Step 3: oneAPI DPC++ (the SYCL compiler)
 
 ```bash
-source /opt/intel/oneapi/setvars.sh
+source "${ONEAPI_ROOT:-/opt/intel/oneapi}/setvars.sh"
 # or point the builder straight at it:
 export FIB_SYCL_COMPILER=/opt/intel/oneapi/compiler/latest/bin/icpx
 
@@ -82,13 +83,13 @@ flashinfer-bench providers list
 | --- | --- | --- | --- |
 | `vllm-xpu` | vLLM's Intel kernels: norms, RoPE, activations, quantization, KV cache | **wheel**, no compiler needed | [vllm-project/vllm-xpu-kernels](https://github.com/vllm-project/vllm-xpu-kernels) |
 | `sgl-kernel-xpu` | SGLang's Intel kernels: FMHA, MLA, GroupGemm, low-bit GEMM, GdnAttn | **source**, long and memory-hungry | [sgl-project/sgl-kernel-xpu](https://github.com/sgl-project/sgl-kernel-xpu) |
-| `onednn` | GEMM, conv, and the post-op mechanism used to fuse epilogues | **system**, ships with oneAPI | `/opt/intel/oneapi/dnnl/latest` |
+| `onednn` | GEMM, conv, and the post-op mechanism used to fuse epilogues | **system**, ships with oneAPI | `FIB_ONEDNN_DIR`, else the default roots in `flashinfer_bench/compile/builders/sycl_builder.py` |
 | `xe-fuse` | GEMM epilogue fusion on CUTLASS-SYCL (not stable, per IntelLabs) | **checkout** | [IntelLabs/Xe-Fuse](https://github.com/IntelLabs/Xe-Fuse) |
 | `sycl-tla` | CUTLASS with SYCL bindings; required by Xe-Fuse | **checkout** | [intel/sycl-tla](https://github.com/intel/sycl-tla) |
 
 `providers install` is an install, so it is the owner's action. It runs `python -m pip`
-in the active interpreter and nothing else by default. On an interpreter without `pip` —
-both venvs here — it does not run: it prints `Declined to install <package> into <venv>
+in the active interpreter and nothing else by default. On an interpreter without `pip` it
+does not run: it prints `Declined to install <package> into <venv>
 …` naming the package, the venv and interpreter, the reason (a uv resolve can replace the
 XPU torch with a CUDA build), the manual recipe, and the opt-in, then exits 1. There is no
 automatic fallback to uv; `--installer uv` (or `FIB_PROVIDER_INSTALLER=uv`) is the only
@@ -146,7 +147,7 @@ and select a specific release, side by side and without touching the oneAPI tree
 ```bash
 python scripts/build_onednn.py --list
 python scripts/build_onednn.py --version <tag>
-export FIB_ONEDNN_DIR=$HOME/.cache/flashinfer_bench/onednn/<tag>
+export FIB_ONEDNN_DIR=<prefix>    # the script prints this line with the prefix it built into
 ```
 
 The build enables `ONEDNN_BUILD_GRAPH=ON`; the Graph API carries the `gated_mlp` fusion
@@ -167,7 +168,9 @@ let the trace record it.
 ## Step 5: unitrace (profiler)
 
 From [intel/pti-gpu](https://github.com/intel/pti-gpu); not on PyPI, build from source.
-`flashinfer_bench/agents/unitrace.py` documents the build and wraps invocation. It gives
+`flashinfer_bench/agents/unitrace.py` documents the build and wraps invocation; it resolves
+the binary through `FIB_UNITRACE`, then `unitrace` on `PATH`, then a build under
+`tmp/pti-gpu/`, and `find_unitrace()` returning `None` names every place it looked. It gives
 device-side kernel timing and the Kernel Properties section that reports register spill.
 Flags: `-d` for device timing, `--chrome-kernel-logging` for a timeline.
 
