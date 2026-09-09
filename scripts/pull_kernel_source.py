@@ -53,41 +53,105 @@ def mk(a):
     return a
 
 
+# A custom op only exists in a process that imported the package registering it. The
+# parent hands over the modules it had loaded rather than this script guessing a name.
+for _m in json.loads(sys.argv[4]):
+    try:
+        __import__(_m)
+    except Exception:
+        pass
+
 ns, name = op.split("::")
+dev = sys.argv[3].split(":")[0]
+from torch.autograd import DeviceType
+from torch.profiler import ProfilerActivity, profile
+
+acts = [ProfilerActivity.CPU, getattr(ProfilerActivity, dev.upper())]
 try:
-    getattr(getattr(torch.ops, ns), name)(*[mk(a) for a in spec])
-    torch.__dict__[sys.argv[3].split(":")[0]].synchronize()
+    args = [mk(a) for a in spec]
+    fn = getattr(getattr(torch.ops, ns), name)
+    fn(*args)
+    torch.__dict__[dev].synchronize()
+    with profile(activities=acts) as prof:
+        fn(*args)
+        torch.__dict__[dev].synchronize()
+    for e in prof.key_averages():
+        if e.device_type != DeviceType.CPU and (e.self_device_time_total or 0) > 0:
+            print("PROBE_KERNEL", e.key)
 except Exception as exc:
     print("PROBE_ERROR", type(exc).__name__, str(exc)[:120], file=sys.stderr)
 """
 
 
-def probe_library(op: str, argspec: List, device: str) -> List[str]:
-    """Run the op once with oneDNN's verbose logging on, and return the primitives it ran.
+def _op_registering_modules() -> List[str]:
+    """Top-level modules loaded here that a probe may need in order to see the op.
 
-    A subprocess, because the logging is enabled by an environment variable read at library
-    load, and because an op that faults must not take the resolver down with it.
+    Custom ops are registered as a side effect of import, so a fresh subprocess knows none
+    of them. Rather than guess a package name from the op's namespace -- which is wrong as
+    often as it is right, `_C` being nobody's package name -- hand over what this process
+    actually loaded and let the probe import them.
+    """
+    import sys as _sys
+
+    keep = []
+    for name, mod in list(_sys.modules.items()):
+        f = getattr(mod, "__file__", None) or ""
+        if not ("site-packages" in f or "/Projects/" in f):
+            continue
+        if name.startswith("torch") or name.startswith("_"):
+            continue
+        # Ops are registered by the compiled extension, not by the package that wraps it:
+        # importing `vllm_xpu_kernels` alone leaves `torch.ops._C` empty, and only
+        # `vllm_xpu_kernels._C` fills it. Keep extension submodules for that reason.
+        if "." in name and not f.endswith((".so", ".pyd")):
+            continue
+        keep.append(name)
+    return sorted(set(keep))
+
+
+def probe_library(op: str, argspec: List, device: str) -> Tuple[List[str], List[str]]:
+    """Run the op, and report ``(oneDNN primitives, device kernels)`` it actually launched.
+
+    Two things come out of running it that reading cannot give. oneDNN's verbose log names
+    the primitive it selected -- the thing that runs when ATen "implements" a GEMM. And the
+    profiler names the device kernels the op launched, which is what lets an op be charged
+    its share of a run: a decomposition like ``aten::linear`` has no device time of its own,
+    all of it belongs to the kernels it reaches, and without this link the busiest op in a
+    model reports zero.
+
+    A subprocess, because the verbose logging is enabled by an environment variable read at
+    library load, and because an op that faults must not take the resolver down with it.
     """
     env = {**os.environ, "ONEDNN_VERBOSE": "1"}
     try:
         r = subprocess.run(
-            [sys.executable, "-c", _PROBE, json.dumps(argspec), op, device],
+            [
+                sys.executable,
+                "-c",
+                _PROBE,
+                json.dumps(argspec),
+                op,
+                device,
+                json.dumps(_op_registering_modules()),
+            ],
             capture_output=True,
             text=True,
             timeout=180,
             env=env,
         )
     except (subprocess.TimeoutExpired, OSError):
-        return []
+        return [], []
     out = r.stdout + r.stderr
-    prims = []
+    prims, kernels = [], []
     for line in out.splitlines():
         if ",primitive,exec," in line:
             f = line.split(",")
             # engine, primitive, implementation, ..., problem, time
             if len(f) > 8:
                 prims.append(f"{f[5]} via {f[6]}  [{f[-2]}]")
-    return sorted(set(prims))
+        elif line.startswith("PROBE_KERNEL "):
+            kernels.append(line[len("PROBE_KERNEL ") :].strip())
+    return sorted(set(prims)), sorted(set(kernels))
 
 
 def dispatch_report(op: str, overload: str = "") -> Tuple[List[str], List[str]]:
@@ -101,8 +165,14 @@ def dispatch_report(op: str, overload: str = "") -> Tuple[List[str], List[str]]:
     import torch
 
     dump = ""
-    for name in ([f"{op}.{overload}"] if overload else []) + [op]:
-        dump = torch._C._dispatch_dump(name)
+    candidates = [op]
+    if overload and overload != "default":
+        candidates.insert(0, f"{op}.{overload}")
+    for name in candidates:
+        try:
+            dump = torch._C._dispatch_dump(name)
+        except RuntimeError:
+            continue  # not a legal overload for this namespace
         if dump:
             break
     keys, sources = [], []
@@ -346,6 +416,7 @@ def report(
     argspec: Optional[List] = None,
     calls: Optional[int] = None,
     overload: str = "",
+    share_of: Optional[object] = None,
 ) -> Dict[str, object]:
     """Say what implements ``op`` on ``device``, and where that source is."""
     keys, sources = dispatch_report(op, overload)
@@ -355,7 +426,14 @@ def report(
     print(f"\n=== {head} ===")
 
     provider, where, route = "unresolved", [], ""
-    prims = probe_library(op, argspec, device) if argspec is not None else []
+    share_pct: Optional[float] = None
+    prims, launched = probe_library(op, argspec, device) if argspec is not None else ([], [])
+    if share_of is not None and launched:
+        pct = share_of(launched)
+        if pct is not None:
+            print(
+                f"  share         : {pct:.2f}% of device time (kernels: {', '.join(launched)[:60]})"
+            )
     found = locate(op, sources, extra) if (dev or prims) else []
     in_torch = _in_torch(sources) or any("site-packages/torch/" in str(f) for f, _ in found)
 
@@ -400,7 +478,14 @@ def report(
         written = bundle(op, device, dev, sources, found, harness, out)
         if written:
             print(f"  bundled to    : {written}")
-    return {"op": op, "provider": provider, "where": where, "route": route, "bundle": written}
+    return {
+        "op": op,
+        "provider": provider,
+        "where": where,
+        "route": route,
+        "bundle": written,
+        "share": share_pct,
+    }
 
 
 def ops_from_harnesses(d: pathlib.Path) -> Dict[str, pathlib.Path]:
@@ -423,6 +508,27 @@ def ops_from_harnesses(d: pathlib.Path) -> Dict[str, pathlib.Path]:
         if op not in best or calls > best[op][0]:
             best[op] = (calls, f)
     return {op: f for op, (_, f) in best.items()}
+
+
+def share_lookup(path: pathlib.Path):
+    """Charge an op the device time of the kernels it launches.
+
+    Returns None when discovery recorded no timing, rather than inventing a share.
+    """
+    data = json.loads(path.read_text())
+    by_kernel = data.get("device_time_by_kernel") or {}
+    total = float(data.get("device_time_total_us") or 0.0)
+    if not by_kernel or total <= 0:
+        return None
+
+    def share(kernels: List[str]) -> Optional[float]:
+        us = 0.0
+        for k in kernels:
+            # Profiler keys are truncated in the stored table; match on the stored prefix.
+            us += next((v for name, v in by_kernel.items() if name.startswith(k[:60])), 0.0)
+        return 100.0 * us / total if us else None
+
+    return share
 
 
 def from_report(path: pathlib.Path) -> Tuple[Dict[str, Tuple[int, List, str]], List[Dict]]:
@@ -456,8 +562,10 @@ def main() -> None:
         harnesses = ops_from_harnesses(pathlib.Path(args.from_harnesses))
     recorded: Dict[str, Tuple[int, List, str]] = {}
     triton: List[Dict] = []
+    share_of = None
     if args.from_report:
         recorded, triton = from_report(pathlib.Path(args.from_report))
+        share_of = share_lookup(pathlib.Path(args.from_report))
     ops = sorted(set(list(args.op) + list(harnesses) + list(recorded)))
     if not ops and not triton:
         ap.error("give --op, --from-harnesses or --from-report")
@@ -467,8 +575,20 @@ def main() -> None:
     out = pathlib.Path(args.bundle) if args.bundle else None
     results = []
     for op in ops:
-        calls, argspec = recorded.get(op, (None, None))
-        results.append(report(op, args.device, args.search, out, harnesses.get(op), argspec, calls))
+        calls, argspec, overload = recorded.get(op, (None, None, ""))
+        results.append(
+            report(
+                op,
+                args.device,
+                args.search,
+                out,
+                harnesses.get(op),
+                argspec,
+                calls,
+                overload,
+                share_of,
+            )
+        )
 
     # Triton kernels are not dispatcher ops; the JIT knows where their source is.
     for t in triton:
@@ -480,12 +600,15 @@ def main() -> None:
         print("  route         : /wrap-kernel-for-tuning -- tune in place, no substitution")
         results.append({"op": t["kernel"], "provider": "Triton", "route": "wrap"})
 
-    print("\n" + "=" * 78)
-    print(f"{'op':44} {'implemented by':32}")
-    print("-" * 78)
-    for r in sorted(results, key=lambda r: str(r["provider"])):
-        print(f"{str(r['op'])[:43]:44} {str(r['provider'])[:31]:32}")
-    print("=" * 78)
+    print("\n" + "=" * 86)
+    print(f"{'share':>8}  {'op':42} {'implemented by':32}")
+    print("-" * 86)
+    # Ranked by measured share, because that is the only thing that says what an
+    # optimization is worth. Ops with no share measured sort last, not first.
+    for r in sorted(results, key=lambda r: (-(r.get("share") or -1), str(r["op"]))):
+        sh = f"{r['share']:.2f}%" if r.get("share") is not None else "-"
+        print(f"{sh:>8}  {str(r['op'])[:41]:42} {str(r['provider'])[:31]:32}")
+    print("=" * 86)
     print("\nEach line is a kernel that ran. The route says which skill takes it from here;")
     print("bound it against flashinfer_bench.device.calibration before optimizing any of them.")
 

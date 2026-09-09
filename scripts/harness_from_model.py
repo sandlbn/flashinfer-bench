@@ -91,6 +91,55 @@ def _describe(x: Any) -> Any:
     return type(x).__name__
 
 
+def device_time(llm, prompts: int, out_tokens: int, device: str) -> Dict[str, object]:
+    """Per-op device time for this model on this stack, as a share of the total.
+
+    Call counts are not share, and share is the only thing that says what an optimization
+    is worth. It has to be measured per model and per stack -- the ranking one model
+    produces is not the ranking the next one produces, and a remembered ranking is how you
+    end up optimizing the wrong op confidently.
+
+    A separate pass from the dispatch recorder: the two instrument the same calls, and
+    running them together charges the recorder's own overhead to the kernels.
+    """
+    from torch.profiler import ProfilerActivity, profile
+    from vllm import SamplingParams
+
+    act = [ProfilerActivity.CPU]
+    if device.startswith("xpu"):
+        act.append(ProfilerActivity.XPU)
+    elif device.startswith("cuda"):
+        act.append(ProfilerActivity.CUDA)
+
+    with profile(activities=act) as prof:
+        llm.generate(
+            [f"Topic {i}." for i in range(prompts)],
+            SamplingParams(temperature=0.0, max_tokens=out_tokens, ignore_eos=True),
+        )
+
+    # Every op appears twice: once as the host-side call that launched the work, carrying
+    # the device time it is responsible for, and once as the device kernel itself. Summing
+    # both halves double-counts the whole run and halves every share.
+    from torch.autograd import DeviceType
+
+    per_op: Dict[str, float] = {}
+    kernels: Dict[str, float] = {}
+    for e in prof.key_averages():
+        us = float(getattr(e, "self_device_time_total", 0.0) or 0.0)
+        if us <= 0:
+            continue
+        if e.device_type == DeviceType.CPU:
+            per_op[e.key] = per_op.get(e.key, 0.0) + us
+        else:
+            kernels[e.key] = kernels.get(e.key, 0.0) + us
+    return {
+        "by_op": dict(sorted(per_op.items(), key=lambda kv: -kv[1])),
+        "by_kernel": dict(sorted(kernels.items(), key=lambda kv: -kv[1])),
+        # The denominator is the time kernels actually spent on the device.
+        "total_us": sum(kernels.values()),
+    }
+
+
 def observe_triton():
     """Patch Triton's JIT entry point to record each kernel and where its source lives.
 
@@ -288,6 +337,14 @@ def main() -> None:
         )
     restore_triton()
 
+    # A second pass, for the number that decides what any of this is worth.
+    try:
+        profiled = device_time(llm, args.prompts, args.out_tokens, "xpu:0")
+    except Exception as exc:  # profiling is not worth failing discovery over
+        print(f"  device-time pass failed ({type(exc).__name__}: {exc}); shares unavailable")
+        profiled = {"by_op": {}, "by_kernel": {}, "total_us": 0.0}
+    timed = profiled["by_op"]
+
     ranked = sorted(RECORDS.values(), key=lambda r: -r["calls"])
     by_op = collections.Counter(r["op"] for r in ranked)
     print(
@@ -300,9 +357,28 @@ def main() -> None:
 
     # Every op, not just the ones harnessed: resolving where each kernel lives is a separate
     # step, and it cannot resolve what this step did not write down.
+    total_us = float(profiled["total_us"]) or 1.0
+
+    # The profiler names ops `aten::linear`; the dispatch recorder names them
+    # `aten.linear.default`. Same op, two spellings.
+    def _share(op_dotted: str) -> Dict[str, float]:
+        parts = op_dotted.split(".")
+        us = timed.get(f"{parts[0]}::{parts[1]}", 0.0)
+        return {"device_us": round(us, 1), "share_pct": round(100.0 * us / total_us, 2)}
+
     report = {
         "model": args.model,
+        "device_time_total_us": round(total_us, 1),
+        "device_time_by_kernel": {
+            k: round(v, 1) for k, v in list(profiled["by_kernel"].items())[:40]
+        },
         "ops": [{"op": r["op"], "calls": r["calls"], "args": _jsonable(r["args"])} for r in ranked],
+        "op_share": dict(
+            sorted(
+                ((o, _share(o)) for o in by_op),
+                key=lambda kv: -kv[1]["share_pct"],
+            )
+        ),
         "op_calls": dict(
             sorted(
                 collections.Counter(
