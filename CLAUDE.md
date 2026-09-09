@@ -183,7 +183,7 @@ the dev venv. Procedure lives in the skills named; this table says what exists.
 | Resolve | Which kernel implements each op: a oneDNN primitive, a provider kernel, Triton, a Python-registered op, ATen inside PyTorch, or a decomposition? Asks the dispatcher and runs the op under `ONEDNN_VERBOSE`; `--bundle` copies the kernel's own source next to its harness with a `PROVENANCE.md` | `scripts/pull_kernel_source.py` |
 | Fuse | Which producer→consumer edges the model actually ran could a GEMM epilogue absorb? Presets are read from Xe-Fuse, not copied | `scripts/fusion_candidates.py` |
 | Calibrate | What does this part charge: `apply()` dispatch cost, timing floor, launch floor, read bandwidth, achieved matmul throughput? Prints the record the bounds and the apply gate consume | `scripts/calibrate_part.py` |
-| Rank and bound | For every op with measured share and every delivery mechanism — provider patch, Triton in place, library call, layout transform, fusion at the call site or via `apply()`, `apply()` substitution, source rewrite — is the ceiling positive after that mechanism's cost? Every gate writes one line; `worklist.json` is the survivors ordered by worth | `scripts/bound_candidates.py` |
+| Rank and bound | For every op with measured share and every delivery mechanism — provider patch, Triton in place, library call, layout transform, fusion at the call site or via `apply()`, `apply()` substitution, source rewrite, an authored kernel bound at the call site or delivered via `apply()` — is the ceiling positive after that mechanism's cost? An authored kernel is priced against what a kernel written on this part reaches (the calibration's authored-stream probe), never the part's peak. Every gate writes one line; `worklist.json` is the survivors ordered by worth | `scripts/bound_candidates.py` |
 | Optimize | Propose, measure, branch, keep the best. `benchmark` gates on correctness before timing and interleaves arms; `ab` compares two builds of one `torch.ops` symbol across processes; `finalize` refuses a best trial that is not a measured win. `init --bound --mechanism` ties a series to an ACCEPT row of the routing, and `benchmark` refuses a rejected or stale one before timing | `scripts/kernel_trials.py` |
 | Prove | Tokens/sec under vLLM, A/B, with the dispatch counters that prove the substitution happened and token digests that prove the arms agree; `--plain-arm` for a provider build or source patch. A failed gate -- an arm that failed, differing digests, nothing applied, a rejected or stale routing -- halts with no throughput printed | `scripts/measure_serving_win.py` |
 
@@ -350,10 +350,13 @@ reason against the external dataset
 - **discover-model-kernels**, **wrap-kernel-for-tuning**, **measure-serving-win**: the
   pipeline stages above — discover/resolve/fuse, harness and tune a kernel inside its stack
   without extracting it, and the serving A/B
-- **optimize-intel-kernels**: SYCL or Triton solutions for existing definitions on Intel,
-  including porting CUDA Triton solutions to XPU. Carries `architectures.md` (per-part
-  traps), `xe-matrix.md` (DPAS-backed kernels) and `xe-fuse.md`. Per-part *values* are
-  queried from `Capabilities` and the calibration, not tabulated
+- **optimize-intel-kernels**: SYCL or Triton solutions on Intel — for existing definitions,
+  for CUDA Triton solutions ported to XPU, and for an op the routing found nothing implements
+  well (`authored_callsite` / `authored_apply` rows). Language is chosen from the candidate's
+  measured regime. Carries `architectures.md` (per-part traps), `xe-matrix.md` (DPAS-backed
+  kernels), `xe-fuse.md` and `references/triton-xpu.md` (what the Intel Triton checkout says
+  about writing kernels). Per-part *values* are queried from `Capabilities` and the
+  calibration, not tabulated
 - **optimize-onednn**: A slow oneDNN GEMM on Intel — `ONEDNN_VERBOSE` and dispatch output,
   resolving a rejection to the gate in oneDNN's source, the call-level fixes
 - **optimize-ssm-scan**: State-space / SSD scan kernels for hybrid models on Intel; use

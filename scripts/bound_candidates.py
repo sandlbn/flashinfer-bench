@@ -26,7 +26,9 @@ Inputs, each named by the command that produces it:
                        geom from unitrace may be added by hand under the same keys
     calibration        flashinfer_bench.device.calibration.get(): bandwidth_gbs,
                        timing_floor_us, launch_floor_us, matmul_peak_tflops, dispatch_us,
-                       channel_period_bytes
+                       channel_period_bytes; and its sidecar
+                       calibration.authored_stream_probe(): authored_stream_gbs, the
+                       bandwidth a kernel written on this box the plain way streams at
 
     python scripts/bound_candidates.py --report <dir>/discovered.json \\
         --resolution <dir>/resolution.json --out-dir <dir>/bound \\
@@ -60,7 +62,9 @@ CONTRACT -- what a consumer of these files may rely on:
      and a REJECT row for every mechanism.
   5. An unmeasurable input is rendered as ``None`` and never as a number. A mechanism whose
      delivery cost is unmeasured is rejected at ``cost_calibrated`` with ``dispatch_us=None``;
-     it is unavailable, never free.
+     it is unavailable, never free. A mechanism whose attainable bound is unmeasured -- no
+     authored-stream probe on this part -- is rejected at ``attainable_calibrated`` with
+     ``authored_stream_gbs=None``; a written kernel is never assumed to reach peak.
   6. Every bound.log line has exactly 13 comma-separated fields; no field contains a comma or
      a newline; the arithmetic field of a gate line splits on single spaces into exactly
      three tokens ``<lhs>=<value> <cmp> <rhs>`` where ``<rhs>`` is ``<name>=<value>`` or a bare
@@ -88,16 +92,41 @@ built, never a performance claim), with the delivery cost each pays:
     apply_substitution  a kernel runs on the device for this op            calibration.dispatch_us
     source_rewrite      the composite moves more bytes than the maths      0
                         requires (find_kernel_gaps output)
+    authored_callsite   nothing local implements the op as a tuned         0
+                        kernel: class = ATen inside PyTorch (no local
+                        source to patch), decomposition (parts, each a
+                        plain kernel) or Python-registered op (a
+                        reference, not a kernel) -- and no part of it is
+                        a library primitive. A kernel is written and
+                        replaces the call at its call site or in a
+                        provider; the delivery puts nothing in the path
+    authored_apply      as above, and the interface is recordable as a     calibration.dispatch_us
+                        definition; the written kernel is delivered
+                        through apply()
     upstream_report     class = ATen inside PyTorch, no local source       not a worklist row
 
 GATES, in the order evaluated; the first REJECT ends the chain for that (candidate,
 mechanism) pair, as in a dispatch list:
 
-    class_admits, edge_present (fusion), epilogue_expressible (fusion), source_present
-    (patch/Triton), definition_exists (apply), cost_calibrated (apply), measurable,
-    headroom, net_positive, worth_cutoff -- and worklist_eligible, which is the one gate
-    outside the plan's table: it turns upstream_report away from the worklist while still
-    logging that the class admitted it.
+    class_admits, parts_plain (authored), edge_present (fusion), epilogue_expressible
+    (fusion), source_present (patch/Triton), definition_exists (apply),
+    definition_authorable (authored_apply), cost_calibrated (apply), attainable_calibrated
+    (authored), measurable, headroom, net_positive, worth_cutoff -- and worklist_eligible,
+    which is the one gate outside the plan's table: it turns upstream_report away from the
+    worklist while still logging that the class admitted it.
+
+The authored mechanisms price a kernel that does not exist yet, so their bound is not what
+the running kernel is obliged to move at the part's bandwidth but what a kernel *written
+here* reaches: ``bytes_min / authored_stream_gbs``, the streaming rate of a plain Triton
+kernel measured on this part by the calibration's authored-stream probe. It is measured
+and cached like every other calibrated quantity, None when it could not be, and the
+compute side is not calibrated at all -- an op whose t_cmp exceeds that bound is priced
+against t_cmp as every mechanism is, and no claim is made about what a written GEMM
+reaches. The Intel Triton checkout's own benchmarks (Triton against oneDNN for softmax,
+against SYCL-TLA for GEMM and attention) were considered as that input and are not one:
+they cover op classes the resolver sends elsewhere (a GEMM is class oneDNN and takes
+library_call), need their C++ providers built, and publish per-part peaks as a stored
+table, which is the thing this stage never reads.
 """
 
 from __future__ import annotations
@@ -129,11 +158,14 @@ MECHANISMS = (
     "fusion_apply",
     "apply_substitution",
     "source_rewrite",
+    "authored_callsite",
+    "authored_apply",
     "upstream_report",
 )
 FUSION = ("fusion_callsite", "fusion_apply")
-APPLY = ("fusion_apply", "apply_substitution")
+APPLY = ("fusion_apply", "apply_substitution", "authored_apply")
 PATCH = ("provider_patch", "triton_in_place")
+AUTHORED = ("authored_callsite", "authored_apply")
 
 # The resolver's class strings, as tokens the log can carry (no spaces, no commas).
 CLASS_TOKENS = {
@@ -150,6 +182,11 @@ CLASS_TOKENS = {
 # Classes under which a kernel actually executes on the device for the op -- the precondition
 # for substituting one through apply(). A decomposition has no kernel of its own to replace.
 KERNEL_CLASSES = ("provider_kernel", "triton", "onednn", "aten", "python_op", "no_source")
+# Classes under which nothing local implements the op as a tuned kernel, so writing one is a
+# route: an ATen kernel inside PyTorch has no local source to patch; a decomposition is a
+# sequence of plain kernels with no kernel of its own; a Python-registered op is a reference
+# implementation. Derived from the resolver's class, never from an op's name.
+AUTHORABLE_CLASSES = ("aten", "decomposition", "python_op")
 
 # Regime tokens: the section 2.1 row names, spelled without spaces or commas.
 R_UNMEASURED = "unmeasured"  # no t_dev, or no spread: nothing to classify (section 3)
@@ -204,6 +241,9 @@ class Candidate:
     bundle: Optional[str] = None
     schema: Optional[str] = None
     launched: List[str] = field(default_factory=list)
+    # Library primitives the resolver saw the op reach (oneDNN's `primitive,exec` lines);
+    # None when the resolution carries no such record, [] when it recorded none.
+    primitives: Optional[List[str]] = None
     t_dev: Optional[float] = None
     t_dev_source: str = "none"
     t_dev_resident: Optional[float] = None
@@ -221,11 +261,13 @@ class Candidate:
     t_mem: Optional[float] = None
     t_mem_pattern: Optional[float] = None
     t_cmp: Optional[float] = None
+    t_mem_authored: Optional[float] = None
     floor_us: Optional[float] = None
     floor_source: str = "none"
     launch_us: Optional[float] = None
     bound: Optional[float] = None
     bound_pattern: Optional[float] = None
+    bound_authored: Optional[float] = None
     regime: str = R_UNMEASURED
     regime_test: str = "-"
     regime_rows_skipped: List[str] = field(default_factory=list)
@@ -263,11 +305,14 @@ class Candidate:
             "t_mem_us": self.t_mem,
             "t_mem_pattern_us": self.t_mem_pattern,
             "t_cmp_us": self.t_cmp,
+            "t_mem_authored_us": self.t_mem_authored,
             "floor_us": self.floor_us,
             "floor_source": self.floor_source,
             "launch_floor_us": self.launch_us,
             "bound_us": self.bound,
             "bound_pattern_us": self.bound_pattern,
+            "bound_authored_us": self.bound_authored,
+            "primitives": self.primitives,
             "regime": self.regime,
             "regime_test": self.regime_test,
             "regime_rows_skipped": self.regime_rows_skipped,
@@ -298,6 +343,10 @@ class Context:
     # layout_transform gate reads it and renders None as "unavailable", never as "no
     # argument camps".
     channel_period_bytes: Optional[int] = None
+    # What a kernel written on this box the plain way streams at, from the calibration's
+    # authored-stream probe; None when it was not measured. The authored mechanisms form
+    # their bound from it and are unavailable -- never priced at peak -- without it.
+    authored_stream_gbs: Optional[float] = None
 
 
 @dataclass
@@ -533,6 +582,8 @@ def candidates_from_report(
             c.bundle = res.get("bundle")
             c.schema = res.get("schema")
             c.launched = [str(k) for k in res.get("launched") or []]
+            if "primitives" in res:
+                c.primitives = [str(p) for p in res.get("primitives") or []]
         total_calls = int(op_calls.get(op) or 0)
         if total_calls > 0:
             c.t_dev = c.device_us_op / total_calls
@@ -620,7 +671,11 @@ def derive(c: Candidate, ctx: Context, bw_pattern: Callable[[int, int], Optional
 
     ``bound`` is the section 2.1 regime bound, ``max(t_mem, t_cmp, floors)``, at contiguous
     bandwidth; ``bound_pattern`` swaps in ``t_mem_pattern`` and is what a kernel obliged to
-    keep its access pattern cannot go below (the ceiling of section 6.8).
+    keep its access pattern cannot go below (the ceiling of section 6.8). ``bound_authored``
+    is what a kernel written here can plausibly reach: its bytes at the authored-stream
+    rate this part measured, and never under the pattern bound, the compute bound or the
+    floors. It is None without that measurement -- the authored mechanisms then read
+    "unavailable", not "at peak".
     """
     cal = ctx.cal
     bw = getattr(cal, "bandwidth_gbs", None)
@@ -628,6 +683,9 @@ def derive(c: Candidate, ctx: Context, bw_pattern: Callable[[int, int], Optional
         c.t_mem = c.bytes_min / (bw * 1e9) * 1e6
         c.bw_pattern = bw_pattern(*c.pattern) if c.pattern is not None else bw
         c.t_mem_pattern = None if c.bw_pattern is None else c.bytes_min / (c.bw_pattern * 1e9) * 1e6
+    authored = ctx.authored_stream_gbs
+    if c.bytes_min is not None and authored:
+        c.t_mem_authored = c.bytes_min / (authored * 1e9) * 1e6
     peak = (getattr(cal, "matmul_peak_tflops", None) or {}).get(c.dtype)
     if c.flops is not None and peak:
         c.t_cmp = c.flops / (peak * 1e12) * 1e6
@@ -641,6 +699,9 @@ def derive(c: Candidate, ctx: Context, bw_pattern: Callable[[int, int], Optional
     c.bound = max(parts) if parts else None
     parts = [v for v in (c.t_mem_pattern, c.t_cmp, *floors) if v is not None]
     c.bound_pattern = max(parts) if parts else None
+    if authored:
+        parts = [v for v in (c.t_mem_authored, c.t_mem_pattern, c.t_cmp, *floors) if v is not None]
+        c.bound_authored = max(parts) if parts else None
 
 
 def classify(c: Candidate, ctx: Context) -> None:
@@ -851,12 +912,85 @@ def gate_class_admits(c: Candidate, mech: str, ctx: Context) -> Gate:
         return Gate(
             c.cls in KERNEL_CLASSES, "class", c.cls, "in", "kernel_classes", KERNEL_CLASSES, where
         )
+    if mech in AUTHORED:
+        return Gate(
+            c.cls in AUTHORABLE_CLASSES,
+            "class",
+            c.cls,
+            "in",
+            "authorable_classes",
+            AUTHORABLE_CLASSES,
+            where,
+            {"launched": c.launched, "parts_us": _parts_us(c, ctx)},
+        )
     if mech == "source_rewrite":
         gap = ctx.gaps.get(c.op) or ctx.gaps.get(_op_key(c.op)) or {}
         moved, required = gap.get("bytes_moved"), gap.get("bytes_required")
         ok = moved is not None and required is not None and moved > required
         return Gate(ok, "composite_bytes_moved", moved, ">", "bytes_required", required, where)
     raise ValueError(mech)
+
+
+def _parts_us(c: Candidate, ctx: Context) -> Dict[str, Optional[float]]:
+    """Per-call device time of each kernel the op launched, by the profiler's prefix match;
+    None for a part the profiler did not resolve. What "the parts are individually cheap"
+    reads as, once measured: each against ``launch_floor_us`` in the candidate's metrics."""
+    out: Dict[str, Optional[float]] = {}
+    for k in c.launched:
+        us = next((float(v) for name, v in ctx.by_kernel.items() if name.startswith(k[:60])), None)
+        out[k[:60]] = None if (us is None or c.calls <= 0) else us / c.calls
+    return out
+
+
+def gate_parts_plain(c: Candidate, mech: str, ctx: Context) -> Gate:
+    """No part of the op is a library primitive.
+
+    A decomposition, or a Python-registered op, can reach oneDNN for one of its parts; the
+    op's time is then that primitive's, and a kernel written against the op would be priced
+    against a tuned library kernel with a memory-bound yardstick. That question belongs to
+    library_call, and this gate keeps it there. The count comes from the resolver's record
+    of the primitives the op reached; a resolution without that record reads None --
+    unevaluated -- rather than a zero nobody established.
+    """
+    n = None if c.primitives is None else len(c.primitives)
+    return Gate(
+        n == 0,
+        "library_primitives",
+        n,
+        "==",
+        "required",
+        0,
+        _here(),
+        {"primitives": c.primitives},
+    )
+
+
+def gate_definition_authorable(c: Candidate, mech: str, ctx: Context) -> Gate:
+    """The interface a definition would record is known: every tensor argument has a shape
+    and a dtype this stage can size. The schema, when the resolver recorded one, is carried
+    in the detail for the author; a decomposition often has none, and the arguments alone
+    fix the tensor interface."""
+    where = _here()
+    sized = [(shape, dt) for shape, dt in c.tensors if _nbytes(shape, dt) is not None]
+    ok = bool(c.tensors) and len(sized) == len(c.tensors)
+    return Gate(
+        ok,
+        "interface_tensors",
+        len(sized),
+        "==",
+        "tensor_args",
+        len(c.tensors),
+        where,
+        {"schema": c.schema, "dtypes": sorted({dt for _, dt in c.tensors})},
+    )
+
+
+def gate_attainable_calibrated(c: Candidate, mech: str, ctx: Context) -> Gate:
+    """The bound a written kernel can reach on this part was measured. Without the
+    authored-stream probe the mechanism is unavailable: a bound formed from the part's peak
+    would credit an unwritten kernel with a rate nothing here has reached."""
+    gbs = ctx.authored_stream_gbs
+    return Gate(gbs is not None, "authored_stream_gbs", gbs, "is_not", "unmeasured", None, _here())
 
 
 def gate_edge_present(c: Candidate, mech: str, ctx: Context) -> Gate:
@@ -985,8 +1119,10 @@ def gate_measurable(c: Candidate, mech: str, ctx: Context) -> Gate:
 def mechanism_cost(mech: str, ctx: Context) -> Optional[float]:
     """What delivering through `mech` costs per call, from the calibration -- never a literal
     for a measured quantity. Patching source, transforming a layout at load time, changing a
-    library call or fusing at the call site put nothing in the call path; only apply()'s
-    dispatch does, and its cost is whatever this part measured (None if it did not)."""
+    library call, fusing at the call site or binding a written kernel at its call site put
+    nothing in the call path; only apply()'s dispatch does, and its cost is whatever this
+    part measured (None if it did not). Authoring itself is not priced: the price is the
+    delivery, and the same kernel pays it or not by how it reaches the stack."""
     if mech in APPLY:
         return getattr(ctx.cal, "dispatch_us", None)
     return 0.0
@@ -1018,6 +1154,15 @@ def headroom(c: Candidate, mech: str, ctx: Context) -> Tuple[Optional[float], Di
         if not parts:
             return None, {"reason": "no bound"}
         return c.t_dev - max(parts), {"bound_of": "max(bytes_required/bw;t_cmp_us;floors)"}
+    if mech in AUTHORED:
+        # What a kernel written here can reach, not what the running one is obliged to: its
+        # bytes at the authored-stream rate, and never under the pattern, compute or floors.
+        if c.bound_authored is None:
+            return None, {"reason": "bound_authored_us=None"}
+        return c.t_dev - c.bound_authored, {
+            "bound_of": "max(t_mem_authored_us;t_mem_pattern_us;t_cmp_us;floors)",
+            "authored_stream_gbs": ctx.authored_stream_gbs,
+        }
     if c.bound_pattern is None:
         return None, {"reason": "bound_pattern_us=None"}
     return c.t_dev - c.bound_pattern, {"bound_of": "max(t_mem_pattern_us;t_cmp_us;floors)"}
@@ -1075,6 +1220,8 @@ def chain_for(mech: str) -> List[Tuple[str, Callable[[Candidate, str, Context], 
     chain: List[Tuple[str, Callable[[Candidate, str, Context], Gate]]] = [
         ("class_admits", gate_class_admits)
     ]
+    if mech in AUTHORED:
+        chain.append(("parts_plain", gate_parts_plain))
     if mech in FUSION:
         chain += [
             ("edge_present", gate_edge_present),
@@ -1083,10 +1230,13 @@ def chain_for(mech: str) -> List[Tuple[str, Callable[[Candidate, str, Context], 
     if mech in PATCH:
         chain.append(("source_present", gate_source_present))
     if mech in APPLY:
-        chain += [
-            ("definition_exists", gate_definition_exists),
-            ("cost_calibrated", gate_cost_calibrated),
-        ]
+        if mech in AUTHORED:
+            chain.append(("definition_authorable", gate_definition_authorable))
+        else:
+            chain.append(("definition_exists", gate_definition_exists))
+        chain.append(("cost_calibrated", gate_cost_calibrated))
+    if mech in AUTHORED:
+        chain.append(("attainable_calibrated", gate_attainable_calibrated))
     chain += [
         ("measurable", gate_measurable),
         ("headroom", gate_headroom),
@@ -2050,16 +2200,21 @@ def run(
     bytes_overrides: Optional[Dict[str, int]] = None,
     native: Optional[Callable[[str], Optional[bool]]] = None,
     channel_period_bytes: Optional[int] = None,
+    authored_stream_gbs: Optional[float] = None,
 ) -> Tuple[List[Candidate], List[Dict[str, Any]]]:
     """Every candidate through derive, classify and evaluate.
 
     ``channel_period_bytes`` is the part's calibrated memory channel period for the
     layout_transform gate; when not given it is read from the calibration record, and a
     record without one leaves the pitch rule unavailable (None), not silent.
+    ``authored_stream_gbs`` is the authored-stream probe's rate for the authored mechanisms,
+    read the same way; a record without one leaves those mechanisms unavailable.
     """
     edges = list(report.get("edges") or [])
     if channel_period_bytes is None:
         channel_period_bytes = getattr(cal, "channel_period_bytes", None)
+    if authored_stream_gbs is None:
+        authored_stream_gbs = getattr(cal, "authored_stream_gbs", None)
     ctx = Context(
         cal=cal,
         total_us=float(report.get("device_time_total_us") or 0.0),
@@ -2074,6 +2229,7 @@ def run(
         run_id=run_id,
         edge_threshold=min((int(e.get("count") or 0) for e in edges), default=1) or 1,
         channel_period_bytes=channel_period_bytes,
+        authored_stream_gbs=authored_stream_gbs,
     )
     cands = candidates_from_report(report, resolution, measurements, bytes_overrides)
     rows: List[Dict[str, Any]] = []
@@ -2098,6 +2254,7 @@ def write_outputs(
     report_path: str,
     report_sha1: Optional[str] = None,
     model: Optional[str] = None,
+    authored_stream: Optional[Dict[str, Any]] = None,
 ) -> None:
     """bound.log, bound.json and worklist.json.
 
@@ -2105,6 +2262,9 @@ def write_outputs(
     ``model`` the model that report was recorded on; the stages that consume this routing
     check both (:func:`check_bound_provenance`), so a re-run of discovery, or a run on
     another model, voids the routing instead of being measured against it.
+    ``authored_stream`` is the authored-stream probe's record (rate, language, the
+    configuration that reached it), kept beside the calibration so an ACCEPT of an authored
+    mechanism can be read back to the rate it was priced against.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     lines = [format_line(r) for r in rows]
@@ -2122,6 +2282,10 @@ def write_outputs(
             "channel_period_bytes",
         )
     }
+    cal_dict["authored_stream_gbs"] = (
+        authored_stream.get("gbs") if authored_stream else getattr(cal, "authored_stream_gbs", None)
+    )
+    cal_dict["authored_stream"] = authored_stream
     (out_dir / "bound.json").write_text(
         json.dumps(
             {
@@ -2284,6 +2448,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     # an operator's FIB_CHANNEL_PERIOD_BYTES applies here too. Neither has a default.
     pool_bytes: Optional[int] = None
     period: Optional[int] = getattr(cal, "channel_period_bytes", None)
+    # The authored-stream rate is a sidecar of the calibration, measured on first use like
+    # a strided-read bandwidth; a --calibration-json may carry authored_stream_gbs instead.
+    authored: Optional[Dict[str, Any]] = None
+    if getattr(cal, "authored_stream_gbs", None) is not None:
+        authored = {"gbs": cal.authored_stream_gbs, "source": "calibration record"}
     if device is not None:
         from flashinfer_bench.integration.weight_layout import (
             channel_period_bytes,
@@ -2292,7 +2461,17 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
         pool_bytes = streaming_pool_bytes(device)
         if not args.calibration_json:
+            from flashinfer_bench.device import calibration as _calibration
+
             period = channel_period_bytes(device)
+            authored = _calibration.authored_stream_probe(device)
+            if authored is None:
+                print(
+                    "WARNING: the authored-stream probe did not measure on this device, so"
+                    " authored_stream_gbs=None: the authored mechanisms are unavailable"
+                    " (rejected at attainable_calibrated), not priced at peak.",
+                    file=sys.stderr,
+                )
     if args.measure and pool_bytes is None:
         print(
             "WARNING: no capability record for the device, so no streaming pass: each t_dev"
@@ -2369,6 +2548,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         bytes_overrides=bytes_overrides,
         native=native,
         channel_period_bytes=period,
+        authored_stream_gbs=None if authored is None else float(authored["gbs"]),
     )
     cutoff = default_cutoff(report) if args.cutoff is None else args.cutoff
     write_outputs(
@@ -2381,6 +2561,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         str(report_path),
         report_sha1=report_sha1,
         model=report.get("model"),
+        authored_stream=authored,
     )
     print_summary(cands, rows, out_dir)
 

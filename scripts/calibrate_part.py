@@ -176,6 +176,21 @@ def main() -> None:
             print(f"     against {gb:.1f} GB/s contiguous: t_mem_pattern for a kernel obliged to")
             print("     read in runs of this length.")
 
+    authored = calibration.authored_stream_probe(device)
+    if authored is None:
+        print("\n  authored stream             unavailable (no Triton backend for this device, or")
+        print("     rounds did not settle). The authored mechanisms of scripts/bound_candidates.py")
+        print("     stand down until it measures; nothing prices a written kernel at peak.")
+    else:
+        print(
+            f"\n  authored stream             {float(authored['gbs']):8.1f} GB/s"
+            f"  ({authored['language']}, {authored['config']})"
+        )
+        print(f"     what a kernel written here the plain way streams at, against {gb:.1f} GB/s")
+        print(
+            "     contiguous: the bound scripts/bound_candidates.py prices an authored kernel to."
+        )
+
     period = calibration.measure_channel_period_bytes(device)
     if period is None:
         print("\n  memory channel period       unavailable (no periodic slow pitch resolved)")

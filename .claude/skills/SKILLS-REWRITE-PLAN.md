@@ -492,9 +492,24 @@ Mechanisms and the facts that admit them (facts about how the system is built, f
 | `layout_transform` | regime = memory-bound, layout-limited | 0 | load-time weight/activation layout |
 | `fusion_callsite` | edge present; producer class = GEMM; epilogue expressible (post-op or preset) | 0 | stack call site or module bind |
 | `fusion_apply` | as above, plus a definition exists | `cal.dispatch_us` | dataset + adapter |
-| `apply_substitution` | a definition exists or is authorable; a solution can be built | `cal.dispatch_us` | dataset |
+| `apply_substitution` | a kernel runs on the device for this op and a definition exists; a solution can be built | `cal.dispatch_us` | dataset |
 | `source_rewrite` | bytes moved by the composite ≫ bytes the maths requires (`find-kernel-gaps`) | 0 | model source, or definition + python solution |
+| `authored_callsite` | nothing local implements the op as a tuned kernel -- class = ATen inside PyTorch (no local source), decomposition (plain kernels, none its own) or Python-registered op (a reference) -- and no part of it reached a library primitive; a kernel is written | 0 | the stack's call site, or a provider's op (`optimize-intel-kernels`) |
+| `authored_apply` | as above, and the tensor interface is recordable as a definition | `cal.dispatch_us` | dataset (new definition + solution) + adapter |
 | `upstream_report` | class = ATen inside PyTorch, no local source | — | an issue; not a worklist row |
+
+The authored pair prices the *delivery* of a kernel that does not exist yet, never the
+authoring: the same kernel pays nothing bound at its call site and pays the dispatch through
+`apply()`, as the fusion pair does. Its bound is not the part's peak but what a kernel
+written on this box the plain way reaches -- `bytes_min / authored_stream_gbs`, from the
+calibration's authored-stream probe (`calibration.authored_stream_probe()`, a Triton copy
+over a buffer wider than the last-level cache, swept over block, warps and sub-group size,
+cached in a sidecar of the record). The compute side has no such probe: a candidate whose
+`t_cmp` forms the bound is priced against `t_cmp` like every mechanism, and no claim is
+made about what a written GEMM reaches. The Intel Triton checkout's benchmarks (Triton
+against oneDNN for softmax, against SYCL-TLA for GEMM and attention) were considered as
+that input and rejected: they cover classes the resolver routes elsewhere, need their C++
+providers built, and carry per-part peaks as a stored table.
 
 Gates, evaluated in this order for each (candidate, mechanism); the first REJECT ends the
 chain for that pair, as in a dispatch list:
@@ -502,13 +517,16 @@ chain for that pair, as in a dispatch list:
 | Gate | Test | Inputs (command) |
 | --- | --- | --- |
 | `class_admits` | mechanism's admission fact holds | Stage 2 `pull_kernel_source.py` class |
+| `parts_plain` | (authored only) none of the op's parts is a library primitive: `library_primitives == 0`, `None` when the resolution carries no record | Stage 2 `primitives` |
 | `edge_present` | (fusion only) the producer→consumer edge count ≥ the discovery threshold | `discovered.json.edges` |
 | `epilogue_expressible` | (fusion only) a preset matches or the consumer is a post-op | `fusion_candidates.py`; `--list-presets` |
 | `source_present` | (patch/Triton) the source is on this box | bundle `PROVENANCE.md` |
-| `definition_exists` | (apply) a definition matches op, inputs, outputs | `TraceSet` lookup |
-| `cost_calibrated` | (apply) `cal.dispatch_us` is not `None` | `calibration.get()` |
+| `definition_exists` | (apply, not authored) a definition matches op, inputs, outputs | `TraceSet` lookup |
+| `definition_authorable` | (`authored_apply`) every tensor argument has a shape and a dtype this stage can size | `discovered.json` args; Stage 2 schema in the detail |
+| `cost_calibrated` | (apply, authored_apply included) `cal.dispatch_us` is not `None` | `calibration.get()` |
+| `attainable_calibrated` | (authored) `authored_stream_gbs` is not `None`; without it the authored pair is unavailable, never priced at peak | `calibration.authored_stream_probe()` |
 | `measurable` | `t_dev > floor` and Stage 2 unitrace matched the class | unitrace; `calibration.get().timing_floor_us` |
-| `headroom` | `t_dev − max(t_mem_pattern, t_cmp, floor) > 0` | §2.1 inputs |
+| `headroom` | `t_dev − max(t_mem_pattern, t_cmp, floor) > 0`; for the authored pair the bound also includes `bytes_min / authored_stream_gbs` | §2.1 inputs |
 | `net_positive` | `ceiling_us = headroom − mechanism_us > spread_us` of the harness | `kernel_trials.py benchmark` on the harness against itself gives `spread_us` |
 | `worth_cutoff` | `worth = ceiling_us × calls / total_us ≥ cutoff` (cutoff set by the operator at run time, default the noise floor of Stage 1's share estimate) | `discovered.json` |
 
@@ -540,7 +558,8 @@ Rules the log makes checkable:
   missing from the worklist has a REJECT line for each mechanism and one UNROUTABLE line.
 - The worklist is exactly the ACCEPT lines, sorted by `worth`; no other input orders it.
 - A mechanism rejected on `cost_calibrated` reads `dispatch_us=None`, never `0`: the
-  mechanism is unavailable, not free.
+  mechanism is unavailable, not free. A mechanism rejected on `attainable_calibrated` reads
+  `authored_stream_gbs=None`: a written kernel is never credited with the part's peak.
 - Fusion appears as two mechanisms with two costs; the operator can see which one the
   arithmetic admitted.
 - `bound.json` carries the same rows so Stage 4 can open a series from an ACCEPT row and

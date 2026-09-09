@@ -560,6 +560,159 @@ def strided_read_bandwidth_gbs(
     return gbs
 
 
+AUTHORED_PROBE_BLOCKS = (1024, 2048, 4096, 8192)
+"""Elements per program the authored-stream probe is swept over. An estimator parameter:
+the probe reports the best of the sweep, and the sidecar records which one that was."""
+
+AUTHORED_PROBE_WARPS = (4, 8, 16)
+"""Warps (sub-groups) per program the probe is swept over, crossed with the sub-group sizes
+the driver reports for the device -- the sweep the in-tree Triton kernels autotune over."""
+
+AUTHORED_PROBE_LANGUAGE = "triton"
+"""The language the probe is written in. Triton needs no compiler beyond the wheel that is
+already installed beside torch, so the probe runs wherever a kernel could be authored at
+all; a SYCL probe would additionally depend on a toolchain being on the box."""
+
+
+def _authored_cache_path(hardware_id: str, timer: str) -> pathlib.Path:
+    """Sidecar for the authored-stream probe: keyed by language, beside the record."""
+    return _cache_path(hardware_id, timer).with_name(
+        f"v{CACHE_VERSION}-{hardware_id}-{timer}-authored.json"
+    )
+
+
+def _measure_authored_stream(device: str) -> Optional[Dict[str, object]]:
+    """Bandwidth a kernel written here, the plain way, streams at on this part; or None.
+
+    The probe is a Triton copy -- one masked load, one masked store, a block per program --
+    over a buffer larger than any last-level cache this project targets, swept over block
+    size, warps per program and the sub-group sizes the driver reports, each configuration
+    accepted only once its regions agree (:func:`_settled_device_us`). The best settled
+    configuration is the answer: what an author reaches with the recipe the skill gives
+    and nothing cleverer. Bytes are counted as read plus written.
+
+    None when Triton is not importable, has no backend for this device, or no configuration
+    settled; never a number from another part or from a datasheet.
+    """
+    try:
+        import torch
+        import triton
+        import triton.language as tl
+        from triton.runtime import driver
+    except Exception as exc:
+        logger.debug("authored-stream probe unavailable: %s", exc)
+        return None
+
+    backend = _backend(device)
+    index = torch.device(device).index or 0
+    try:
+        backend.set_device(index)
+        props = driver.active.utils.get_device_properties(index)
+    except Exception as exc:
+        logger.debug("authored-stream probe unavailable on %s: %s", device, exc)
+        return None
+    # Intel's driver reports the sub-group sizes the part supports and Triton takes one as
+    # `warp_size`; a driver that reports none has no such knob and the sweep omits it.
+    sub_group_sizes = tuple(props.get("sub_group_sizes") or ()) or (None,)
+
+    @triton.jit
+    def _copy(x_ptr, y_ptr, n, BLOCK: tl.constexpr):
+        offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+        mask = offs < n
+        tl.store(y_ptr + offs, tl.load(x_ptr + offs, mask=mask), mask=mask)
+
+    itemsize = 2
+    n = PATTERN_BUFFER_BYTES // itemsize
+    # Random contents, as for every probe here: a constant fill moves faster than data does.
+    x = torch.randn(n, dtype=torch.float16, device=device)
+    y = torch.empty_like(x)
+
+    def sync() -> None:
+        backend.synchronize()
+
+    best: Optional[Tuple[float, Dict[str, object]]] = None
+    for block in AUTHORED_PROBE_BLOCKS:
+        grid = (triton.cdiv(n, block),)
+        for warps in AUTHORED_PROBE_WARPS:
+            for sg in sub_group_sizes:
+                if sg is not None and warps * sg > int(props.get("max_work_group_size", 1 << 30)):
+                    continue
+                launch: Dict[str, object] = {"num_warps": warps}
+                if sg is not None:
+                    launch["warp_size"] = sg
+
+                def fn(block=block, grid=grid, launch=launch, x=x, y=y):
+                    _copy[grid](x, y, n, BLOCK=block, **launch)
+
+                try:
+                    us = _settled_device_us(fn, sync, calls=5, budget_s=1.0)
+                except Exception as exc:
+                    logger.debug("authored-stream config %s/%s failed: %s", block, launch, exc)
+                    continue
+                if us is None:
+                    continue
+                if best is None or us < best[0]:
+                    best = (us, {"block": block, **launch})
+    if best is None:
+        return None
+    us, config = best
+    return {
+        "gbs": (2 * n * itemsize) / (us * 1e-6) / 1e9,
+        "language": AUTHORED_PROBE_LANGUAGE,
+        "config": config,
+        "probe_bytes": n * itemsize,
+        "triton": getattr(triton, "__version__", None),
+    }
+
+
+def authored_stream_probe(device: str, refresh: bool = False) -> Optional[Dict[str, object]]:
+    """The authored-stream probe's record for `device`: ``gbs`` plus how it was reached.
+
+    What a kernel *written here* streams at, as distinct from ``bandwidth_gbs``, which is
+    what the framework's own reduction reaches. The routing prices an authored kernel
+    against this number: the bound such a kernel can plausibly reach on this part for a
+    memory-bound op is ``bytes_min / gbs``, not ``bytes_min / bandwidth_gbs``. Measured
+    once per (part, timer, language) and cached in a sidecar of the calibration record;
+    ``None`` when it could not be measured, and never cached as such.
+    """
+    try:
+        from flashinfer_bench.device import get_accelerator
+
+        accel = get_accelerator(device)
+        path = _authored_cache_path(accel.canonical_id(device), accel.make_timer(device).name)
+    except Exception:
+        return None
+    table: Dict[str, Dict[str, object]] = {}
+    if path.exists():
+        try:
+            table = json.loads(path.read_text())
+        except Exception:
+            table = {}
+    cached = table.get(AUTHORED_PROBE_LANGUAGE)
+    if not refresh and isinstance(cached, dict) and cached.get("gbs"):
+        return cached
+    try:
+        record = _measure_authored_stream(device)
+    except Exception as exc:
+        logger.debug("authored-stream probe failed on %s: %s", device, exc)
+        return None
+    if record is None:
+        return None
+    table[AUTHORED_PROBE_LANGUAGE] = record
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(table, indent=2) + "\n")
+    except OSError:
+        pass
+    return record
+
+
+def authored_stream_gbs(device: str, refresh: bool = False) -> Optional[float]:
+    """``authored_stream_probe(device)["gbs"]``, or None when there is no record."""
+    record = authored_stream_probe(device, refresh=refresh)
+    return None if record is None else float(record["gbs"])  # type: ignore[arg-type]
+
+
 def _camping_pitches(
     times: Mapping[int, Optional[float]], deficit: float, neighbourhood: int
 ) -> Optional[List[int]]:

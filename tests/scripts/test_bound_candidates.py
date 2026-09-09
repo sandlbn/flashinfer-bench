@@ -94,6 +94,7 @@ def _resolution(bundle_dir):
             "bundle": None,
             "schema": "aten::argmax(Tensor self, int? dim=None, bool keepdim=False) -> Tensor",
             "launched": ["at::native::xpu::ReduceKernel<ArgMax>"],
+            "primitives": [],
         },
     }
 
@@ -473,6 +474,209 @@ class TestGateChain:
         assert not any(r["status"] == "ACCEPT" for r in rows)
 
 
+class TestAuthoredMechanisms:
+    """Writing a kernel for an op nothing implements well, priced by its delivery.
+
+    Admission is the resolver's class -- an ATen kernel inside PyTorch, a decomposition, a
+    Python-registered op -- and the bound is what a kernel *written here* reaches, from the
+    authored-stream probe, never the part's peak. The callsite delivery is free; the apply()
+    delivery pays the measured dispatch, exactly as the fusion pair does.
+    """
+
+    AUTHORED_CAL = {"authored_stream_gbs": 500.0}
+
+    def _run(self, bundle_dir, cal=None, res=None, meas=None, **kw):
+        ids = _ids()
+        measurements = {**_measurements(), ids["argmax"]: {"t_host_us": 12.0, "spread_us": 0.3}}
+        if meas is not None:
+            measurements = meas
+        return bc.run(
+            _report(),
+            res if res is not None else _resolution(bundle_dir),
+            measurements,
+            cal if cal is not None else _cal(**self.AUTHORED_CAL),
+            "r",
+            presets=PRESETS,
+            definitions_matching=_defs,
+            **kw,
+        )
+
+    def test_class_admits_only_the_authorable_classes(self, bundle_dir):
+        _, rows = self._run(bundle_dir)
+        ids = _ids()
+        for cid, cls in ((ids["rms"], "provider_kernel"), (ids["lin"], "onednn")):
+            for mech in bc.AUTHORED:
+                r = _final(rows, cid, mech)
+                assert (r["gate"], r["status"]) == ("class_admits", "REJECT"), (cid, mech)
+                assert r["arithmetic"] == (
+                    f"class={cls} in authorable_classes=aten|decomposition|python_op"
+                )
+        first = _rows(rows, ids["argmax"], "authored_callsite")[0]
+        assert (first["gate"], first["status"]) == ("class_admits", "PASS")
+        assert first["detail"]["launched"] == ["at::native::xpu::ReduceKernel<ArgMax>"]
+        assert first["detail"]["parts_us"] == {"at::native::xpu::ReduceKernel<ArgMax>": 10.0}
+
+    def test_callsite_delivery_is_free_and_priced_against_the_authored_stream(self, bundle_dir):
+        cands, rows = self._run(bundle_dir)
+        cid = _ids()["argmax"]
+        chain = _rows(rows, cid, "authored_callsite")
+        assert [r["gate"] for r in chain[:-1]] == [
+            "class_admits",
+            "parts_plain",
+            "attainable_calibrated",
+            "measurable",
+            "headroom",
+            "net_positive",
+            "worth_cutoff",
+        ]
+        assert all(r["status"] == "PASS" for r in chain[:-1])
+        accept = chain[-1]
+        assert accept["status"] == "ACCEPT" and accept["mechanism_us"] == 0.0
+        # t_dev 10 minus max(2384 B at 500 GB/s, launch floor 2.0): the floor binds.
+        assert accept["ceiling_us"] == pytest.approx(8.0)
+        assert accept["worth"] == pytest.approx(8.0 * 10 / TOTAL_US)
+        c = _by_id(cands)[cid]
+        assert c.t_mem_authored == pytest.approx(2384 / 500e9 * 1e6)
+        assert c.bound_authored == pytest.approx(2.0)
+        head = next(r for r in chain if r["gate"] == "headroom")
+        assert head["detail"]["authored_stream_gbs"] == 500.0
+        assert head["detail"]["bound_of"].startswith("max(t_mem_authored_us")
+
+    def test_the_authored_rate_not_the_peak_forms_the_bound(self, bundle_dir):
+        cid = _ids()["argmax"]
+        # 4 MB at the part's 1000 GB/s is 4 us; at the 500 GB/s a written kernel reached
+        # here it is 8 us, and that is what the authored ceiling is measured from.
+        _, rows = self._run(bundle_dir, bytes_overrides={cid: 4_000_000})
+        r = _final(rows, cid, "authored_callsite")
+        assert r["status"] == "ACCEPT" and r["ceiling_us"] == pytest.approx(2.0)
+        # A slower written rate leaves nothing: rejected at headroom, with the arithmetic.
+        _, rows = self._run(
+            bundle_dir, cal=_cal(authored_stream_gbs=300.0), bytes_overrides={cid: 4_000_000}
+        )
+        r = _final(rows, cid, "authored_callsite")
+        assert (r["gate"], r["status"]) == ("headroom", "REJECT")
+        assert r["lhs_value"] == pytest.approx(10.0 - 4_000_000 / 300e9 * 1e6)
+        assert r["needs"]["direction"] == "increase"
+
+    def test_apply_delivery_pays_the_measured_dispatch(self, bundle_dir):
+        _, rows = self._run(bundle_dir)
+        cid = _ids()["argmax"]
+        chain = _rows(rows, cid, "authored_apply")
+        assert [r["gate"] for r in chain[:-1]] == [
+            "class_admits",
+            "parts_plain",
+            "definition_authorable",
+            "cost_calibrated",
+            "attainable_calibrated",
+            "measurable",
+            "headroom",
+            "net_positive",
+            "worth_cutoff",
+        ]
+        accept = chain[-1]
+        assert accept["status"] == "ACCEPT" and accept["mechanism_us"] == 6.0
+        assert accept["ceiling_us"] == pytest.approx(8.0 - 6.0)
+        authorable = next(r for r in chain if r["gate"] == "definition_authorable")
+        assert authorable["arithmetic"] == "interface_tensors=1 == tensor_args=1"
+        assert authorable["detail"]["schema"].startswith("aten::argmax(")
+        assert authorable["detail"]["dtypes"] == ["float32"]
+        # Same kernel, other delivery: the dispatch turns the exchange negative.
+        _, rows = self._run(bundle_dir, cal=_cal(dispatch_us=9.0, **self.AUTHORED_CAL))
+        r = _final(rows, cid, "authored_apply")
+        assert (r["gate"], r["status"]) == ("net_positive", "REJECT")
+        assert r["arithmetic"] == "ceiling_us=-1 > spread_us=0.3"
+        assert _final(rows, cid, "authored_callsite")["status"] == "ACCEPT"
+
+    def test_apply_delivery_is_unavailable_without_a_dispatch_cost(self, bundle_dir):
+        _, rows = self._run(bundle_dir, cal=_cal(dispatch_us=None, **self.AUTHORED_CAL))
+        r = _final(rows, _ids()["argmax"], "authored_apply")
+        assert (r["gate"], r["status"]) == ("cost_calibrated", "REJECT")
+        assert r["arithmetic"] == "dispatch_us=None is_not unmeasured=None"
+
+    def test_attainable_calibrated_rejects_with_none_never_a_peak(self, bundle_dir):
+        _, rows = self._run(bundle_dir, cal=_cal())
+        cid = _ids()["argmax"]
+        for mech in bc.AUTHORED:
+            r = _final(rows, cid, mech)
+            assert (r["gate"], r["status"]) == ("attainable_calibrated", "REJECT"), mech
+            assert r["arithmetic"] == "authored_stream_gbs=None is_not unmeasured=None"
+            assert r["lhs_value"] is None
+        text = "\n".join(bc.format_line(r) for r in rows)
+        assert "authored_stream_gbs=0" not in text
+        assert "bound_authored" not in text
+
+    def test_a_library_primitive_among_the_parts_sends_the_op_elsewhere(self, bundle_dir):
+        res = _resolution(bundle_dir)
+        res["aten::argmax"]["primitives"] = ["matmul via jit:gemm:any"]
+        _, rows = self._run(bundle_dir, res=res)
+        for mech in bc.AUTHORED:
+            r = _final(rows, _ids()["argmax"], mech)
+            assert (r["gate"], r["status"]) == ("parts_plain", "REJECT"), mech
+            assert r["arithmetic"] == "library_primitives=1 == required=0"
+            assert r["detail"]["primitives"] == ["matmul via jit:gemm:any"]
+
+    def test_a_resolution_without_a_primitives_record_reads_none_not_zero(self, bundle_dir):
+        res = _resolution(bundle_dir)
+        del res["aten::argmax"]["primitives"]
+        _, rows = self._run(bundle_dir, res=res)
+        r = _final(rows, _ids()["argmax"], "authored_callsite")
+        assert (r["gate"], r["status"]) == ("parts_plain", "REJECT")
+        assert r["arithmetic"] == "library_primitives=None == required=0"
+
+    def test_an_unsized_interface_cannot_be_authored_as_a_definition(self, bundle_dir):
+        report = _report()
+        op = "aten.abs.default"
+        report["ops"].append({"op": op, "calls": 10, "args": [T([4, 8], "complex64")]})
+        report["op_share"][op] = {"device_us": 50.0, "share_pct": 0.5}
+        report["op_calls"][op] = 10
+        report["device_time_by_kernel"]["at::native::xpu::AbsKernel<complex>"] = 50.0
+        res = _resolution(bundle_dir)
+        res["aten::abs"] = {
+            "op": "aten::abs",
+            "provider": "ATen kernel inside PyTorch",
+            "where": [],
+            "bundle": None,
+            "schema": "aten::abs(Tensor self) -> Tensor",
+            "launched": ["at::native::xpu::AbsKernel<complex>"],
+            "primitives": [],
+        }
+        _, rows = bc.run(report, res, {}, _cal(**self.AUTHORED_CAL), "r")
+        cid = bc.candidate_id(op, "4x8", "complex64")
+        r = _final(rows, cid, "authored_apply")
+        assert (r["gate"], r["status"]) == ("definition_authorable", "REJECT")
+        assert r["arithmetic"] == "interface_tensors=0 == tensor_args=1"
+        # The callsite delivery needs no definition and is priced on its own gates.
+        assert _final(rows, cid, "authored_callsite")["gate"] != "definition_authorable"
+
+    def test_an_unmeasured_spread_leaves_the_ceiling_unpriced(self, bundle_dir):
+        _, rows = self._run(bundle_dir, meas=_measurements())
+        r = _final(rows, _ids()["argmax"], "authored_callsite")
+        assert (r["gate"], r["status"]) == ("net_positive", "REJECT")
+        assert r["arithmetic"] == "ceiling_us=8 > spread_us=None"
+
+    def test_launch_bound_parts_leave_no_authored_headroom(self, bundle_dir):
+        # An op whose device time is at the launch floor: a written kernel still launches.
+        report = _report()
+        report["op_share"][ARGMAX] = {"device_us": 20.0, "share_pct": 0.2}
+        report["device_time_by_kernel"]["at::native::xpu::ReduceKernel<ArgMax>"] = 20.0
+        _, rows = bc.run(report, _resolution(bundle_dir), {}, _cal(**self.AUTHORED_CAL), "r")
+        r = _final(rows, _ids()["argmax"], "authored_callsite")
+        assert (r["gate"], r["status"]) == ("headroom", "REJECT")
+        assert r["arithmetic"] == "headroom_us=0 > 0"
+
+    def test_the_calibration_json_may_carry_the_authored_rate(self, tmp_path, bundle_dir):
+        cal = _cal(**self.AUTHORED_CAL)
+        out = tmp_path / "bound"
+        cands, rows = self._run(bundle_dir, cal=cal)
+        bc.write_outputs(out, "r", cands, rows, cal, 0.0, "x.json")
+        recorded = json.loads((out / "bound.json").read_text())["calibration"]
+        assert recorded["authored_stream_gbs"] == 500.0 and recorded["authored_stream"] is None
+        probe = {"gbs": 400.0, "language": "triton", "config": {"block": 2048}}
+        bc.write_outputs(out, "r", cands, rows, _cal(), 0.0, "x.json", authored_stream=probe)
+        recorded = json.loads((out / "bound.json").read_text())["calibration"]
+        assert recorded["authored_stream_gbs"] == 400.0 and recorded["authored_stream"] == probe
+
+
 class TestShareAttribution:
     def test_an_op_discovery_charged_zero_is_charged_the_kernels_it_launched(self, bundle_dir):
         report = _report()
@@ -517,6 +721,10 @@ class TestUnroutable:
         assert reasons["upstream_report"] == "worklist_eligible"
         assert reasons["provider_patch"] == "class_admits"
         assert reasons["layout_transform"] == "class_admits"
+        # The class admits authoring; with no authored-stream probe the bound a written
+        # kernel could reach is unmeasured, and the mechanism is unavailable, not at peak.
+        assert reasons["authored_callsite"] == "attainable_calibrated"
+        assert reasons["authored_apply"] == "attainable_calibrated"
 
     def test_triton_kernel_with_device_time_is_a_candidate_with_lines(self, outcome):
         cid = _ids()["triton"]

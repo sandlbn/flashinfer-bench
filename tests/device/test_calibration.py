@@ -380,3 +380,48 @@ class TestChannelPeriodFromSweep:
         just_over = 1.0 + calibration.CAMPING_DEFICIT + 0.01
         assert calibration.channel_period_from_sweep(_sweep(_multiples(5120, just_under))) is None
         assert calibration.channel_period_from_sweep(_sweep(_multiples(5120, just_over))) == 5120
+
+
+class TestAuthoredStreamProbe:
+    """The authored-stream rate is a sidecar of the record: measured once per (part, timer,
+    language), cached only when it measured, and never a number from anywhere else."""
+
+    @pytest.fixture
+    def cache_dir(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("FIB_CACHE_PATH", str(tmp_path))
+        return tmp_path / "calibration"
+
+    RECORD = {"gbs": 400.0, "language": "triton", "config": {"block": 2048}, "triton": "x"}
+
+    def test_an_unmeasurable_probe_is_none_and_leaves_no_sidecar(self, cache_dir, monkeypatch):
+        monkeypatch.setattr(calibration, "_measure_authored_stream", lambda device: None)
+        assert calibration.authored_stream_probe("cpu") is None
+        assert calibration.authored_stream_gbs("cpu") is None
+        assert not cache_dir.exists() or not list(cache_dir.glob("*-authored.json"))
+
+    def test_a_measured_probe_is_cached_and_round_trips(self, cache_dir, monkeypatch):
+        monkeypatch.setattr(calibration, "_measure_authored_stream", lambda device: self.RECORD)
+        assert calibration.authored_stream_probe("cpu") == self.RECORD
+        (path,) = cache_dir.glob(f"v{calibration.CACHE_VERSION}-*-authored.json")
+        assert json.loads(path.read_text())["triton"]["gbs"] == 400.0
+        monkeypatch.setattr(
+            calibration, "_measure_authored_stream", lambda device: pytest.fail("cache not used")
+        )
+        assert calibration.authored_stream_gbs("cpu") == pytest.approx(400.0)
+        assert calibration.authored_stream_probe("cpu")["config"] == {"block": 2048}
+
+    def test_refresh_measures_again(self, cache_dir, monkeypatch):
+        monkeypatch.setattr(calibration, "_measure_authored_stream", lambda device: self.RECORD)
+        calibration.authored_stream_probe("cpu")
+        monkeypatch.setattr(
+            calibration, "_measure_authored_stream", lambda device: {**self.RECORD, "gbs": 410.0}
+        )
+        assert calibration.authored_stream_gbs("cpu", refresh=True) == pytest.approx(410.0)
+        assert calibration.authored_stream_gbs("cpu") == pytest.approx(410.0)
+
+    def test_a_failing_probe_is_none_not_an_exception(self, cache_dir, monkeypatch):
+        def boom(device):
+            raise RuntimeError("no backend")
+
+        monkeypatch.setattr(calibration, "_measure_authored_stream", boom)
+        assert calibration.authored_stream_probe("cpu") is None

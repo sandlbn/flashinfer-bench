@@ -9,6 +9,7 @@ trace, a log or the calibration cache, which carry the hardware id, timer, shape
 | What you need | Where it comes from |
 | --- | --- |
 | What a substitution costs, the timer's floor, achievable bandwidth | `flashinfer_bench.device.calibration.get()` — measured once per (part, timer) and cached; `scripts/calibrate_part.py` prints it |
+| What a kernel written here streams at — the bound the routing prices an authored kernel to | `flashinfer_bench.device.calibration.authored_stream_probe()` — a sidecar of the same record; `scripts/calibrate_part.py` prints it |
 | Whether a kernel beats the one a deployment runs | `scripts/rank_vs_provider.py` — computed from traces on this part |
 | What a family costs in a real model | `/profile-intel` |
 | What a change is worth end to end | `/measure-serving-win` |
