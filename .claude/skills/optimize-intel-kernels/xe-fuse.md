@@ -75,17 +75,24 @@ flashinfer-bench run --local tmp/flashinfer-trace --definitions <name> --save-re
 
 ## Presets
 
-| Preset | Fusion | Maps to |
-| --- | --- | --- |
-| `k1`, `k1v2` | `D = acc * R[m]` | GEMM + RMSNorm row scale |
-| `k2`, `k2v2` | `D = SwiGLU(acc * R[m])` | gate/up + norm + SwiGLU |
-| `k2_geglu`, `k2v2_geglu` | `D = GeGLU(acc * R[m])` | Gemma-style gated FFN |
-| `k0a` | `D = gamma[n] * (acc + residual)` | down projection + residual + next norm's gamma |
-| `k3`, `k4`, `k4v2` | `D = RoPE(acc * R[m], cos_sin)` | qkv + RoPE |
-| `w8a8_dequant`, `w8a8_dequant_biased` | `int32_acc * scale_token[m] * scale_channel[n]` (+ bias) | quantized GEMM |
+The preset list belongs to the generator in the checkout, so read it from there rather than
+from a copy here — `scripts/fusion_candidates.py` does the same:
 
-`v2` variants use a merged (flat) visitor instead of a composed tree — same maths, different
-codegen. Benchmark both.
+```bash
+python tmp/Xe-Fuse/autotune/generate_kernel.py --list-presets
+```
+
+Each line gives the epilogue that preset emits, in the same `D = ...` form as the EVT
+below, split into GEMM epilogue presets and standalone ones. Reading an epilogue back to
+the call it can replace: `acc * R[m]` is a per-row scale, which is where an RMSNorm's row
+factor goes when it is folded into the GEMM; `SwiGLU` and `GeGLU` are the two gated-FFN
+activations, differing only in the gate function, and fuse a gate/up projection with its
+norm; `gamma[n] * (acc + residual)` is a down projection's residual add carrying the next
+norm's per-column weight; `int32_acc * scale_token[m] * scale_channel[n]` is a quantized
+GEMM's per-token by per-channel dequant.
+
+A `v2` suffix is a merged (flat) visitor instead of a composed tree — same maths, different
+codegen. Both are buildable for the same fusion, so measure both rather than picking one.
 
 ## The EVT is the thing to optimize
 

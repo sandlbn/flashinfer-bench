@@ -7,9 +7,24 @@ Sources: `tmp/sycl-tla` and `tmp/oneDNN` (from `/clone-repos`), and `tmp/intel-t
 (clone github.com/intel/intel-xpu-backend-for-triton yourself when you need its lowering
 passes).
 
-Battlemage is `SYCL_INTEL_TARGET == 20`. **Anything in sycl-tla guarded by `== 35` is
-Crescent Island and does not exist on Battlemage.** Check that guard before porting a kernel
-from that repo.
+Every Xe guard in sycl-tla branches on `SYCL_INTEL_TARGET`. It is not a part name: the
+macro is redefined from the compiler's own target macro.
+
+Source: `tmp/sycl-tla/include/cutlass/cutlass.h:39-46`, `tmp/sycl-tla/CMakeLists.txt:151-162`
+
+| Build target | `SYCL_INTEL_TARGET` |
+| --- | --- |
+| `cri` / `intel_gpu_cri` — defines `__SYCL_TARGET_INTEL_GPU_CRI__` | 35 |
+| every other entry of `INTEL_SYCL_TARGETS` | 20 |
+
+So a block guarded by `== 35` is compiled only in a `cri` build; on any other target the
+`#else` arm is what exists. Check that guard against the target this device builds as
+before porting anything out of that repo:
+
+```python
+from flashinfer_bench.device import get_accelerator
+get_accelerator(dev).capabilities(dev).sycl_target   # None -> SPIR-V JIT; see architectures.md
+```
 
 ## Sub-group width is 16 for matrix work, and not negotiable
 
@@ -46,22 +61,33 @@ Do not put arbitrary computation between a VNNI load and the DPAS that consumes 
 compiler inserts interleave/deinterleave around it and can spill
 (`media/docs/cpp/xe_rearchitecture.md`).
 
-## What precisions Battlemage has
+## Which DPAS operand types exist
 
-Available: tf32, bf16, fp16, int8, int4, and int8 × int4 mixed.
+The operand-type declarations sit inside the guard above, so the set follows the build
+target rather than a remembered part.
 
-Absent on Battlemage, present only on Crescent Island: fp8 (e4m3/e5m2) DPAS, e2m1 DPAS,
-and `XE_BDPAS_TT` — the block-scaled MX instruction, i.e. native mxfp8/mxfp4
-(`mma_xe.hpp`). int8×int4 mixed DPAS is removed on CRI ("Skip int8 x int4 for CRI as the
-dpas is removed").
+Source: `tmp/sycl-tla/include/cute/arch/mma_xe.hpp:230-300`
 
-**fp8 runs on Battlemage by emulation.** sycl-tla's `examples/08_bmg_gemm_f8` and PyTorch's
-`torch._scaled_mm` upconvert to fp16 and use the fp16 DPAS, and the result is bit-exact
-against an fp32-upcast reference. `Capabilities` lists fp8 under `emulated_dtypes`, and
-`validate-references` labels the result `[emulated: ... -- latency is not native]`: a
-latency measured here is the emulation sequence's, so it is not reportable as an fp8
-result. What the format still buys on this part is the bytes it moves, which `bytes_min`
-already accounts for.
+| Operand types declared | Where |
+| --- | --- |
+| tf32; bf16; fp16; int8 (u8/s8, either signedness in either position); int4 (u4/s4, likewise) | unguarded — every target |
+| fp8 (`bf8`, `hf8`) DPAS, `e2m1` DPAS, and `XE_BDPAS_TT`, the block-scaled MX instruction (native mxfp8/mxfp4) | inside `#if SYCL_INTEL_TARGET == 35` |
+| int8 × int4 mixed DPAS | inside that guard's `#else`, under the comment "Skip int8 x int4 for CRI as the dpas is removed" |
+
+Whether a dtype reaches hardware *on this device* is a query, not a lookup:
+
+```python
+caps = get_accelerator(dev).capabilities(dev)
+caps.is_native_dtype("float8_e4m3fn")   # False -> the fp8 path here is emulation
+caps.emulated_dtypes                    # correct results, not the format's throughput
+```
+
+Where `is_native_dtype` returns False for fp8, sycl-tla's `examples/08_bmg_gemm_f8` and
+PyTorch's `torch._scaled_mm` upconvert to fp16 and run the fp16 DPAS; the result is
+bit-exact against an fp32-upcast reference. `validate-references` labels such a run
+`[emulated: ... -- latency is not native]`, so the latency measured is the emulation
+sequence's and is not reportable as an fp8 result. What the format still buys is the bytes
+it moves, which `bytes_min` accounts for.
 
 When the source dtype has no DPAS it has to be converted to one that does, and both fp16
 and bf16 are available above. Which of the two the upconversion sequence costs least in is
@@ -69,17 +95,32 @@ a property of the sequence the compiler emits, not of the format: build the kern
 ways and benchmark. sycl-tla's own sequences are in
 `examples/cute/tutorial/xe_gemm.cpp`.
 
-### Where Intel's Xe2 GEMM tuning is
+### Which oneDNN jit-GEMM strategies a target can reach
 
-oneDNN's `kernel.db` carries no Xe2-native bf16 × bf16 strategies; bf16 falls back to the
-XeHPC/PVC table (`kernel_selector.cpp`). Xe2-specific entries are low-bit weights against
-f16 compute. Count them yourself when choosing a target — the hardware tag is the leading
-character (`gemmstone/kernel_catalog.hpp`: `'G'` = Xe2, `'F'` = XeHPC), and the two strings
-after `"gemm"` are the A and B precisions:
+Every entry in `kernel.db` carries a one-character hardware tag, and the selector walks a
+fallback chain when the target's own tag has no entry for the problem. A generation with
+few entries of its own therefore runs an older generation's strategies.
+
+Source: `tmp/oneDNN/src/gpu/intel/gemm/jit/include/gemmstone/kernel_catalog.hpp:75-82`, `tmp/oneDNN/src/gpu/intel/gemm/jit/selector/kernel_selector.cpp:289-296`
+
+| Tag | Generation | Falls back to |
+| --- | --- | --- |
+| `'C'` | Gen12LP | — |
+| `'E'` | XeHPG | — |
+| `'F'` | XeHPC | — |
+| `'G'` | Xe2 | `'F'` |
+| `'H'` | Xe3 | `'G'` |
+| `'I'` | Xe3p | `'H'` |
+
+Which precisions a tag has entries of its own for is a count off the db, not something to
+carry: the two strings after `"gemm"` are the A and B precisions. Set `TAG` to the row you
+are targeting and count, then repeat for the tag it falls back to — the difference is what
+that generation was actually tuned for.
 
 ```bash
 DB=tmp/oneDNN/src/gpu/intel/gemm/jit/selector/db/kernel.db
-grep -oE "^\{\{'G', \"gemm\", \{\"[A-Z0-9]+\", \"[A-Z0-9]+\"" "$DB" | sort | uniq -c | sort -rn
+TAG=G
+grep -oE "^\{\{'$TAG', \"gemm\", \{\"[A-Z0-9]+\", \"[A-Z0-9]+\"" "$DB" | sort | uniq -c | sort -rn
 ```
 
 ## 2D block copy
@@ -94,8 +135,10 @@ Hard limits (static-asserted in `cute/arch/copy_xe_2d.hpp`):
 - `Bits × Width ≤ 512` (one 64-byte row)
 - block count ∈ {1,2,4}, `Bits × Count ≤ 64`
 - element size ∈ {8,16,32,64}
-- VNNI only for 8/16-bit; transpose only for 32/64-bit — and on Xe2, transpose width ≤ 8
-  for d32, ≤ 4 for d64 (Xe3P+ doubles both)
+- VNNI only for 8/16-bit; transpose only for 32/64-bit, and the transpose width limit is
+  itself inside the target guard (`copy_xe_2d.hpp:140-147`): under `== 35`, d32 width ≤ 16
+  and d64 width ≤ 8 at height 8; on the `#else` arm, d32 width ≤ 8 and d64 width ≤ 4 at
+  height 8
 
 Address constraints: base pointer **64-byte aligned**; width and pitch multiples of 4 bytes;
 x-offset a multiple of 4 elements; width/height/pitch < 2²⁴.
@@ -153,9 +196,15 @@ work-items per work-group. Starting points to benchmark, not answers.
 | FMHA prefill hd128 | QK/PV `256×32×32` | 16 SGs | 2 |
 | FMHA decode | QK `1×512×64`, PV `1×32×512` | 8 SGs (split on KV) | 1 |
 
-Heuristics from `examples/cute/tutorial/xe_gemm.cpp`: K-tile is 2× the DPAS K unless A is
-K-major or B is N-major byte data, in which case 1×; use a 4×8 sub-group layout instead of
-8×4 when B is narrower than A.
+`choose_tiled_mma` derives the K-tile and the sub-group layout from the operand layouts
+and widths rather than from the case at hand:
+
+Source: `tmp/sycl-tla/examples/cute/tutorial/xe_gemm.cpp:199-214`
+
+| Choice | Condition in that function |
+| --- | --- |
+| K-tile `op.K` rather than `op.K*2` | `a_t` (A is K-major), or `byte` (widest operand at most 8 bits) and `b_n` (B is N-major) |
+| `SGLayout4x8` rather than `SGLayout8x4` | `sizeof_bits_v<TB> < sizeof_bits_v<TA>`, or `b_n` and B narrower than 8 bits |
 
 ## Schedulers
 
@@ -164,16 +213,26 @@ Xe has two: `KernelXe` (one output tile per WG, non-persistent) and
 `PersistentScheduler` or `StreamKScheduler`). `KernelXePtrArrayCooperative` handles
 grouped/pointer-array.
 
-**There is no Pingpong or warp-specialized schedule for Xe2.** Do not port one.
+Those three are the whole set — sycl-tla defines no Pingpong or warp-specialized Xe
+schedule, so there is none to port to. Re-establish with
+`grep -rho 'KernelXe[A-Za-z]*' tmp/sycl-tla/include | sort -u`
+(`include/cutlass/gemm/dispatch_policy.hpp:147-149`).
 
-On Intel, "sm_count" is XeCore count — `gpu_slices × gpu_subslices_per_slice`.
+`sm_count` on this backend is the Xe-core count, not an EU count. CUTLASS computes it from
+`gpu_slices × gpu_subslices_per_slice` (`include/cutlass/kernel_hardware_info.h:69-71`);
+PyTorch's own SM-count equivalent on XPU is `props.gpu_subslice_count`
+(`torch/_inductor/runtime/hints.py`, `multi_processor_count`), which reaches the capability
+record as `caps.extra["gpu_subslice_count"]`.
 
 Stream-K self-disables: it assigns stream-K units only when there is wave quantization
 *and* `k_tiles_per_output_tile > 8`. Reduction is deterministic (turnstile) by default.
 
 ## GRF mode
 
-Kernels launch with `sub_group_size<16>`; BMG examples add `grf_size<256>` (CRI uses 512).
+Kernels launch with `sub_group_size<16>`, and the examples set the register mode from the
+same target guard: `grf_size<512>` under `== 35`, `grf_size<256>` otherwise
+(`examples/12_xe20_moe_gemm_cute_interface/12_xe20_moe_gemm_cute_interface.cpp:324-329`,
+`benchmarks/flash_attention/benchmark_runner.hpp:907-914`).
 CUTLASS's generic `GemmUniversalAdapter` sets only the sub-group size, so for library GEMMs
 the register mode comes from the environment. Intel's own CI exports:
 

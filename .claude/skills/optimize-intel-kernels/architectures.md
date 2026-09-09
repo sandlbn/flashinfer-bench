@@ -25,19 +25,55 @@ regardless of what the device reports, and Triton overrides it to 16 anyway — 
 
 ## Parts
 
-| | Battlemage | Xe3.0 integrated | Crescent Island |
-| --- | --- | --- | --- |
-| Example | Arc B580 / B570 / Pro B50-B60 | Panther Lake, Wildcat Lake | — |
-| Device IP (`props.version`) | 20 | 30 | 35 |
-| `sycl_target` | `bmg` | none (SPIR-V JIT) | `cri` |
-| Baselines available | `vllm-xpu`, `sgl-kernel-xpu`, in-tree | `vllm-xpu`, in-tree | `sgl-kernel-xpu` (pre-silicon) |
-| Status | validated hardware | development only | pre-silicon |
+The per-part rows are data, not documentation. They live in `_PART_PROFILES`
+(`flashinfer_bench/device/xpu.py`), keyed by canonical device id, and the driver supplies
+the rest. Print them instead of reading a copy that drifts:
 
-Get the IP with `torch.xpu.get_device_properties(0).version`.
+```bash
+python -c "
+from flashinfer_bench.device.xpu import _PART_PROFILES
+for cid, prof in _PART_PROFILES.items():
+    e = prof.get('extra', {})
+    print(f\"{cid:30} target={str(prof.get('sycl_target')):5} ip={e.get('device_ip_version')} \"
+          f\"{e.get('architecture','')} {e.get('status','')}\")
+"
+```
 
-A part with no `sycl_target` compiles to SPIR-V and JITs at load. An integrated Xe3.0 part
-runs SYCL and Triton solutions and is a usable development machine, but cannot run
-`sgl-kernel-xpu`; do not draw performance conclusions on one.
+For the device in front of you, the record and the driver together:
+
+```bash
+python -c "
+import torch
+from flashinfer_bench.device import get_accelerator
+caps = get_accelerator('xpu:0').capabilities('xpu:0')
+props = torch.xpu.get_device_properties(0)
+print(caps.canonical_id, '| driver version', props.version,
+      '| ip', caps.extra.get('device_ip_version'),
+      '| target', caps.sycl_target,
+      '| integrated', caps.extra.get('is_integrated_gpu'),
+      '|', caps.extra.get('profile', 'has a _PART_PROFILES row'))
+"
+```
+
+`props.version` is the driver's device-IP string; its leading component is the IP version
+that `_PART_PROFILES` records as `device_ip_version`. A `sycl_target` of `None` means no
+AOT triple is known for the part: solutions compile to SPIR-V and JIT at load, which is how
+a device runs before its triple is published. `caps.extra["profile"] == "driver-reported"`
+means the part has no row at all and is running on conservative defaults — see "Adding a
+part".
+
+Which baselines exist is a property of this box, not of the silicon:
+`flashinfer-bench providers list` prints each provider, whether it is installed, its
+version and where it came from, and `flashinfer-bench providers verify --local
+tmp/flashinfer-trace` calls each registered kernel once so a provider that is present but
+not built for this backend fails there rather than inside a benchmark.
+
+An integrated part shares the package power budget with the CPU. What that costs a
+measurement is recorded next to `_RECOMMENDED_WARMUP_RUNS` in
+`flashinfer_bench/device/xpu.py`: no clock ramp to warm up, but sporadic excursions while
+power shifts between CPU and GPU that no amount of warmup removes. Read
+`caps.extra["is_integrated_gpu"]` rather than inferring it from the device name, and report
+the spread `scripts/kernel_trials.py benchmark` gives alongside the median.
 
 ### Adding a part
 
