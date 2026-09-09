@@ -136,9 +136,40 @@ def benchmark(
     base_model, inputs = _load_model(baseline_path)
     cand_model, _ = _load_model(candidate_path)
 
+    # The kernels worth tuning are destination-passing: they return nothing useful and
+    # write into an argument. Running both arms over one set of tensors therefore compares
+    # a buffer with itself -- the candidate reads what the baseline just wrote, both return
+    # the same object, and the gate reports zero error no matter what the candidate
+    # computed. Each arm gets its own copies, and the comparison includes whatever the op
+    # wrote into its arguments.
+    def _fresh():
+        return [a.clone() if isinstance(a, torch.Tensor) else a for a in inputs]
+
+    base_args, cand_args = _fresh(), _fresh()
     with torch.no_grad():
-        expected = base_model(*inputs)
-        actual = cand_model(*inputs)
+        expected = base_model(*base_args)
+        actual = cand_model(*cand_args)
+
+    if expected is None or (
+        isinstance(expected, torch.Tensor)
+        and expected.data_ptr() in {a.data_ptr() for a in base_args if isinstance(a, torch.Tensor)}
+    ):
+        # Its result is in the arguments; compare those instead of the return value.
+        for i, (b, c) in enumerate(zip(base_args, cand_args)):
+            if not isinstance(b, torch.Tensor):
+                continue
+            if not torch.allclose(b.float(), c.float(), atol=atol, rtol=rtol):
+                err = (b.float() - c.float()).abs().max().item()
+                return {
+                    "correctness": "fail",
+                    "reason": f"argument {i} differs after the call (max abs {err:.5g})",
+                }
+        expected = torch.stack(
+            [b.float().flatten() for b in base_args if isinstance(b, torch.Tensor)]
+        )
+        actual = torch.stack(
+            [c.float().flatten() for c in cand_args if isinstance(c, torch.Tensor)]
+        )
 
     if isinstance(expected, torch.Tensor) != isinstance(actual, torch.Tensor):
         return {"correctness": "fail", "reason": "candidate returned a different type"}

@@ -53,15 +53,30 @@ def mk(a):
     return a
 
 
-# A custom op only exists in a process that imported the package registering it. The
-# parent hands over the modules it had loaded rather than this script guessing a name.
-for _m in json.loads(sys.argv[4]):
-    try:
-        __import__(_m)
-    except Exception:
-        pass
-
 ns, name = op.split("::")
+
+
+def _resolves():
+    try:
+        getattr(getattr(torch.ops, ns), name)
+        return True
+    except Exception:
+        return False
+
+
+# A custom op only exists in a process that imported the package registering it, and the
+# parent hands over what it loaded rather than this script guessing a name. Import them
+# one at a time and stop as soon as the op appears: importing a whole serving stack to
+# reach an extension module costs more than the probe's own time budget, and a probe that
+# times out reports no kernels, which reads as "this op has no share".
+if not _resolves():
+    for _m in sorted(json.loads(sys.argv[4]), key=lambda m: (m.count("."), len(m)), reverse=True):
+        try:
+            __import__(_m)
+        except Exception:
+            continue
+        if _resolves():
+            break
 dev = sys.argv[3].split(":")[0]
 from torch.autograd import DeviceType
 from torch.profiler import ProfilerActivity, profile
@@ -136,7 +151,7 @@ def probe_library(op: str, argspec: List, device: str) -> Tuple[List[str], List[
             ],
             capture_output=True,
             text=True,
-            timeout=180,
+            timeout=420,
             env=env,
         )
     except (subprocess.TimeoutExpired, OSError):
@@ -431,6 +446,7 @@ def report(
     if share_of is not None and launched:
         pct = share_of(launched)
         if pct is not None:
+            share_pct = pct
             print(
                 f"  share         : {pct:.2f}% of device time (kernels: {', '.join(launched)[:60]})"
             )
