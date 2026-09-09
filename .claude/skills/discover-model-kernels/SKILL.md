@@ -111,6 +111,36 @@ and a replacement that returns a fresh tensor is a different operation however f
 These bundles are gitignored: they are reproducible from the scripts, and vendoring a
 provider's source into this repo is not intended.
 
+## Step 2b: Ask what could be fused, not just what could be replaced
+
+Routing each op on its own reaches the same dead end every time on this hardware: the GEMM
+is already a tuned library, and each elementwise kernel is too small to repay what
+substituting it costs. Folding the elementwise work into the GEMM's *epilogue* escapes
+both — the operand is still in registers, so the saving is a launch and a round trip
+through memory, and the fused GEMM replaces the call the stack already makes, so no
+substitution is paid at all.
+
+```bash
+python scripts/fusion_candidates.py --report tools/kernel-harness/auto/discovered.json
+```
+
+A fusion is a property of the **edge** between two ops, which no per-op tally can supply:
+discovery records producer→consumer edges, and only pairs the model actually ran are
+proposed. The preset list is read from Xe-Fuse's own generator (`--list-presets`) rather
+than copied, so the two cannot drift.
+
+Two things this gets right that a table of "norm fuses into GEMM" would not:
+
+- **A view between two ops is not a gap.** Discovery carries the real producer through
+  reshapes, or every GEMM→activation edge would be recorded as `view→activation`.
+- **A real op between them is a gap.** If the model splits the projection before norming
+  it — Qwen3 norms each head, so the edge is `split_with_sizes→rms_norm`, not
+  `linear→rms_norm` — the epilogue cannot see that operand and the preset does not apply.
+  The same model family without per-head norms would match, which is precisely why this is
+  measured per model rather than asserted per architecture.
+
+Report the reachable share, not a ratio: a fusion is worth the elementwise time it absorbs.
+
 ## Step 3: Bound it before writing anything
 
 Do not go from "found a kernel" to "write a faster one". A substitution costs a fixed
@@ -161,6 +191,8 @@ nobody deploys.
 
 - `scripts/harness_from_model.py` — discovery and harness emission, with verification
 - `scripts/pull_kernel_source.py` — op to kernel, from the dispatcher
+- `scripts/fusion_candidates.py` — which GEMM epilogues this model's edges would support
+- `../optimize-intel-kernels/xe-fuse.md` — build flags and the operand-layout traps
 - `scripts/kernel_trials.py` — the optimization loop
 - `../route-kernel-work/PLAN.md` — choosing among candidates by measured ceiling
 - `/find-kernel-gaps` — the complementary question: time no definition covers

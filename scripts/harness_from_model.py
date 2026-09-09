@@ -34,6 +34,13 @@ RECORDS: Dict[Tuple[str, tuple], Dict[str, Any]] = {}
 # compiled from.
 TRITON: Dict[str, Dict[str, Any]] = {}
 
+# Which op consumed which op's output. Fusing an elementwise op into a GEMM's epilogue is
+# only meaningful if the model actually runs them back to back, and no per-op tally can say
+# whether it does -- that is a property of the edge, not of either endpoint.
+EDGES: Dict[Tuple[str, str], int] = {}
+_PRODUCER: "collections.OrderedDict[int, Tuple[str, tuple, str]]" = collections.OrderedDict()
+_PRODUCER_MAX = 4096
+
 # Ops that are plumbing rather than arithmetic: harnessing them measures the allocator or
 # the copy engine, not a kernel anyone would optimize. Matched as `namespace.op` against
 # `str(func)`, which a TorchDispatchMode reports as `aten.view.default`.
@@ -183,8 +190,47 @@ def record_mode():
 
     class Recorder(TorchDispatchMode):
         def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+            import torch
+
+            name_pre = str(func)
+            # Read the edge before running: an in-place op overwrites the buffer it
+            # consumed, so after the call the producer's output is already gone.
+            for a in args:
+                if isinstance(a, torch.Tensor):
+                    prev = _PRODUCER.get(a.data_ptr())
+                    # A freed allocation's address gets reused, which would invent an edge
+                    # between unrelated ops. Requiring the shape and dtype to match too
+                    # makes a false edge unlikely rather than merely uncommon.
+                    if prev and prev[1] == tuple(a.shape) and prev[2] == str(a.dtype):
+                        key = (prev[0], name_pre)
+                        EDGES[key] = EDGES.get(key, 0) + 1
+
             out = func(*args, **(kwargs or {}))
             name = str(func)
+
+            # A view or a reshape computes nothing; it renames what its input already
+            # holds. Recording it as the producer hides the op that computed the data, and
+            # a GEMM feeding an activation -- the edge a fusion needs -- is exactly the
+            # pair a view tends to sit between. Carry the real producer through.
+            carried = None
+            if ".".join(name.split(".")[:2]) in _SKIP_OPS:
+                for a in args:
+                    if isinstance(a, torch.Tensor):
+                        carried = _PRODUCER.get(a.data_ptr())
+                        if carried:
+                            break
+
+            for t in out if isinstance(out, (list, tuple)) else [out]:
+                if isinstance(t, torch.Tensor):
+                    origin = carried[0] if carried else name
+                    _PRODUCER[t.data_ptr()] = (origin, tuple(t.shape), str(t.dtype))
+                    if len(_PRODUCER) > _PRODUCER_MAX:
+                        _PRODUCER.popitem(last=False)
+            # Destination-passing ops return nothing; their result is in an argument.
+            if out is None:
+                for a in args:
+                    if isinstance(a, torch.Tensor):
+                        _PRODUCER[a.data_ptr()] = (name, tuple(a.shape), str(a.dtype))
             if ".".join(name.split(".")[:2]) not in _SKIP_OPS:
                 sig = tuple(_describe(a) for a in args)
                 key = (name, sig)
@@ -329,6 +375,8 @@ def main() -> None:
 
     RECORDS.clear()
     TRITON.clear()
+    EDGES.clear()
+    _PRODUCER.clear()
     restore_triton = observe_triton()
     with record_mode():
         llm.generate(
@@ -388,6 +436,13 @@ def main() -> None:
             )
         ),
         "triton": sorted(TRITON.values(), key=lambda t: -t["calls"]),
+        # producer -> consumer, so a fusion route can ask whether the pair it needs is one
+        # this model actually runs.
+        "edges": [
+            {"producer": a, "consumer": b, "count": n}
+            for (a, b), n in sorted(EDGES.items(), key=lambda kv: -kv[1])
+            if n >= 4
+        ],
     }
     (out_dir / "discovered.json").write_text(json.dumps(report, indent=2))
     print(f"  full op list -> {out_dir / 'discovered.json'}\n")
