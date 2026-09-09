@@ -40,14 +40,20 @@ same shape the kernel is obliged to touch, and compare against that. vLLM's unif
 sustains 164 GB/s against a ~456 GB/s peak, which reads as a 2.6x opportunity; a bare read of
 one KV-head slice of its `[pages, page_size, kv_heads, head_dim]` cache sustains 167 GB/s.
 Note the trap in *that* measurement too: a PyTorch strided read is itself only one
-implementation, and Intel's Triton can lower `tl.make_block_ptr` to 2D block I/O that beats
-it. Treat a strided-read ceiling as a lower bound on what is achievable, not an upper one.
+implementation, so it is a **lower bound on what is achievable, not a ceiling**. Acting on it
+as a ceiling was wrong here -- a hand-written kernel later reached 1.35x over the same
+baseline, taking it from 164 GB/s to 221 GB/s. Never conclude "already optimal" from one
+implementation agreeing with another.
 
 ## Directions with a measured outcome
 
 | Direction | Outcome |
 | --- | --- |
 | Launch-parameter sweep (block size, warps, stages, tile) on vLLM's unified attention | **1.00x** — vLLM's defaults already best; `TILE=64` 0.23x, 16 warps 0.43x |
+| Writing a paged decode kernel from scratch, one program per (seq, kv_head) | **1.27x** over vLLM's unified attention |
+| Adding split-K over the sequence with a combine pass, 4 chunks | **1.35x** — the best found in 9 trials |
+| Tile and warp geometry on *our own* decode kernel | exhausted: TILE 16 → 1.10x, 64 → 0.71x, 8 warps → 0.48x, against TILE 32 / 4 warps |
+| More split-K chunks | 2 → 1.29x, 4 → **1.35x**, 8 → 1.33x, 16 → 1.28x; the combine pass outgrows the parallelism |
 | Fusing SwiGLU into a GEMM epilogue via oneDNN post-ops | **1.09x–1.31x** over vLLM's merged GEMM + fused activation |
 | Splitting a merged gate/up projection into two GEMMs | **free** (0.96x of one merged GEMM at M=64) — not the compromise it looks like |
 | Hand-writing a plain GEMM against oneDNN | do not; oneDNN is already the path `F.linear` takes |
