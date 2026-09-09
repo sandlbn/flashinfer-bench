@@ -381,6 +381,24 @@ class Gate:
         }
 
 
+def _measured_with() -> Dict[str, str]:
+    """What produced the device times in this file.
+
+    A ceiling is comparable only with a trial measured under the same stack. Two
+    interpreters on one box can carry different builds of the accelerator library, and the
+    same operation then runs at a different speed for reasons unrelated to any change under
+    test -- so a consumer has to be able to check rather than assume.
+    """
+    out = {"executable": sys.executable}
+    try:
+        import torch
+
+        out["torch"] = torch.__version__
+    except Exception:
+        pass
+    return out
+
+
 def _here() -> str:
     return f"{_FILE}:{sys._getframe(1).f_lineno}"
 
@@ -1511,6 +1529,37 @@ def load_bound(path: Any) -> Dict[str, Any]:
     return data
 
 
+def check_measured_with(bound: Dict[str, Any]) -> Optional[str]:
+    """Whether this interpreter's stack matches the one the routing's times came from.
+
+    Returns None when they agree or when the routing recorded nothing to compare, and a
+    description of the difference otherwise. A ceiling priced from a device time measured
+    under a different build of the accelerator library says nothing about what a trial run
+    here can reach: the two numbers are of the same operation on the same part, and still
+    are not comparable.
+    """
+    recorded = bound.get("measured_with") or {}
+    if not recorded:
+        return None
+    theirs = recorded.get("torch")
+    if not theirs:
+        return None
+    try:
+        import torch
+
+        ours = torch.__version__
+    except Exception:
+        return None
+    if ours == theirs:
+        return None
+    return (
+        f"the routing measured its device times under torch {theirs} "
+        f"({recorded.get('executable', 'unrecorded interpreter')}); this interpreter is "
+        f"torch {ours}. Ceilings and headroom from that run are not comparable with "
+        f"measurements taken here."
+    )
+
+
 def check_bound_provenance(bound: Dict[str, Any], report: Any = None) -> pathlib.Path:
     """Refuse routing whose discovery report has moved, changed or gone since it was made.
 
@@ -2295,6 +2344,7 @@ def write_outputs(
                 "report": report_path,
                 "report_sha1": report_sha1,
                 "model": model,
+                "measured_with": _measured_with(),
                 "calibration": cal_dict,
                 "cutoff": cutoff,
                 "candidates": [c.metrics() for c in cands],

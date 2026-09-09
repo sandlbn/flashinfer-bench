@@ -56,7 +56,7 @@ Do each of these and stop on the row that fails, naming it.
 | --- | --- | --- |
 | Interpreter | `source .venv/bin/activate`; for a harness whose `_op()` raises `ImportError`, the message names the interpreter the harness was recorded under -- activate that one instead. Never `uv run` or `uv pip`: either replaces this box's XPU torch | the harness imports and `python <harness>` runs |
 | Routing still holds | `python scripts/kernel_trials.py init <series> <baseline.py> --bound <dir> --mechanism <mechanism>` (the series is opened here; see the next section for the baseline) | it prints `routed:` with the ceiling and worth. A block ending `VERDICT: ROUTING_REJECTED` or `VERDICT: STALE_INPUT` is final: report the `GATE` and `ARITHMETIC` it names and stop -- you do not measure a pair the routing priced out, and you do not re-run the routing to change the answer |
-| Device idle | `fuser -v /dev/dri/renderD*` | no other compute process (another `python`) holds the render node; one benchmark at a time on this machine |
+| Device idle | `fuser -v /dev/dri/renderD* 2>&1 \| grep python` | no other compute process holds the render node; one benchmark at a time on this machine. A desktop session holds it permanently -- a compositor, a browser, an editor -- which is expected and is not a reason to stop; it is why a block occasionally returns an outlier round, so re-measure a surprising number before believing it |
 | Power profile | `powerprofilesctl get` | `performance` |
 | Builder, when the language will be SYCL | `python -c "from flashinfer_bench.compile.builders import SyclBuilder; print(SyclBuilder.is_available())"` | `True` |
 | Dtype is native | the record's `native` | `true`; an emulated dtype runs at emulated throughput and its ratio is not a result -- report and stop |
@@ -131,13 +131,14 @@ open a second series on it and benchmark `best` against it:
 
 ```bash
 python scripts/kernel_trials.py init <series>.control <series dir>/control.py
+python scripts/kernel_trials.py save <series>.control <best trial file> --strategy "best against the control"
 python scripts/kernel_trials.py benchmark <series>.control <best trial file> --trial t0
 ```
 
 When the two builds cannot share a process (two builds of one `torch.ops` symbol), use
 `python scripts/kernel_trials.py ab <control.py> --harness-b <best.py>` instead; it judges by
 the same rule and prints the same keys. The kernel's own contribution is the verdict of this
-comparison, and the report carries both numbers. If the control alone is a `WIN` against
+comparison, and the report carries both numbers. Two things differ from `benchmark` and will otherwise cost you a block: `ab` ties to a candidate only when both files record `OP`, so a variant built on a shared helper module cannot be checked against the routing and must run without `--bound` (it then prints `ROUTING: UNCHECKED`, which is expected, not a failure); and its round flags are not `benchmark`'s. On a `NOISE` verdict from `ab`, compare the reported `SPREAD_PCT` against the difference you are trying to resolve: where the spread exceeds it, the run had too few observations to decide, so raise its rounds and calls and measure again before reading anything into the number. If the control alone is a `WIN` against
 the baseline, the finding is about the call path; say so rather than crediting the kernel.
 
 ## One iteration
@@ -149,7 +150,7 @@ plateau counter -- because `status` shows speedups but not spills, and the repor
 from the ledger.
 
 **Reason.** Inputs: the previous block's keys, the regime and its `regime_test`, the
-bundle, and for a library op the `primitive,exec` line under `ONEDNN_VERBOSE=1`. Write the
+bundle, and for a library op the `primitive,exec` line under the library's verbose logging. Running the operation under a verbosity environment variable to read what the library selected is **not** timing and is not covered by the rule against your own measurement scripts -- you are reading a dispatch decision, not a duration. Use the level that actually prints the rejection and selection lines; the lowest level prints neither, and `PROVENANCE.md` in the bundle records the invocation that worked. Write the
 hypothesis as the strategy string, in a fixed form so the tree can be read back:
 
 ```
@@ -188,7 +189,7 @@ spill state decide the next parent; nothing else does.
 | `VERDICT: NOISE` | unchanged | the measurement could not distinguish the arms. Re-run `benchmark --trial <id>` once with `--rounds` and `--calls` both doubled (or, when the problem size is a free parameter of the harness, a larger problem); if it is still `NOISE`, record it as no result and treat it as a `LOSS` for branching |
 | `VERDICT: LOSS` | `best` (from `status`) | a regression is not continued from; the next hypothesis names a different lever than the one that lost, not a smaller dose of it |
 | `VERDICT: WIN`, `SPILLS: none` | this trial | continue from here; the plateau counter resets |
-| `VERDICT: WIN`, `SPILLS: unknown` | this trial | nothing checked spill (no compiler ran in view, or a SPIR-V build the driver finishes at first launch). Before continuing, read `Spill Memory Per Thread` from unitrace's Kernel Properties as the section on checking the failure mode for your language in `.claude/skills/optimize-intel-kernels/SKILL.md` shows; treat the answer as the `SPILLS` key |
+| `VERDICT: WIN`, `SPILLS: unknown` | this trial | nothing checked spill (no compiler ran in view, or a SPIR-V build the driver finishes at first launch). If this trial compiled no code of yours -- a call-shape change, a library descriptor, a pure framework call -- nothing can spill and `unknown` is the correct answer; continue. Otherwise read `Spill Memory Per Thread` from unitrace as the section on checking the failure mode for your language in `.claude/skills/optimize-intel-kernels/SKILL.md` shows, and treat the answer as the `SPILLS` key. If that tool is not available here, say so in the ledger and continue -- an absent instrument is a gap to report, not a reason to stop |
 | any verdict with `SPILLS: <n>` | this trial | the timing beneath it is invalid and this outranks whatever you were about to try: the next hypothesis is `regime=spill-limited` (a smaller tile, fewer live values, or the GRF mode -- one per trial), and the trial's speedup is not written to the ledger as a result. `best` in the tree may still be this trial because the tree ranks by speedup; you do not finalize a spilling `best` |
 | `ROUTING: REJECTED` or `ROUTING: STALE` | -- | the routing was recomputed or discovery re-run under you; stop and report the `GATE` and `ARITHMETIC` |
 

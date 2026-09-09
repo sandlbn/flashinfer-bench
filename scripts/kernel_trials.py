@@ -656,12 +656,31 @@ def _routing_or_exit(bound: str, mechanism: str, harness: str) -> Dict[str, Any]
     """
     bc = _bound_module()
     try:
-        return bc.routed_from_harness(bound, mechanism, harness)
+        row = bc.routed_from_harness(bound, mechanism, harness)
     except bc.RoutingRefused as exc:
         _report(**exc.fields)
         print(f"  {exc.why}")
         print("DONE")
         raise SystemExit(1)
+    # A row can be genuine and still be priced against a device time this interpreter
+    # cannot reproduce. Two interpreters here carry different builds of the accelerator
+    # library, so a ceiling measured under one is not a target under the other -- and a
+    # series chasing it looks like it is failing when it is simply aimed at the wrong
+    # number. Warn rather than refuse: the trial's own paired measurement is still valid,
+    # it is only the comparison against the ceiling that is void.
+    try:
+        drift = bc.check_measured_with(bc.load_bound(bound))
+    except Exception:  # a routing this old records nothing to compare; not a failure
+        drift = None
+    if drift:
+        _report(routing_toolchain="DIFFERS")
+        print(f"  NOTE: {drift}")
+        print(
+            "  The series is still measured correctly against its own baseline; treat "
+            "ceiling_us as unpriced here, and re-run the routing under this interpreter "
+            "to compare against it."
+        )
+    return row
 
 
 def _routing_flags(args) -> Optional[Dict[str, Any]]:
@@ -861,10 +880,82 @@ def cmd_finalize(args) -> None:
             )
         print("DONE")
         raise SystemExit(1)
-    pathlib.Path(args.output).parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(best["file"], args.output)
-    _report(**fields, finalize="OK", output=args.output)
+    out = pathlib.Path(args.output)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(best["file"], out)
+    failure = _import_fails(out)
+    if failure:
+        # A trial file may import a helper that sits beside it in the series directory.
+        # Copying it verbatim to a different directory leaves those imports pointing at
+        # the wrong place, and the promoted winner then fails to load -- the one file in
+        # the series that has to work. Carry the directory it was written against.
+        series_dir = pathlib.Path(best["file"]).resolve().parent
+        _prepend_search_path(out, series_dir, series_dir.parent)
+        still = _import_fails(out)
+        if still:
+            out.unlink()
+            _report(**fields, finalize="REFUSED", import_error=still)
+            print(
+                f"  {best['id']} does not load from {out.parent} even with the directories "
+                f"it was written against on the path: {still}. Nothing was written; make "
+                "the trial file self-contained and re-run finalize."
+            )
+            print("DONE")
+            raise SystemExit(1)
+    _report(**fields, finalize="OK", output=str(out))
     print("DONE")
+
+
+def _import_fails(path: pathlib.Path) -> Optional[str]:
+    """Import `path` in a fresh interpreter; return the failure, or None if it loaded.
+
+    Asking the interpreter is the only reliable test. A trial file may reach for helpers
+    through a bootstrap of its own, at any depth, so no static reading of its imports
+    establishes whether it will load from a different directory.
+    """
+    probe = (
+        "import importlib.util as u,sys;"
+        "s=u.spec_from_file_location('promoted',sys.argv[1]);"
+        "m=u.module_from_spec(s);s.loader.exec_module(m)"
+    )
+    r = subprocess.run(
+        [sys.executable, "-c", probe, str(path)], capture_output=True, text=True, timeout=300
+    )
+    if r.returncode == 0:
+        return None
+    err = r.stderr or ""
+    # Distinguish "cannot be found" from "refused to configure itself". Only the first is
+    # finalize's business: it guarantees the promoted file is reachable from where it was
+    # written to, not that a caller has supplied its settings. A file that raises its own
+    # configuration error has already loaded far enough to run that check.
+    if not any(k in err for k in ("ModuleNotFoundError", "ImportError")):
+        return None
+    last = [ln for ln in err.strip().splitlines() if ln.strip()]
+    return last[-1] if last else f"exit {r.returncode}"
+
+
+def _prepend_search_path(path: pathlib.Path, *origins: pathlib.Path) -> None:
+    """Make `path` import what it imported where it was written, without naming a machine.
+
+    Each inserted directory is derived from the file's own location at run time, so the
+    promoted file stays valid in any checkout rather than carrying one box's layout.
+    """
+    rels = []
+    for origin in origins:
+        try:
+            rels.append(os.path.relpath(origin, path.parent))
+        except ValueError:
+            continue
+    if not rels:
+        return
+    header = (
+        "# Added by kernel_trials finalize: this trial imported helpers from the series\n"
+        "# directory it was written in. Resolved relative to this file, never absolute.\n"
+        "import pathlib as _p, sys as _s\n"
+        f"for _r in {rels!r}:\n"
+        "    _s.path.insert(0, str((_p.Path(__file__).resolve().parent / _r).resolve()))\n"
+    )
+    path.write_text(header + path.read_text())
 
 
 # --------------------------------------------------------------------------- ab
