@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import pathlib
 import statistics
 import sys
@@ -213,6 +214,34 @@ def benchmark(
     }
 
 
+_SPILL_RE = re.compile(r"spilled around (\d+)|Spill Memory Per Thread\s*:?\s*(\d+)")
+
+
+def _spill_from(text: str) -> Optional[int]:
+    """Register spill as the compiler reported it, or None if it said nothing.
+
+    The build log already knows. Reading it here means every trial is checked for free,
+    instead of spill being something you discover later with a profiler after wondering why
+    a correct kernel is many times too slow.
+    """
+    m = _SPILL_RE.search(text or "")
+    if not m:
+        return None
+    return int(m.group(1) or m.group(2))
+
+
+def _report(**fields: object) -> None:
+    """Emit the machine-readable contract a driving agent parses.
+
+    One key per line, fixed names, no prose. An agent looping over this reads the keys and
+    decides; it never has to interpret a sentence, and a changed adjective cannot change
+    what it concludes.
+    """
+    for key, value in fields.items():
+        if value is not None:
+            print(f"{key.upper()}: {value}")
+
+
 # --------------------------------------------------------------------------- commands
 
 
@@ -240,7 +269,20 @@ def cmd_save(args) -> None:
 
 def cmd_benchmark(args) -> None:
     data = _load(args.name)
-    result = benchmark(data["baseline"], args.file, args.rounds, args.calls, args.atol, args.rtol)
+    # A build or load failure is not an error to report and stop on -- it is the next input
+    # to the loop. Emit it in the contract, with the compiler's own diagnostics, so the
+    # agent's next iteration is a fix rather than a guess.
+    try:
+        result = benchmark(
+            data["baseline"], args.file, args.rounds, args.calls, args.atol, args.rtol
+        )
+    except Exception as exc:
+        text = f"{type(exc).__name__}: {exc}"
+        _report(build="FAILED", spills=_spill_from(text) or "unknown", verdict="BUILD_FAILED")
+        print("--- build/load diagnostics ---")
+        print(text)
+        print("DONE")
+        raise SystemExit(1)
     if args.trial:
         for trial in data["trials"]:
             if trial["id"] == args.trial:
@@ -250,28 +292,49 @@ def cmd_benchmark(args) -> None:
             raise SystemExit(f"no trial {args.trial!r} in {args.name}")
         _save_store(args.name, data)
 
+    spills = _spill_from(result.get("build_log", ""))
     if result["correctness"] != "pass":
-        print(f"  INCORRECT: {result['reason']}")
+        # Correctness is reported before any timing, and no timing is reported at all.
+        # A number attached to a wrong kernel is the one output that can waste a whole
+        # series, because it looks like progress.
+        _report(
+            build="OK",
+            spills="none" if spills in (0, None) else spills,
+            correct="FAILED",
+            reason=result["reason"],
+            verdict="INCORRECT",
+        )
+        print("DONE")
         raise SystemExit(1)
-    print(f"  correct (max abs error {result['max_abs_error']:.5g})")
-    print(f"  baseline  {result['baseline_us']:9.2f}us")
-    print(
-        f"  candidate {result['candidate_us']:9.2f}us   {result['speedup']:.2f}x"
-        f"   spread {result['spread'] * 100:.1f}%"
+
+    gain = result["speedup"] - 1
+    verdict = "NOISE" if abs(gain) < result["spread"] else ("WIN" if gain > 0 else "LOSS")
+    _report(
+        build="OK",
+        spills="none" if spills in (0, None) else spills,
+        correct="OK",
+        max_abs_error=f"{result['max_abs_error']:.5g}",
+        baseline_us=f"{result['baseline_us']:.2f}",
+        candidate_us=f"{result['candidate_us']:.2f}",
+        speedup=f"{result['speedup']:.3f}",
+        spread_pct=f"{result['spread'] * 100:.1f}",
+        verdict=verdict,
     )
+    if spills:
+        print(
+            "  NOTE: the compiler spilled registers. Spill produces a correct kernel that "
+            "is many times too slow, so fix it before reading the timing above."
+        )
     # Only a *difference* smaller than the scatter is unmeasured. Comparing the signed gain
     # against the spread reported a gross regression as "inside noise", which is the opposite
     # of what the check is for.
-    if abs(result["speedup"] - 1) < result["spread"]:
+    if verdict == "NOISE":
         print(
             "  NOTE: the difference is inside the candidate's own run-to-run spread "
             f"({result['spread'] * 100:.1f}%); raise --rounds or --calls before believing "
             "it in either direction."
         )
-        print(
-            "  NOTE: the gain is inside the candidate's own run-to-run spread; "
-            "raise --rounds or --calls before believing it."
-        )
+    print("DONE")
 
 
 def _best(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
